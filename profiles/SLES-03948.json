@@ -1,0 +1,65 @@
+{
+  "disc_bytes": 548427600,
+  "disc_sectors": 233175,
+  "disc_sha256": "9ef0d0ba5e42b838bd8312ecfe4071b09c44bc08ee896f6b76f913a41fe4b835",
+  "files": [
+    {
+      "path": "DATA/SU.MRG;1",
+      "lba": 954,
+      "iso_size": 3651584
+    },
+    {
+      "path": "DATA/SD_SE.DAT;1",
+      "lba": 2737,
+      "iso_size": 1521664
+    },
+    {
+      "path": "DATA/SD_BGM.DAT;1",
+      "lba": 3480,
+      "iso_size": 14675968
+    },
+    {
+      "path": "DATA/WA_MRG.MRG;1",
+      "lba": 10646,
+      "iso_size": 41981952
+    },
+    {
+      "path": "DATA/MODEL.MRG;1",
+      "lba": 31145,
+      "iso_size": 351019008
+    },
+    {
+      "path": "DATA/MASTER.XA;1",
+      "lba": 202541,
+      "iso_size": 5742592
+    },
+    {
+      "path": "DATA/MOVIE.STR;1",
+      "lba": 205345,
+      "iso_size": 56688640
+    },
+    {
+      "path": "SLES_039.48;1",
+      "lba": 25,
+      "iso_size": 1902592
+    },
+    {
+      "path": "SYSTEM.CNF;1",
+      "lba": 24,
+      "iso_size": 68
+    }
+  ],
+  "boot": "SLES_039.48;1",
+  "exe_sha256": "57ecdfb9a9e1faf8b342fe7c7304c23723810861f3ab2fa3bef9eb27b5146b44",
+  "header": {
+    "pc": 2147559628,
+    "gp": 0,
+    "load_address": 2147549184,
+    "payload_size": 1900544,
+    "bss_address": 0,
+    "bss_size": 0,
+    "stack_base": 2149580784,
+    "stack_offset": 0
+  },
+  "payload_sha256": "4815b476ff75a6bf61c75a4bd45e18ec2baf1eb0bd1cb78abf9d165be7fc239c"
+}

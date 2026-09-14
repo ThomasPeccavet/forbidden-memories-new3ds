@@ -1,0 +1,27 @@
+# Local disc, extracted content and generated reverse-engineering output
+/disc/
+/work/
+/analysis/
+/generated/
+*.bin
+*.cue
+*.iso
+*.chd
+*.exe
+*.EXE
+*.asm
+SLES_*
+SLUS_*
+*.MRG
+*.DAT
+*.XA
+*.STR
+*.gpr
+*.rep/
+*.3dsx
+*.cia
+*.3ds
+*.elf
+*.o
+__pycache__/
+.venv/
