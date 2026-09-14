@@ -1,0 +1,22 @@
+/* Analysis pseudo-C, not buildable source. */
+
+void FUN_80181f88(void)
+
+{
+  *DAT_801847f0 = DAT_801847ec;
+  *DAT_801847fc = DAT_801847f8;
+  *(bool *)DAT_80184804 = DAT_801847ea != '\x01';
+  FUN_80040690(DAT_801847cc);
+  DAT_801847cc = 0;
+  FUN_80040690(DAT_801847d0);
+  DAT_801847d0 = 0;
+  FUN_80040690(DAT_801847dc);
+  DAT_801847dc = 0;
+  FUN_80040690(DAT_801847e0);
+  DAT_801847e0 = 0;
+  FUN_80040690(DAT_801847e4);
+  DAT_801847e4 = 0;
+  DAT_8009c898 = 0;
+  return;
+}
+

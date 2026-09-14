@@ -1,0 +1,20 @@
+{
+  "payload_sha256": "4815b476ff75a6bf61c75a4bd45e18ec2baf1eb0bd1cb78abf9d165be7fc239c",
+  "runs": [
+    {
+      "variant": 0,
+      "candidate_sha256": "50cb0bc724960a22d586fc38fc6d49cfcf4884a341cff463edbb9850bada5a40",
+      "exit_code": 0,
+      "export_completed": true,
+      "summary": "functions=1582\nfailed=1\nOnly recognized functions; overlays and indirect calls may be missing.\n"
+    },
+    {
+      "variant": 1,
+      "candidate_sha256": "afc3703f8a57196d54b6a15bd4a96679aef83ad7382c892d94fac11e809410f0",
+      "exit_code": 0,
+      "export_completed": true,
+      "summary": "functions=1582\nfailed=1\nOnly recognized functions; overlays and indirect calls may be missing.\n"
+    }
+  ],
+  "warning": "Synthetic static snapshots, not captured runtime RAM. Other overlays absent."
+}
