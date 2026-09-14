@@ -1,0 +1,3 @@
+functions=1546
+failed=4
+Only recognized functions; overlays and indirect calls may be missing.
