@@ -47,7 +47,7 @@ def main():
             return read_bytes(exe["lba"], 2048 + offset, count)
         pointers = {}
         for addr in list(range(0x80010000, 0x80010034, 4)) + list(range(0x800101d8, 0x800101ec, 4)):
-            pointers[f"{addr:08x}"] = f"{struct.unpack("<I", memory(addr, 4))[0]:08x}"
+            pointers[f"{addr:08x}"] = format(struct.unpack("<I", memory(addr, 4))[0], "08x")
         # Read 32 raw words, NOT an assertion of 32 valid state handlers.
         state_words = [f"{v:08x}" for v in struct.unpack("<32I", memory(0x80091f7c, 128))]
         source_bases = [f"{v:08x}" for v in struct.unpack("<4I", memory(0x800eb198, 16))]
