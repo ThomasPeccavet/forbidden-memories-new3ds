@@ -1,0 +1,2455 @@
+{
+  "manual_review": {
+    "game_boot_verified": true,
+    "french_main_menu_visible": true,
+    "new_game_tested": false,
+    "new3ds_tested": false,
+    "method": "Inspected display-07.png: French main menu over title background"
+  },
+  "disc_sha256": "9ef0d0ba5e42b838bd8312ecfe4071b09c44bc08ee896f6b76f913a41fe4b835",
+  "runtime_sha256": "137504a4bf1c15551ce9f7ab510697a07df7bd43946b1b2a321f554b889ac1b3",
+  "probe": {
+    "command": [
+      "/workspace/scratch/db3b2ab637bf/deliverables/work/pc-runtime/fm-pc",
+      "--game",
+      "/workspace/scratch/db3b2ab637bf/deliverables/work/pc-bootstrap/20260915T064032Z-586189fa/game.toml",
+      "--bios",
+      "/workspace/scratch/db3b2ab637bf/upstream-psxrecomp/bios/openbios.bin",
+      "--disc",
+      "/workspace/scratch/db3b2ab637bf/deliverables/work/disc/Yu-Gi-Oh! Forbidden Memories (France).cue",
+      "--headless",
+      "--renderer",
+      "software",
+      "--debug-port",
+      "4370",
+      "--memcard-dir",
+      "/workspace/scratch/db3b2ab637bf/deliverables/work/boot-probe-menu/player-data"
+    ],
+    "observations": [
+      {
+        "elapsed": 3.262,
+        "cmd": "ping",
+        "response": {
+          "id": 0,
+          "ok": true,
+          "pong": true,
+          "io_thread": true
+        }
+      },
+      {
+        "elapsed": 3.266,
+        "cmd": "fntrace_arm",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "target": "0xFFFFFFFF",
+          "armed": 0
+        }
+      },
+      {
+        "elapsed": 8.268,
+        "cmd": "ping",
+        "response": {
+          "id": 0,
+          "ok": true,
+          "pong": true,
+          "io_thread": true
+        }
+      },
+      {
+        "elapsed": 8.274,
+        "cmd": "get_registers",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "frame": 494,
+          "gpr": [
+            "0x00000000",
+            "0x80100000",
+            "0x00000000",
+            "0x0000AE9C",
+            "0x00000000",
+            "0x00010000",
+            "0x0000AEAC",
+            "0x00000000",
+            "0x000000B0",
+            "0x0000004F",
+            "0xBFC07760",
+            "0x801FFF44",
+            "0x000000A1",
+            "0x801FFF44",
+            "0x0000000F",
+            "0x00000052",
+            "0x00004E28",
+            "0x00004D28",
+            "0x00004C88",
+            "0x00000001",
+            "0x00000000",
+            "0x00000023",
+            "0x00004CD4",
+            "0x00000024",
+            "0x00000000",
+            "0x000000B0",
+            "0x00000000",
+            "0x00000000",
+            "0x8009C298",
+            "0x801FFED8",
+            "0x000000B0",
+            "0xBFC00B84"
+          ],
+          "hi": "0x00000000",
+          "lo": "0x0000002C",
+          "cop0_sr": "0x40000401",
+          "cop0_cause": "0x00000000",
+          "cop0_epc": "0xBFC0766C",
+          "i_stat": "0x00000000",
+          "i_mask": "0x00000009",
+          "pc": "0xBFC0766C"
+        }
+      },
+      {
+        "elapsed": 8.276,
+        "cmd": "gpu_state",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "display_x": 0,
+          "display_y": 0,
+          "width": 320,
+          "height": 240,
+          "screen_offset_y": 0,
+          "depth": 15,
+          "depth24": 0,
+          "disabled": 1,
+          "h_display": [
+            624,
+            3184
+          ],
+          "v_display": [
+            43,
+            283
+          ],
+          "hres1": 1,
+          "hres2": 0,
+          "gpustat": "0xD6920200",
+          "gp0_writes": 41,
+          "gp0_nop": 2,
+          "gp0_fill": 1,
+          "gp0_draw": 0,
+          "gp0_env": 36,
+          "gp0_copy": 0,
+          "draw_area": [
+            0,
+            0,
+            319,
+            255
+          ],
+          "draw_offset": [
+            160,
+            128
+          ],
+          "vertical_split": {
+            "active": 0,
+            "left_age": 255,
+            "right_age": 255
+          },
+          "ws": {
+            "configured": 0,
+            "active": 0,
+            "game_mode": 0,
+            "present_native_43": 0,
+            "x_margin": 0,
+            "activation_margin": 0,
+            "squash": [
+              1,
+              1
+            ],
+            "mode": 0,
+            "nw_extra": 0,
+            "cur_frame": 494,
+            "last_tag_frame": 4294966296,
+            "last_3d_frame": 4294966296,
+            "gte_verts": 0,
+            "last_world3d_frame": 4294966296,
+            "ovh_prims": 0,
+            "last_ovh_frame": 4294966296,
+            "auto_ui": {
+              "configured": 0,
+              "dense": 0,
+              "ot_rank": 4294967295,
+              "candidates": 0,
+              "transforms": 0
+            },
+            "aspect_cone": {
+              "calls": 0,
+              "identity_43": 0,
+              "vanilla_keep": 0,
+              "visible_keep": 0,
+              "guard_keep": 0,
+              "hysteresis_keep": 0,
+              "outside_reject": 0,
+              "queue_reject": 0,
+              "queue_highwater": [
+                0,
+                0,
+                0
+              ]
+            },
+            "terrain_angle": {
+              "calls": 0,
+              "identity_43": 0,
+              "max_vanilla": 0,
+              "max_widened": 0
+            }
+          }
+        }
+      },
+      {
+        "elapsed": 8.279,
+        "cmd": "screenshot_file",
+        "response": {
+          "id": 1,
+          "ok": false,
+          "error": "display disabled"
+        }
+      },
+      {
+        "elapsed": 13.282,
+        "cmd": "ping",
+        "response": {
+          "id": 0,
+          "ok": true,
+          "pong": true,
+          "io_thread": true
+        }
+      },
+      {
+        "elapsed": 13.288,
+        "cmd": "get_registers",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "frame": 1012,
+          "gpr": [
+            "0x00000000",
+            "0x80170038",
+            "0x0000000E",
+            "0x00000000",
+            "0xFFFFFFFF",
+            "0x1F801110",
+            "0x00000003",
+            "0x00000003",
+            "0x00000000",
+            "0x00000001",
+            "0x00000003",
+            "0x80000000",
+            "0x00000000",
+            "0x800E5FE8",
+            "0x00000800",
+            "0xBFC08FD4",
+            "0x00008D98",
+            "0x800F1910",
+            "0x800F1910",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000005",
+            "0x000000A0",
+            "0x00000000",
+            "0x00000000",
+            "0x8009C298",
+            "0x801FFFA8",
+            "0x801FFFF8",
+            "0x80043F4C"
+          ],
+          "hi": "0x0000001D",
+          "lo": "0x999999A1",
+          "cop0_sr": "0x40000401",
+          "cop0_cause": "0x00000000",
+          "cop0_epc": "0x800746FC",
+          "i_stat": "0x00000000",
+          "i_mask": "0x0000004D",
+          "pc": "0x00000000"
+        }
+      },
+      {
+        "elapsed": 13.294,
+        "cmd": "gpu_state",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "display_x": 0,
+          "display_y": 0,
+          "width": 320,
+          "height": 256,
+          "screen_offset_y": 4,
+          "depth": 15,
+          "depth24": 0,
+          "disabled": 0,
+          "h_display": [
+            624,
+            3184
+          ],
+          "v_display": [
+            39,
+            295
+          ],
+          "hres1": 1,
+          "hres2": 0,
+          "gpustat": "0x56120213",
+          "gp0_writes": 42753,
+          "gp0_nop": 827,
+          "gp0_fill": 519,
+          "gp0_draw": 3892,
+          "gp0_env": 7036,
+          "gp0_copy": 231,
+          "draw_area": [
+            320,
+            0,
+            639,
+            255
+          ],
+          "draw_offset": [
+            320,
+            0
+          ],
+          "vertical_split": {
+            "active": 0,
+            "left_age": 255,
+            "right_age": 255
+          },
+          "ws": {
+            "configured": 0,
+            "active": 0,
+            "game_mode": 0,
+            "present_native_43": 0,
+            "x_margin": 0,
+            "activation_margin": 0,
+            "squash": [
+              1,
+              1
+            ],
+            "mode": 0,
+            "nw_extra": 0,
+            "cur_frame": 1012,
+            "last_tag_frame": 4294966296,
+            "last_3d_frame": 4294966296,
+            "gte_verts": 0,
+            "last_world3d_frame": 4294966296,
+            "ovh_prims": 0,
+            "last_ovh_frame": 4294966296,
+            "auto_ui": {
+              "configured": 0,
+              "dense": 0,
+              "ot_rank": 4294967295,
+              "candidates": 0,
+              "transforms": 0
+            },
+            "aspect_cone": {
+              "calls": 0,
+              "identity_43": 0,
+              "vanilla_keep": 0,
+              "visible_keep": 0,
+              "guard_keep": 0,
+              "hysteresis_keep": 0,
+              "outside_reject": 0,
+              "queue_reject": 0,
+              "queue_highwater": [
+                0,
+                0,
+                0
+              ]
+            },
+            "terrain_angle": {
+              "calls": 0,
+              "identity_43": 0,
+              "max_vanilla": 0,
+              "max_widened": 0
+            }
+          }
+        }
+      },
+      {
+        "elapsed": 13.3,
+        "cmd": "screenshot_file",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "path": "/workspace/scratch/db3b2ab637bf/deliverables/work/boot-probe-menu/display-01.png",
+          "width": 320,
+          "height": 256
+        }
+      },
+      {
+        "elapsed": 18.302,
+        "cmd": "ping",
+        "response": {
+          "id": 0,
+          "ok": true,
+          "pong": true,
+          "io_thread": true
+        }
+      },
+      {
+        "elapsed": 18.305,
+        "cmd": "get_registers",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "frame": 1468,
+          "gpr": [
+            "0x00000000",
+            "0x800F0000",
+            "0x00000001",
+            "0x00000003",
+            "0x801FFEB8",
+            "0x801FFEBC",
+            "0x80111000",
+            "0x801FFEB8",
+            "0x801FFEBC",
+            "0x00000012",
+            "0x03030303",
+            "0x00000010",
+            "0x00000303",
+            "0x01000000",
+            "0x8211AFFE",
+            "0x00000000",
+            "0x00000000",
+            "0x00000418",
+            "0x00000417",
+            "0x00000001",
+            "0x00000001",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x8009C298",
+            "0x801FFEA8",
+            "0x801FFFF8",
+            "0x8006A53C"
+          ],
+          "hi": "0x00000012",
+          "lo": "0x0000001B",
+          "cop0_sr": "0x40000401",
+          "cop0_cause": "0x00000000",
+          "cop0_epc": "0x800746FC",
+          "i_stat": "0x00000000",
+          "i_mask": "0x0000004D",
+          "pc": "0x00000000"
+        }
+      },
+      {
+        "elapsed": 18.309,
+        "cmd": "gpu_state",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "display_x": 0,
+          "display_y": 256,
+          "width": 320,
+          "height": 256,
+          "screen_offset_y": 4,
+          "depth": 24,
+          "depth24": 1,
+          "disabled": 0,
+          "h_display": [
+            624,
+            3184
+          ],
+          "v_display": [
+            39,
+            295
+          ],
+          "hres1": 1,
+          "hres2": 0,
+          "gpustat": "0x56320200",
+          "gp0_writes": 264814,
+          "gp0_nop": 1998,
+          "gp0_fill": 1185,
+          "gp0_draw": 7441,
+          "gp0_env": 14208,
+          "gp0_copy": 658,
+          "draw_area": [
+            0,
+            0,
+            319,
+            255
+          ],
+          "draw_offset": [
+            0,
+            0
+          ],
+          "vertical_split": {
+            "active": 0,
+            "left_age": 255,
+            "right_age": 255
+          },
+          "ws": {
+            "configured": 0,
+            "active": 0,
+            "game_mode": 0,
+            "present_native_43": 0,
+            "x_margin": 0,
+            "activation_margin": 0,
+            "squash": [
+              1,
+              1
+            ],
+            "mode": 0,
+            "nw_extra": 0,
+            "cur_frame": 1468,
+            "last_tag_frame": 4294966296,
+            "last_3d_frame": 4294966296,
+            "gte_verts": 96,
+            "last_world3d_frame": 1135,
+            "ovh_prims": 12,
+            "last_ovh_frame": 1136,
+            "auto_ui": {
+              "configured": 0,
+              "dense": 0,
+              "ot_rank": 4294967295,
+              "candidates": 0,
+              "transforms": 0
+            },
+            "aspect_cone": {
+              "calls": 0,
+              "identity_43": 0,
+              "vanilla_keep": 0,
+              "visible_keep": 0,
+              "guard_keep": 0,
+              "hysteresis_keep": 0,
+              "outside_reject": 0,
+              "queue_reject": 0,
+              "queue_highwater": [
+                0,
+                0,
+                0
+              ]
+            },
+            "terrain_angle": {
+              "calls": 0,
+              "identity_43": 0,
+              "max_vanilla": 0,
+              "max_widened": 0
+            }
+          }
+        }
+      },
+      {
+        "elapsed": 18.316,
+        "cmd": "screenshot_file",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "path": "/workspace/scratch/db3b2ab637bf/deliverables/work/boot-probe-menu/display-02.png",
+          "width": 320,
+          "height": 256
+        }
+      },
+      {
+        "elapsed": 18.319,
+        "cmd": "press",
+        "response": {
+          "id": 1,
+          "ok": true
+        }
+      },
+      {
+        "elapsed": 23.32,
+        "cmd": "ping",
+        "response": {
+          "id": 0,
+          "ok": true,
+          "pong": true,
+          "io_thread": true
+        }
+      },
+      {
+        "elapsed": 23.322,
+        "cmd": "get_registers",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "frame": 1936,
+          "gpr": [
+            "0x00000000",
+            "0x800A0000",
+            "0x00000001",
+            "0xFFFFFFFF",
+            "0x000005ED",
+            "0x00008000",
+            "0x00FFFFFF",
+            "0xFF000000",
+            "0xFFFFFFFF",
+            "0x800BEE20",
+            "0x00000008",
+            "0x800EB148",
+            "0x01000000",
+            "0x800EB148",
+            "0x00000800",
+            "0x00000000",
+            "0x5612029A",
+            "0x00000012",
+            "0x00000001",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x8009C298",
+            "0x801FFF48",
+            "0x801FFFF8",
+            "0x80074794"
+          ],
+          "hi": "0xFFFE8181",
+          "lo": "0x81830000",
+          "cop0_sr": "0x40000401",
+          "cop0_cause": "0x00000400",
+          "cop0_epc": "0x800748A0",
+          "i_stat": "0x00000001",
+          "i_mask": "0x0000004D",
+          "pc": "0x800748A0"
+        }
+      },
+      {
+        "elapsed": 23.33,
+        "cmd": "gpu_state",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "display_x": 320,
+          "display_y": 0,
+          "width": 320,
+          "height": 256,
+          "screen_offset_y": 4,
+          "depth": 15,
+          "depth24": 0,
+          "disabled": 0,
+          "h_display": [
+            624,
+            3184
+          ],
+          "v_display": [
+            39,
+            295
+          ],
+          "hres1": 1,
+          "hres2": 0,
+          "gpustat": "0xD612029A",
+          "gp0_writes": 809851,
+          "gp0_nop": 4598,
+          "gp0_fill": 2070,
+          "gp0_draw": 17269,
+          "gp0_env": 27294,
+          "gp0_copy": 1959,
+          "draw_area": [
+            0,
+            0,
+            319,
+            255
+          ],
+          "draw_offset": [
+            0,
+            0
+          ],
+          "vertical_split": {
+            "active": 0,
+            "left_age": 255,
+            "right_age": 255
+          },
+          "ws": {
+            "configured": 0,
+            "active": 0,
+            "game_mode": 0,
+            "present_native_43": 0,
+            "x_margin": 0,
+            "activation_margin": 0,
+            "squash": [
+              1,
+              1
+            ],
+            "mode": 0,
+            "nw_extra": 0,
+            "cur_frame": 1937,
+            "last_tag_frame": 4294966296,
+            "last_3d_frame": 1937,
+            "gte_verts": 96,
+            "last_world3d_frame": 1135,
+            "ovh_prims": 12,
+            "last_ovh_frame": 1136,
+            "auto_ui": {
+              "configured": 0,
+              "dense": 0,
+              "ot_rank": 4294967295,
+              "candidates": 0,
+              "transforms": 0
+            },
+            "aspect_cone": {
+              "calls": 0,
+              "identity_43": 0,
+              "vanilla_keep": 0,
+              "visible_keep": 0,
+              "guard_keep": 0,
+              "hysteresis_keep": 0,
+              "outside_reject": 0,
+              "queue_reject": 0,
+              "queue_highwater": [
+                0,
+                0,
+                0
+              ]
+            },
+            "terrain_angle": {
+              "calls": 0,
+              "identity_43": 0,
+              "max_vanilla": 0,
+              "max_widened": 0
+            }
+          }
+        }
+      },
+      {
+        "elapsed": 23.334,
+        "cmd": "screenshot_file",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "path": "/workspace/scratch/db3b2ab637bf/deliverables/work/boot-probe-menu/display-03.png",
+          "width": 320,
+          "height": 256
+        }
+      },
+      {
+        "elapsed": 28.337,
+        "cmd": "ping",
+        "response": {
+          "id": 0,
+          "ok": true,
+          "pong": true,
+          "io_thread": true
+        }
+      },
+      {
+        "elapsed": 28.342,
+        "cmd": "get_registers",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "frame": 2360,
+          "gpr": [
+            "0x00000000",
+            "0x800A0000",
+            "0x00000001",
+            "0xFFFFFFFF",
+            "0x00000795",
+            "0x00008000",
+            "0x00FFFFFF",
+            "0xFF000000",
+            "0xFFFFFFFF",
+            "0x800BEE20",
+            "0x00000008",
+            "0x800EB148",
+            "0x01000000",
+            "0x800EB148",
+            "0x00000800",
+            "0x00000000",
+            "0x5612029A",
+            "0x00000011",
+            "0x00000001",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x8009C298",
+            "0x801FFF48",
+            "0x801FFFF8",
+            "0x80074794"
+          ],
+          "hi": "0xFFFE8181",
+          "lo": "0x81830000",
+          "cop0_sr": "0x40000401",
+          "cop0_cause": "0x00000000",
+          "cop0_epc": "0x8008591C",
+          "i_stat": "0x00000000",
+          "i_mask": "0x0000004D",
+          "pc": "0x00000000"
+        }
+      },
+      {
+        "elapsed": 28.344,
+        "cmd": "gpu_state",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "display_x": 0,
+          "display_y": 0,
+          "width": 320,
+          "height": 256,
+          "screen_offset_y": 4,
+          "depth": 15,
+          "depth24": 0,
+          "disabled": 0,
+          "h_display": [
+            624,
+            3184
+          ],
+          "v_display": [
+            39,
+            295
+          ],
+          "hres1": 1,
+          "hres2": 0,
+          "gpustat": "0x5612029A",
+          "gp0_writes": 874993,
+          "gp0_nop": 6290,
+          "gp0_fill": 2916,
+          "gp0_draw": 25729,
+          "gp0_env": 38715,
+          "gp0_copy": 2382,
+          "draw_area": [
+            320,
+            0,
+            639,
+            255
+          ],
+          "draw_offset": [
+            320,
+            0
+          ],
+          "vertical_split": {
+            "active": 0,
+            "left_age": 255,
+            "right_age": 255
+          },
+          "ws": {
+            "configured": 0,
+            "active": 0,
+            "game_mode": 0,
+            "present_native_43": 0,
+            "x_margin": 0,
+            "activation_margin": 0,
+            "squash": [
+              1,
+              1
+            ],
+            "mode": 0,
+            "nw_extra": 0,
+            "cur_frame": 2360,
+            "last_tag_frame": 4294966296,
+            "last_3d_frame": 2360,
+            "gte_verts": 96,
+            "last_world3d_frame": 1135,
+            "ovh_prims": 12,
+            "last_ovh_frame": 1136,
+            "auto_ui": {
+              "configured": 0,
+              "dense": 0,
+              "ot_rank": 4294967295,
+              "candidates": 0,
+              "transforms": 0
+            },
+            "aspect_cone": {
+              "calls": 0,
+              "identity_43": 0,
+              "vanilla_keep": 0,
+              "visible_keep": 0,
+              "guard_keep": 0,
+              "hysteresis_keep": 0,
+              "outside_reject": 0,
+              "queue_reject": 0,
+              "queue_highwater": [
+                0,
+                0,
+                0
+              ]
+            },
+            "terrain_angle": {
+              "calls": 0,
+              "identity_43": 0,
+              "max_vanilla": 0,
+              "max_widened": 0
+            }
+          }
+        }
+      },
+      {
+        "elapsed": 28.351,
+        "cmd": "screenshot_file",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "path": "/workspace/scratch/db3b2ab637bf/deliverables/work/boot-probe-menu/display-04.png",
+          "width": 320,
+          "height": 256
+        }
+      },
+      {
+        "elapsed": 33.352,
+        "cmd": "ping",
+        "response": {
+          "id": 0,
+          "ok": true,
+          "pong": true,
+          "io_thread": true
+        }
+      },
+      {
+        "elapsed": 33.357,
+        "cmd": "get_registers",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "frame": 2835,
+          "gpr": [
+            "0x00000000",
+            "0x800A0000",
+            "0x00007903",
+            "0xFFFFFFFF",
+            "0x00000970",
+            "0x00008000",
+            "0x00FFFFFF",
+            "0xFF000000",
+            "0xFFFFFFFF",
+            "0x8009CB40",
+            "0x00000008",
+            "0x800E5FE8",
+            "0x01000000",
+            "0x800E5FE8",
+            "0x00000800",
+            "0x00000000",
+            "0xD612029A",
+            "0x00000011",
+            "0x00000001",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x8009C298",
+            "0x801FFF48",
+            "0x801FFFF8",
+            "0x80074794"
+          ],
+          "hi": "0xFFFE8181",
+          "lo": "0x81830000",
+          "cop0_sr": "0x40000401",
+          "cop0_cause": "0x00000000",
+          "cop0_epc": "0x80085BAC",
+          "i_stat": "0x00000000",
+          "i_mask": "0x0000004D",
+          "pc": "0x00000000"
+        }
+      },
+      {
+        "elapsed": 33.359,
+        "cmd": "gpu_state",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "display_x": 320,
+          "display_y": 0,
+          "width": 320,
+          "height": 256,
+          "screen_offset_y": 4,
+          "depth": 15,
+          "depth24": 0,
+          "disabled": 0,
+          "h_display": [
+            624,
+            3184
+          ],
+          "v_display": [
+            39,
+            295
+          ],
+          "hres1": 1,
+          "hres2": 0,
+          "gpustat": "0xD612029A",
+          "gp0_writes": 948143,
+          "gp0_nop": 8190,
+          "gp0_fill": 3866,
+          "gp0_draw": 35229,
+          "gp0_env": 51540,
+          "gp0_copy": 2857,
+          "draw_area": [
+            0,
+            0,
+            319,
+            255
+          ],
+          "draw_offset": [
+            0,
+            0
+          ],
+          "vertical_split": {
+            "active": 0,
+            "left_age": 255,
+            "right_age": 255
+          },
+          "ws": {
+            "configured": 0,
+            "active": 0,
+            "game_mode": 0,
+            "present_native_43": 0,
+            "x_margin": 0,
+            "activation_margin": 0,
+            "squash": [
+              1,
+              1
+            ],
+            "mode": 0,
+            "nw_extra": 0,
+            "cur_frame": 2835,
+            "last_tag_frame": 4294966296,
+            "last_3d_frame": 2835,
+            "gte_verts": 96,
+            "last_world3d_frame": 1135,
+            "ovh_prims": 12,
+            "last_ovh_frame": 1136,
+            "auto_ui": {
+              "configured": 0,
+              "dense": 0,
+              "ot_rank": 4294967295,
+              "candidates": 0,
+              "transforms": 0
+            },
+            "aspect_cone": {
+              "calls": 0,
+              "identity_43": 0,
+              "vanilla_keep": 0,
+              "visible_keep": 0,
+              "guard_keep": 0,
+              "hysteresis_keep": 0,
+              "outside_reject": 0,
+              "queue_reject": 0,
+              "queue_highwater": [
+                0,
+                0,
+                0
+              ]
+            },
+            "terrain_angle": {
+              "calls": 0,
+              "identity_43": 0,
+              "max_vanilla": 0,
+              "max_widened": 0
+            }
+          }
+        }
+      },
+      {
+        "elapsed": 33.368,
+        "cmd": "screenshot_file",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "path": "/workspace/scratch/db3b2ab637bf/deliverables/work/boot-probe-menu/display-05.png",
+          "width": 320,
+          "height": 256
+        }
+      },
+      {
+        "elapsed": 33.369,
+        "cmd": "press",
+        "response": {
+          "id": 1,
+          "ok": true
+        }
+      },
+      {
+        "elapsed": 38.371,
+        "cmd": "ping",
+        "response": {
+          "id": 0,
+          "ok": true,
+          "pong": true,
+          "io_thread": true
+        }
+      },
+      {
+        "elapsed": 38.375,
+        "cmd": "get_registers",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "frame": 3222,
+          "gpr": [
+            "0x00000000",
+            "0x800A0000",
+            "0x00006FF2",
+            "0xFFFFFFFF",
+            "0x00000AF3",
+            "0x00008000",
+            "0x00FFFFFF",
+            "0xFF000000",
+            "0xFFFFFFFF",
+            "0x800BEF8C",
+            "0x00000008",
+            "0x800EB148",
+            "0x01000000",
+            "0x800EB148",
+            "0x00000800",
+            "0x00000000",
+            "0x56120298",
+            "0x00000015",
+            "0x00000001",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x8009C298",
+            "0x801FFF48",
+            "0x801FFFF8",
+            "0x80074794"
+          ],
+          "hi": "0xFFFE8181",
+          "lo": "0x81830000",
+          "cop0_sr": "0x40000401",
+          "cop0_cause": "0x00000000",
+          "cop0_epc": "0x80074858",
+          "i_stat": "0x00000000",
+          "i_mask": "0x0000004D",
+          "pc": "0x80074858"
+        }
+      },
+      {
+        "elapsed": 38.377,
+        "cmd": "gpu_state",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "display_x": 0,
+          "display_y": 0,
+          "width": 320,
+          "height": 256,
+          "screen_offset_y": 4,
+          "depth": 15,
+          "depth24": 0,
+          "disabled": 0,
+          "h_display": [
+            624,
+            3184
+          ],
+          "v_display": [
+            39,
+            295
+          ],
+          "hres1": 1,
+          "hres2": 0,
+          "gpustat": "0x56120298",
+          "gp0_writes": 1043040,
+          "gp0_nop": 9738,
+          "gp0_fill": 4640,
+          "gp0_draw": 49952,
+          "gp0_env": 68972,
+          "gp0_copy": 3244,
+          "draw_area": [
+            320,
+            0,
+            639,
+            255
+          ],
+          "draw_offset": [
+            320,
+            0
+          ],
+          "vertical_split": {
+            "active": 0,
+            "left_age": 255,
+            "right_age": 255
+          },
+          "ws": {
+            "configured": 0,
+            "active": 0,
+            "game_mode": 0,
+            "present_native_43": 0,
+            "x_margin": 0,
+            "activation_margin": 0,
+            "squash": [
+              1,
+              1
+            ],
+            "mode": 0,
+            "nw_extra": 0,
+            "cur_frame": 3222,
+            "last_tag_frame": 4294966296,
+            "last_3d_frame": 3222,
+            "gte_verts": 96,
+            "last_world3d_frame": 1135,
+            "ovh_prims": 12,
+            "last_ovh_frame": 1136,
+            "auto_ui": {
+              "configured": 0,
+              "dense": 0,
+              "ot_rank": 4294967295,
+              "candidates": 0,
+              "transforms": 0
+            },
+            "aspect_cone": {
+              "calls": 0,
+              "identity_43": 0,
+              "vanilla_keep": 0,
+              "visible_keep": 0,
+              "guard_keep": 0,
+              "hysteresis_keep": 0,
+              "outside_reject": 0,
+              "queue_reject": 0,
+              "queue_highwater": [
+                0,
+                0,
+                0
+              ]
+            },
+            "terrain_angle": {
+              "calls": 0,
+              "identity_43": 0,
+              "max_vanilla": 0,
+              "max_widened": 0
+            }
+          }
+        }
+      },
+      {
+        "elapsed": 38.388,
+        "cmd": "screenshot_file",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "path": "/workspace/scratch/db3b2ab637bf/deliverables/work/boot-probe-menu/display-06.png",
+          "width": 320,
+          "height": 256
+        }
+      },
+      {
+        "elapsed": 43.389,
+        "cmd": "ping",
+        "response": {
+          "id": 0,
+          "ok": true,
+          "pong": true,
+          "io_thread": true
+        }
+      },
+      {
+        "elapsed": 43.394,
+        "cmd": "get_registers",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "frame": 3669,
+          "gpr": [
+            "0x00000000",
+            "0x80100000",
+            "0x00000010",
+            "0x00000000",
+            "0x00000080",
+            "0x800E5FE8",
+            "0x00000118",
+            "0x0000001C",
+            "0x00008000",
+            "0x00000000",
+            "0x0009CAA0",
+            "0x1F800320",
+            "0x01000000",
+            "0x800E5FE8",
+            "0x000007FF",
+            "0x00000000",
+            "0x1F800320",
+            "0x1F800378",
+            "0x801AFA94",
+            "0x1F8003A4",
+            "0x801AFA92",
+            "0x00000008",
+            "0x00000800",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x8009C298",
+            "0x801FFEF8",
+            "0x801AFA8E",
+            "0x80040BE0"
+          ],
+          "hi": "0xFFFE8181",
+          "lo": "0x81830000",
+          "cop0_sr": "0x40000401",
+          "cop0_cause": "0x00000000",
+          "cop0_epc": "0x80087798",
+          "i_stat": "0x00000000",
+          "i_mask": "0x0000004D",
+          "pc": "0x80041C88"
+        }
+      },
+      {
+        "elapsed": 43.397,
+        "cmd": "gpu_state",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "display_x": 320,
+          "display_y": 0,
+          "width": 320,
+          "height": 256,
+          "screen_offset_y": 4,
+          "depth": 15,
+          "depth24": 0,
+          "disabled": 0,
+          "h_display": [
+            624,
+            3184
+          ],
+          "v_display": [
+            39,
+            295
+          ],
+          "hres1": 1,
+          "hres2": 0,
+          "gpustat": "0xD6120298",
+          "gp0_writes": 1145850,
+          "gp0_nop": 11526,
+          "gp0_fill": 5534,
+          "gp0_draw": 65597,
+          "gp0_env": 87746,
+          "gp0_copy": 3691,
+          "draw_area": [
+            0,
+            0,
+            319,
+            255
+          ],
+          "draw_offset": [
+            0,
+            0
+          ],
+          "vertical_split": {
+            "active": 0,
+            "left_age": 255,
+            "right_age": 255
+          },
+          "ws": {
+            "configured": 0,
+            "active": 0,
+            "game_mode": 0,
+            "present_native_43": 0,
+            "x_margin": 0,
+            "activation_margin": 0,
+            "squash": [
+              1,
+              1
+            ],
+            "mode": 0,
+            "nw_extra": 0,
+            "cur_frame": 3669,
+            "last_tag_frame": 4294966296,
+            "last_3d_frame": 3669,
+            "gte_verts": 96,
+            "last_world3d_frame": 1135,
+            "ovh_prims": 12,
+            "last_ovh_frame": 1136,
+            "auto_ui": {
+              "configured": 0,
+              "dense": 0,
+              "ot_rank": 4294967295,
+              "candidates": 0,
+              "transforms": 0
+            },
+            "aspect_cone": {
+              "calls": 0,
+              "identity_43": 0,
+              "vanilla_keep": 0,
+              "visible_keep": 0,
+              "guard_keep": 0,
+              "hysteresis_keep": 0,
+              "outside_reject": 0,
+              "queue_reject": 0,
+              "queue_highwater": [
+                0,
+                0,
+                0
+              ]
+            },
+            "terrain_angle": {
+              "calls": 0,
+              "identity_43": 0,
+              "max_vanilla": 0,
+              "max_widened": 0
+            }
+          }
+        }
+      },
+      {
+        "elapsed": 43.4,
+        "cmd": "screenshot_file",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "path": "/workspace/scratch/db3b2ab637bf/deliverables/work/boot-probe-menu/display-07.png",
+          "width": 320,
+          "height": 256
+        }
+      },
+      {
+        "elapsed": 43.407,
+        "cmd": "pause",
+        "response": {
+          "id": 1,
+          "ok": false,
+          "error": "pause is removed; query a ring buffer (fn_entry_tail, wtrace_dump, gpu_frame_dump, etc.) instead of synthesizing a snapshot"
+        }
+      },
+      {
+        "elapsed": 43.413,
+        "cmd": "get_registers",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "frame": 3670,
+          "gpr": [
+            "0x00000000",
+            "0x800A0000",
+            "0x00000001",
+            "0xFFFFFFFF",
+            "0x00000CB3",
+            "0x00008000",
+            "0x00FFFFFF",
+            "0xFF000000",
+            "0xFFFFFFFF",
+            "0x800BEF8C",
+            "0x00000008",
+            "0x800EB148",
+            "0x01000000",
+            "0x800EB148",
+            "0x00000800",
+            "0x00000000",
+            "0x56120298",
+            "0x00000016",
+            "0x00000001",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x00000000",
+            "0x8009C298",
+            "0x801FFF48",
+            "0x801FFFF8",
+            "0x80074794"
+          ],
+          "hi": "0xFFFE8181",
+          "lo": "0x81830000",
+          "cop0_sr": "0x40000401",
+          "cop0_cause": "0x00000000",
+          "cop0_epc": "0x80087798",
+          "i_stat": "0x00000000",
+          "i_mask": "0x0000004D",
+          "pc": "0x00000000"
+        }
+      },
+      {
+        "elapsed": 43.416,
+        "cmd": "read_ram",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "addr": "0x80010000",
+          "len": 32,
+          "hex": "00001080000014800000188000a0138000a0178000b0138000b0178000501380"
+        }
+      },
+      {
+        "elapsed": 43.423,
+        "cmd": "read_ram",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "addr": "0x8009C608",
+          "len": 16,
+          "hex": "00000000000000000000000000000000"
+        }
+      },
+      {
+        "elapsed": 43.426,
+        "cmd": "read_ram",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "addr": "0x80180000",
+          "len": 32,
+          "hex": "33000000984318804037188020391880b03a1880403c1880804418808b2e023c"
+        }
+      },
+      {
+        "elapsed": 43.434,
+        "cmd": "read_ram",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "addr": "0x800F70D0",
+          "len": 64,
+          "hex": "2f010000010000000000000011000000801211800010118000000000090000001400000000000000010000000000000000000000010000004540650208000000"
+        }
+      },
+      {
+        "elapsed": 43.436,
+        "cmd": "dispatch_stats",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "static_hits": 10685048,
+          "miss_total": 0,
+          "miss_unique": 0
+        }
+      },
+      {
+        "elapsed": 43.438,
+        "cmd": "cdrom_state",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "seq": 836433,
+          "has_disc": 1,
+          "index": 0,
+          "stat": "0x02",
+          "request": "0x00",
+          "irq_enable": "0x07",
+          "irq_flag": "0x00",
+          "mode": "0xA0",
+          "param_count": 0,
+          "response_read": 1,
+          "response_count": 1,
+          "sector_available": 1,
+          "sector_read_pos": 0,
+          "sector_size": 2340,
+          "reading": 0,
+          "read_msf": [
+            0,
+            49,
+            55
+          ],
+          "read_cmd": "0x00",
+          "read_delay": 0,
+          "read_hold_cycles": 0,
+          "read_hold_events": 0,
+          "int1_pended": 0,
+          "int1_lost": 0,
+          "int1_pending_now": 0,
+          "accel_consumer_waits": 0,
+          "accel_consumer_wait_cycles": 0,
+          "ring_starved": 0,
+          "ring_dropped": 499,
+          "filter_file": 0,
+          "filter_channel": 0,
+          "muted": 0,
+          "seek_msf": [
+            0,
+            48,
+            31
+          ],
+          "pending": {
+            "cmd": "0x09",
+            "active": 0,
+            "delay": 0,
+            "phase": 1
+          },
+          "last_sector": {
+            "lba": 3579,
+            "size": 2340,
+            "frame": 1568,
+            "mode": "0xA0",
+            "have_raw": 1
+          },
+          "speed_divisor": 1,
+          "int_raised": [
+            0,
+            1505,
+            52,
+            171,
+            0,
+            0
+          ],
+          "int_presented": [
+            0,
+            1505,
+            47,
+            107,
+            0,
+            0
+          ],
+          "int_clobbered": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "int_lost_unseen": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "int_acked_unpresented": [
+            0,
+            0,
+            5,
+            64,
+            0,
+            0
+          ],
+          "int_last_lost": {
+            "old": 0,
+            "new": 0,
+            "gen": 0
+          },
+          "i_stat": "0x00000001"
+        }
+      },
+      {
+        "elapsed": 43.446,
+        "cmd": "fntrace_dump",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "total": 39295476,
+          "available": 4194304,
+          "seq_lo": 0,
+          "seq_hi": 0,
+          "target_lo": "0x00000000",
+          "target_hi": "0xFFFFFFFF",
+          "armed": 0,
+          "entries": [
+            {
+              "seq": 39295475,
+              "target": "0x800424D4",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x00000000",
+              "a2": "0x800E5FD4",
+              "a3": "0x00010020",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEA0",
+              "frame": 3673
+            },
+            {
+              "seq": 39295474,
+              "target": "0x800424D0",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x00000000",
+              "a2": "0x800E5FD4",
+              "a3": "0x00010020",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEA0",
+              "frame": 3673
+            },
+            {
+              "seq": 39295473,
+              "target": "0x800424CC",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x00000000",
+              "a2": "0x800E5FD4",
+              "a3": "0x00010020",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEA0",
+              "frame": 3673
+            },
+            {
+              "seq": 39295472,
+              "target": "0x800424C8",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x00000000",
+              "a2": "0x800E5FD4",
+              "a3": "0x00010020",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEA0",
+              "frame": 3673
+            },
+            {
+              "seq": 39295471,
+              "target": "0x800424C4",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x00000000",
+              "a2": "0x800E5FD4",
+              "a3": "0x00010020",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEA0",
+              "frame": 3673
+            },
+            {
+              "seq": 39295470,
+              "target": "0x800424C0",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x00000000",
+              "a2": "0x800E5FD4",
+              "a3": "0x00010020",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEA0",
+              "frame": 3673
+            },
+            {
+              "seq": 39295469,
+              "target": "0x800424BC",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x00000000",
+              "a2": "0x800E5FD4",
+              "a3": "0x00010020",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEA0",
+              "frame": 3673
+            },
+            {
+              "seq": 39295468,
+              "target": "0x800424B8",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x00000000",
+              "a2": "0x800E5FD4",
+              "a3": "0x00010020",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295467,
+              "target": "0x80041F74",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x00000000",
+              "a2": "0x800E5FD4",
+              "a3": "0x00000000",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295466,
+              "target": "0x80041F70",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x00000000",
+              "a2": "0x800E5FD4",
+              "a3": "0x00000000",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295465,
+              "target": "0x80041F6C",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x00000000",
+              "a2": "0x800E5FD4",
+              "a3": "0x00000000",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295464,
+              "target": "0x80041F68",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x00000000",
+              "a2": "0x800E5FD4",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295463,
+              "target": "0x80041F64",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x00000000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295462,
+              "target": "0x80041F18",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x00000000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295461,
+              "target": "0x80041F10",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295460,
+              "target": "0x80041F0C",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295459,
+              "target": "0x80041F08",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295458,
+              "target": "0x80041F04",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295457,
+              "target": "0x80041EFC",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295456,
+              "target": "0x80041EF8",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295455,
+              "target": "0x80041EF4",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295454,
+              "target": "0x80041EF0",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295453,
+              "target": "0x80041EEC",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295452,
+              "target": "0x80041EE8",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295451,
+              "target": "0x80041EE0",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295450,
+              "target": "0x80041EDC",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295449,
+              "target": "0x80041ED8",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295448,
+              "target": "0x80041ED4",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295447,
+              "target": "0x80041ECC",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295446,
+              "target": "0x80041EC8",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295445,
+              "target": "0x80041EC4",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295444,
+              "target": "0x80041EC0",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295443,
+              "target": "0x80041EBC",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295442,
+              "target": "0x80041EB8",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295441,
+              "target": "0x80041EB0",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295440,
+              "target": "0x80041EAC",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295439,
+              "target": "0x80041EA8",
+              "ra": "0x80041F7C",
+              "a0": "0x1F800320",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295438,
+              "target": "0x80041EA0",
+              "ra": "0x80041F7C",
+              "a0": "0x00000000",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295437,
+              "target": "0x80041E9C",
+              "ra": "0x80041F7C",
+              "a0": "0x00000000",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295436,
+              "target": "0x80041E98",
+              "ra": "0x80041F7C",
+              "a0": "0x00000000",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295435,
+              "target": "0x80041D9C",
+              "ra": "0x80041F7C",
+              "a0": "0x00000000",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295434,
+              "target": "0x80041D98",
+              "ra": "0x80041F7C",
+              "a0": "0x00000000",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295433,
+              "target": "0x80041D94",
+              "ra": "0x80041F7C",
+              "a0": "0x00000000",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295432,
+              "target": "0x80041D90",
+              "ra": "0x80041F7C",
+              "a0": "0x00000000",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295431,
+              "target": "0x80041D8C",
+              "ra": "0x80041F7C",
+              "a0": "0x00000000",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295430,
+              "target": "0x80041D88",
+              "ra": "0x80041F7C",
+              "a0": "0x00000000",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295429,
+              "target": "0x80041D84",
+              "ra": "0x80041F7C",
+              "a0": "0x00000000",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295428,
+              "target": "0x80041D80",
+              "ra": "0x80041F7C",
+              "a0": "0x00000000",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295427,
+              "target": "0x80041D7C",
+              "ra": "0x80041F7C",
+              "a0": "0x00000000",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295426,
+              "target": "0x80041D78",
+              "ra": "0x80041F7C",
+              "a0": "0x00000000",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295425,
+              "target": "0x80041D74",
+              "ra": "0x80041F7C",
+              "a0": "0x00000000",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295424,
+              "target": "0x80041D70",
+              "ra": "0x80041F7C",
+              "a0": "0x00000000",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295423,
+              "target": "0x80041D6C",
+              "ra": "0x80041F7C",
+              "a0": "0x00000000",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295422,
+              "target": "0x80041D68",
+              "ra": "0x80041F7C",
+              "a0": "0x800E0F40",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295421,
+              "target": "0x80041D64",
+              "ra": "0x80041F7C",
+              "a0": "0x800E0F40",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295420,
+              "target": "0x80041D60",
+              "ra": "0x80041F7C",
+              "a0": "0x800E0F40",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295419,
+              "target": "0x80041D5C",
+              "ra": "0x80041F7C",
+              "a0": "0x800E0F40",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295418,
+              "target": "0x80041D58",
+              "ra": "0x80041F7C",
+              "a0": "0x800E0F40",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295417,
+              "target": "0x80041D54",
+              "ra": "0x80041F7C",
+              "a0": "0x800E0F40",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295416,
+              "target": "0x80041D50",
+              "ra": "0x80041F7C",
+              "a0": "0x800E0F40",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295415,
+              "target": "0x80041D4C",
+              "ra": "0x80041F7C",
+              "a0": "0x800E0F40",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295414,
+              "target": "0x80041D48",
+              "ra": "0x80041F7C",
+              "a0": "0x800E0F40",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295413,
+              "target": "0x80041D44",
+              "ra": "0x80041F7C",
+              "a0": "0x800E0F40",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            },
+            {
+              "seq": 39295412,
+              "target": "0x80041D40",
+              "ra": "0x80041F7C",
+              "a0": "0x800E0F40",
+              "a1": "0x006E0000",
+              "a2": "0xFFFFFFE0",
+              "a3": "0xFFFFFFF0",
+              "s3": "0x1F8003A4",
+              "sp": "0x801FFEF8",
+              "frame": 3673
+            }
+          ],
+          "emitted": 64
+        }
+      },
+      {
+        "elapsed": 43.458,
+        "cmd": "screenshot_file",
+        "response": {
+          "id": 1,
+          "ok": true,
+          "path": "/workspace/scratch/db3b2ab637bf/deliverables/work/boot-probe-menu/display.png",
+          "width": 320,
+          "height": 256
+        }
+      },
+      {
+        "elapsed": 43.461,
+        "cmd": "quit",
+        "response": {
+          "ok": false,
+          "err": "emu busy or frozen"
+        }
+      }
+    ],
+    "game_boot_verified": false,
+    "menu_verified": false,
+    "exit_code": 0
+  },
+  "log": "psxrecomp: main() entered\npsxrecomp: idle_skip disabled\npsxrecomp: overlay_region_floor = 0x9D000 (game text end), text_image_lo = 0x10000\npsxrecomp: loaded game config /workspace/scratch/db3b2ab637bf/deliverables/work/pc-bootstrap/20260915T064032Z-586189fa/game.toml (FM French experiment, SLES-03948)\npsxrecomp: CLI writable-state directory = /workspace/scratch/db3b2ab637bf/deliverables/work/boot-probe-menu/player-data\npsxrecomp: player data in /workspace/scratch/db3b2ab637bf/deliverables/work/boot-probe-menu/player-data\npsxrecomp runtime: loading BIOS from /workspace/scratch/db3b2ab637bf/deliverables/work/pc-runtime/bios/openbios.bin\npsxrecomp: renderer backend requested: software\npsxrecomp: disc region PAL (serial SLES-03948)\npsxrecomp: text image guard armed (0x80010000..0x801E0000, local EXE)\npsxrecomp: debug server LISTENING on 127.0.0.1:4370\npsxrecomp: headless frontend enabled\npsxrecomp: bios_hle kernel-call tier unavailable on OPENBIOS (no DeliverEvent anchor); kernel calls stay LLE\npsxrecomp: bios_backend=LLE (recompiled BIOS)  bios_boot=HLE (shell skipped)  image=OPENBIOS\npsxrecomp runtime: executing from PC=0xBFC00000\npsxrecomp: thread scheduler = HLE (deterministic TCB) (PSX_HLE_SCHEDULER)\n",
+  "screenshots": {
+    "konami.png": "0f44356629348da6b35d3af7c5e8deba6a586be43e92544d0d92688200e3c807",
+    "title.png": "edeecf6ba0f44485efc2aa4c6e258636a7566d8b2e787c83189cde11d65f14ee",
+    "menu.png": "f900df9ddc5262aec0869c7c897927b235d1f34a38587407b3537ec3a29b9056"
+  },
+  "note": "Raw probe flags were conservative defaults, not visual verdicts. manual_review records the subsequent visual inspection.",
+  "png_storage": "Lossless PNG recompression; decoded pixels checked identical to original captures."
+}
