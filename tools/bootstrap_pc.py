@@ -7,6 +7,7 @@ import argparse
 import datetime
 import hashlib
 import json
+import re
 import shutil
 import struct
 import subprocess
@@ -16,6 +17,10 @@ from pathlib import Path
 PIN = '1965b2df424da03483a5370340433a862f78f103'
 URL = 'https://github.com/Unchiga/psxrecomp.git'
 EXE_SHA = '57ecdfb9a9e1faf8b342fe7c7304c23723810861f3ab2fa3bef9eb27b5146b44'
+# Experimental resident analysis ceiling: startup clears memory from
+# 0x8009C408. Round up to the 4 KiB boundary required by upstream. This
+# deliberately excludes dynamic images; it is NOT a complete code map.
+FR_ANALYSIS_SIZE = 0x8d000
 ROOT = Path(__file__).resolve().parents[1]
 SEEDS = [0x800128cc, 0x80012a44, 0x8002cfdc, 0x8002d354, 0x8002d038,
          0x8002d0bc, 0x8002d2b4, 0x8002d4ac, 0x8002d5cc, 0x8002d544,
@@ -30,10 +35,14 @@ def main():
     p.add_argument('--generator', help='Optional CMake generator, e.g. Ninja')
     p.add_argument('--jobs', type=int, default=4)
     p.add_argument('--exe', type=Path, help='Original extracted SLES_039.48 (not payload.bin)')
+    p.add_argument('--analysis-size', type=lambda s:int(s,0),
+                   help='Override static analysis size in bytes (e.g. 0x1d0000); experimental')
+    p.add_argument('--cc', help='Optional GCC/Clang-compatible C compiler for object validation')
     a = p.parse_args()
     if not shutil.which('git') or not shutil.which(a.cmake):
         p.error('Git and CMake must be available; use a compiler Developer Command Prompt on Windows')
     if a.jobs < 1: p.error('--jobs must be positive')
+    if a.cc and not shutil.which(a.cc): p.error('--cc compiler not found')
     source = a.framework.resolve()
     build = a.build_dir.resolve() if a.build_dir else source/'recompiler/build-pc'
     if a.exe:
@@ -85,22 +94,44 @@ def main():
             exe.write_bytes(h+b);seeds=[0x80010000]
         data=exe.read_bytes()
         read=lambda offset:struct.unpack_from('<I',data,offset)[0]
+        analysis_size = a.analysis_size if a.analysis_size is not None else (FR_ANALYSIS_SIZE if a.exe else read(28))
+        if analysis_size <= 0 or analysis_size > read(28):
+            raise RuntimeError('Analysis size must be positive and within the payload')
+        result.update(input_sha256=hashlib.sha256(data).hexdigest(),
+                      payload_size=read(28),analysis_size=analysis_size,
+                      analysis_end='0x%08X'%(read(24)+analysis_size),
+                      overlays_integrated=False, runtime_linked=False)
         seedfile=run/'seeds.txt';seedfile.write_text(''.join('0x%08X\n'%s for s in seeds))
         generated=run/'generated'
         # Absolute forward-slash paths avoid upstream project-root inference and TOML backslash escapes.
         q=lambda path:json.dumps(Path(path).as_posix(),ensure_ascii=False)
         config=run/'game.toml'
         config.write_text('[game]\nname="FM French experiment"\nid="'+('SLES-03948' if a.exe else 'SMOKE')+'"\nexe='+q(exe)+'\n'+
-            ''.join(k+'="0x%08X"\n'%read(o) for k,o in [('load_address',24),('entry_pc',16),('text_size',28),('stack_base',48)])+
+            ''.join(k+'="0x%08X"\n'%v for k,v in [('load_address',read(24)),('entry_pc',read(16)),('text_size',analysis_size),('stack_base',read(48))])+
             '[recompiler]\nseeds='+q(seedfile)+'\nout_dir='+q(generated)+'\nstrict=true\ndiscovery="reachable"\nbios_config='+q(source/'bios/OpenBIOS.toml')+'\n',encoding='utf-8')
         command('generate',[tool,'--config',config],source)
         shards=list(generated.glob('*_full_*.c'))
         if not shards: raise RuntimeError('No generated C shards')
         result['generated_c_files']=len(shards)
         result['generated_c_bytes']=sum(x.stat().st_size for x in shards)
-        result['input_sha256']=hashlib.sha256(data).hexdigest()
-        result['status']='generation-complete'
-        print('C generation complete. This is NOT a linked or booted game.')
+        logtext=(evidence/'generate.log').read_text(encoding='utf-8',errors='replace')
+        warnings=[line for line in logtext.splitlines() if re.search(r'\bwarning\b',line,re.I)]
+        result['generation_warning_lines']=len(warnings)
+        manifests=list(generated.glob('*_full.ranges'))
+        result['generated_functions']=sum(sum(line.startswith('F ') for line in f.read_text().splitlines()) for f in manifests)
+        result['status']='generation-with-warnings' if warnings else 'generation-complete'
+        if a.cc:
+            objects=run/'objects';objects.mkdir()
+            command('compiler-version',[a.cc,'--version'])
+            files=sorted(generated.glob('*.c'))
+            for f in files:
+                command('compile-'+f.stem,[a.cc,'-std=c11','-O0','-DPSX_NO_DEBUG_TOOLS',
+                    '-I',source/'runtime/include','-c',f,'-o',objects/(f.stem+'.o')])
+            result['compiled_c_files']=len(files)
+            result['status']='objects-compiled-with-generation-warnings' if warnings else 'objects-compiled'
+        print('Generation warnings:',len(warnings))
+        print('C generation complete. Object compilation, when requested, does NOT validate game behavior.')
+        print('This is NOT a linked or booted game. Dynamic overlays are not integrated.')
         print('Report to commit:',evidence)
         return 0
     except (OSError,subprocess.SubprocessError,RuntimeError) as e:
