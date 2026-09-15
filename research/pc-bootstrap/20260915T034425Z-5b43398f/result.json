@@ -1,0 +1,31 @@
+{
+  "framework_commit": "1965b2df424da03483a5370340433a862f78f103",
+  "mode": "synthetic-smoke",
+  "steps": [
+    {
+      "step": "configure",
+      "exit_code": 0,
+      "log": "configure.log"
+    },
+    {
+      "step": "build",
+      "exit_code": 0,
+      "log": "build.log"
+    },
+    {
+      "step": "emitter-version",
+      "exit_code": 0,
+      "log": "emitter-version.log"
+    },
+    {
+      "step": "generate",
+      "exit_code": 0,
+      "log": "generate.log"
+    }
+  ],
+  "status": "generation-complete",
+  "game_booted": false,
+  "generated_c_files": 1,
+  "generated_c_bytes": 1638,
+  "input_sha256": "59bf463433effac22d0920f419c7a4dabe02f4877f45b84e21bd75000dac48e8"
+}
