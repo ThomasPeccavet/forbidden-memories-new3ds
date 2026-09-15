@@ -1,0 +1,149 @@
+PSXRecomp - PlayStation 1 Static Recompiler
+============================================
+
+config:         /workspace/scratch/db3b2ab637bf/deliverables/work/pc-bootstrap/20260915T034425Z-5b43398f/game.toml
+  exe         = /workspace/scratch/db3b2ab637bf/deliverables/work/pc-bootstrap/20260915T034425Z-5b43398f/SMOKE.EXE
+  seeds       = /workspace/scratch/db3b2ab637bf/deliverables/work/pc-bootstrap/20260915T034425Z-5b43398f/seeds.txt
+  out_dir     = /workspace/scratch/db3b2ab637bf/deliverables/work/pc-bootstrap/20260915T034425Z-5b43398f/generated
+
+Parsing PS1-EXE: /workspace/scratch/db3b2ab637bf/deliverables/work/pc-bootstrap/20260915T034425Z-5b43398f/SMOKE.EXE
+✓ Successfully parsed PS1-EXE!
+
+PS1-EXE Header Info:
+  Entry Point:    0x80010000
+  Load Address:   0x80010000
+  Code Size:      2048 bytes (2 KB)
+  End Address:    0x80010800
+  Global Pointer: 0x00000000
+  Stack Pointer:  0x801FFFF0
+
+Performing function analysis...
+Loaded 1 extra function addresses (0 interior, 0 hosted-interior, 0 dispatch-root, 0 call-root, 0 producer ranges, 0 cross-call allows) from /workspace/scratch/db3b2ab637bf/deliverables/work/pc-bootstrap/20260915T034425Z-5b43398f/seeds.txt
+
+=== Exact-Entry Function Analysis ===
+
+Explicit entries: 1
+Direct-JAL entries: 0
+Total exact entries: 1
+
+Exact-entry alias entries emitted: 0
+
+
+=== Function Analysis Summary ===
+
+Total Functions: 1
+Code Coverage:   2 KB analyzed
+With Prologue:   0 (0.0%)
+With Epilogue:   1 (100.0%)
+Complete:        0 (0.0%)
+
+First 20 Functions:
+---------------------------------------
+  80010000-8001000C     12 bytes  func_80010000
+
+... (0 more functions)
+
+
+=== Control Flow Analysis ===
+
+Analyzing 1 functions...
+✓ Created 1 basic blocks
+✓ Detected 0 loops
+✓ Average 1.0 blocks per function
+
+=== Control Flow Summary ===
+
+Basic Blocks:       1
+Loops Detected:     0
+Branch Instructions: 0
+Avg Blocks/Function: 1.0
+
+Example: CFG for func_80010000 (0x80010000):
+---------------------------------------
+  Blocks: 1
+  Loops:  0
+
+  (No annotations file found at annotations/SMOKE.EXE_annotations.csv)
+
+=== C Code Generation Examples ===
+
+Generating code for first 5 functions...
+
+
+=== C Code Generation ===
+
+Generating C code for 1 functions...
+✓ Generated 1 functions
+✓ Total C code: 49 lines
+
+Example Generated Function:
+---------------------------------------
+void func_80010000(CPUState* cpu)
+{
+#if defined(PSX_ENABLE_BLOCK_CYCLES) && (defined(__GNUC__) || defined(__clang__))
+    __attribute__((cleanup(psx_cyc_bb_defer_cleanup))) int _psx_cyc_bb_guard = 1;
+    psx_cyc_bb_defer_begin();
+#endif
+    debug_server_log_call_entry(0x80010000u);
+    /* Address: 0x80010000, Size: 12 bytes, Blocks: 1 */
+
+block_80010000:
+#ifndef PSX_NO_DEBUG_TOOLS
+    debug_server_cyc_observe(0x80010000u);
+#endif
+#ifdef PSX_COSIM
+    cosim_block(0x80010000u);
+#endif
+#ifdef PSX_ENABLE_BLOCK_CYCLES
+    if (psx_slice_block(cpu, 0x80010000u, 3u, 0)) return;
+#endif
+#ifdef PSX_ENABLE_BLOCK_CYCLES
+    psx_icache_fetch(cpu, 0x80010000u);
+#endif
+#ifdef PSX_ENABLE_BLOCK_CYCLES
+    psx_cyc_step(cpu, 0x5u);
+#endif
+    { uint32_t _pgx1 = cpu->gpr[0]; cpu->gpr[2] = 42;
+    PGXP_ALU(0x2402002Au, cpu->gpr[2], _pgx1, 0x0000002Au); }  /* 0x80010000: 0x2402002A */
+#ifdef PSX_COSIM
+    cosim_instr(0x80010000u);
+#endif
+#ifdef PSX_ENABLE_BLOCK_CYCLES
+    psx_cyc_step(cpu, 0x80000001u);
+#endif
+    uint32_t _jt_80010004 = cpu->gpr[31];  /* latch indirect target before delay slot */
+    /* delay slot (always executes) */
+#ifdef PSX_ENABLE_BLOCK_CYCLES
+    psx_cyc_step(cpu, 0x1u);
+#endif
+    /* nop */  /* 0x80010008: 0x00000000 */
+#ifdef PSX_COSIM
+    cosim_instr(0x80010008u);
+#endif
+#ifdef PSX_ENABLE_BLOCK_CYCLES
+    psx_cyc_bb_defer_flush();
+#endif
+    psx_check_interrupts_at(cpu, _jt_80010004);
+    cpu->pc = _jt_80010004; return;  /* CPS: jr $ra */
+    ;  /* label compatibility: C requires a statement after the last label */
+}
+
+---------------------------------------
+
+Generating complete C file: /workspace/scratch/db3b2ab637bf/deliverables/work/pc-bootstrap/20260915T034425Z-5b43398f/generated/SMOKE.EXE_full.c
+
+=== C Code Generation ===
+
+Generating C code for 1 functions...
+✓ Generated 1 functions
+✓ Total C code: 49 lines
+
+✓ Saved shared decls header to /workspace/scratch/db3b2ab637bf/deliverables/work/pc-bootstrap/20260915T034425Z-5b43398f/generated/SMOKE.EXE_decls.h
+✓ Saved shard 0 (49 lines) to /workspace/scratch/db3b2ab637bf/deliverables/work/pc-bootstrap/20260915T034425Z-5b43398f/generated/SMOKE.EXE_full_00.c
+✓ Wrote 1 shards (49 total lines, 1 updated) for SMOKE.EXE
+
+✓ Saved code-range manifest to /workspace/scratch/db3b2ab637bf/deliverables/work/pc-bootstrap/20260915T034425Z-5b43398f/generated/SMOKE.EXE_full.ranges
+
+Generating dispatch table: /workspace/scratch/db3b2ab637bf/deliverables/work/pc-bootstrap/20260915T034425Z-5b43398f/generated/SMOKE.EXE_dispatch.c
+✓ Dispatch table written (1 entries)
+
