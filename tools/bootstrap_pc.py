@@ -108,7 +108,8 @@ def main():
         config=run/'game.toml'
         config.write_text('[game]\nname="FM French experiment"\nid="'+('SLES-03948' if a.exe else 'SMOKE')+'"\nexe='+q(exe)+'\n'+
             ''.join(k+'="0x%08X"\n'%v for k,v in [('load_address',read(24)),('entry_pc',read(16)),('text_size',analysis_size),('stack_base',read(48))])+
-            '[recompiler]\nseeds='+q(seedfile)+'\nout_dir='+q(generated)+'\nstrict=true\ndiscovery="reachable"\nbios_config='+q(source/'bios/OpenBIOS.toml')+'\n',encoding='utf-8')
+            '[recompiler]\nseeds='+q(seedfile)+'\nout_dir='+q(generated)+'\nstrict=true\ndiscovery="reachable"\nbios_config='+q(source/'bios/OpenBIOS.toml')+'\n'+
+            ('\n[controller]\np1_mode="digital"\nlock_mode=true\n' if a.exe else ''),encoding='utf-8')
         command('generate',[tool,'--config',config],source)
         shards=list(generated.glob('*_full_*.c'))
         if not shards: raise RuntimeError('No generated C shards')
