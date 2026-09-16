@@ -1,0 +1,32 @@
+{
+  "date": "2026-09-16",
+  "target": "New 3DS / ARM11",
+  "stage": "platform bring-up; not playable",
+  "upstream_commit": "1965b2df424da03483a5370340433a862f78f103",
+  "compiler": "arm-none-eabi-gcc (devkitARM) 16.1.0",
+  "image_source": "devkitpro/devkitarm:latest",
+  "image_manifest_sha256": "116afba8df8453961de2936ffab20dd441edf4d682856c1ec8b0e53d7ed0bbf5",
+  "build_exit_code": 0,
+  "elf_machine": "ARM",
+  "elf_abi": "EABI5 hard-float",
+  "app_bytes": 126096,
+  "app_sha256": "19cef745e2f578209d1db0fe5cb4c96256534f3fd0ca85ec9d023383a5cc4770",
+  "header_magic": "3DSX",
+  "linked_symbols": [
+    "sw_draw_gouraud_triangle",
+    "sw_fill_rect",
+    "fm_present_rgb555",
+    "fm_disc_load_exe"
+  ],
+  "console_execution_verified": false,
+  "game_cpu_linked": false,
+  "audio_implemented": false,
+  "preview_is_static_pc_capture": true,
+  "preview_source_git_blob": "a41ded90cefaed5497a71383fe963da55b96eac0",
+  "known_limits": [
+    "No game execution",
+    "No console performance measurements",
+    "Form1 disc reader only",
+    "No sound or save handling"
+  ]
+}
