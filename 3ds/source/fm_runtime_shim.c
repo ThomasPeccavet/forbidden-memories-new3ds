@@ -3,6 +3,7 @@
 #include "fm_gpu.h"
 
 #include <setjmp.h>
+#include <stddef.h>
 #include <stdint.h>
 
 
@@ -38,6 +39,7 @@ static uint32_t g_bios_clear_pad = 0;
 static uint32_t g_bios_memory_megabytes = 2;
 
 static uint32_t g_bios_tty_bytes = 0;
+
 static uint32_t g_bios_pad_buf1 = 0;
 static uint32_t g_bios_pad_buf2 = 0;
 
@@ -46,28 +48,95 @@ static uint32_t g_bios_pad_size2 = 0;
 
 static int g_bios_pad_started = 0;
 
+
 /*
- * Adresses des tables BIOS retail SCPH-1001/PSOne.
+ * ============================================================
+ * BIOS event system
+ * ============================================================
  *
- * B0:56 GetC0Table -> 0x00000674
- * B0:57 GetB0Table -> 0x00000874
+ * Handles are exposed as:
  *
- * C0[6] est le handler d'exception. Les patchs libapi classiques
- * s'attendent a recuperer 0x00000C80 a cet index.
+ *   F1000000 | index
+ *
+ * This is sufficient for the Psy-Q event API used by the game
+ * during bring-up.
  */
+
+#define FM_BIOS_EVENT_COUNT 32u
+#define FM_BIOS_EVENT_HANDLE_BASE 0xF1000000u
+
+typedef struct FM_BiosEvent
+{
+    uint32_t used;
+    uint32_t enabled;
+    uint32_t ready;
+
+    uint32_t class_id;
+    uint32_t spec;
+    uint32_t mode;
+    uint32_t func;
+} FM_BiosEvent;
+
+
+static FM_BiosEvent g_bios_events[
+    FM_BIOS_EVENT_COUNT
+];
+
+
+static int fm_bios_event_index(
+    uint32_t handle
+)
+{
+    if (
+        (
+            handle
+            &
+            0xFFFFFF00u
+        )
+        !=
+        FM_BIOS_EVENT_HANDLE_BASE
+    )
+    {
+        return -1;
+    }
+
+
+    uint32_t index =
+        handle
+        &
+        0xFFu;
+
+
+    if (index >= FM_BIOS_EVENT_COUNT)
+    {
+        return -1;
+    }
+
+
+    return
+        (int)index;
+}
+
+
+/*
+ * ============================================================
+ * BIOS jump tables
+ * ============================================================
+ */
+
 #define FM_BIOS_C0_TABLE_ADDR           0x00000674u
 #define FM_BIOS_B0_TABLE_ADDR           0x00000874u
 #define FM_BIOS_C0_EXCEPTION_HANDLER    0x00000C80u
 
 
-#define FM_BIOS_IRQ_CHAINS 8
+#define FM_BIOS_IRQ_CHAINS 8u
 
 static uint32_t g_bios_irq_chain_heads[
     FM_BIOS_IRQ_CHAINS
 ] = { 0 };
 
 
-#define FM_BIOS_RCNT_COUNT 4
+#define FM_BIOS_RCNT_COUNT 4u
 
 static uint32_t g_bios_change_clear_rcnt[
     FM_BIOS_RCNT_COUNT
@@ -98,7 +167,7 @@ static CPUState *g_probe_cpu = NULL;
 
 /*
  * ============================================================
- * BIOS jump tables
+ * BIOS jump tables helper
  * ============================================================
  */
 
@@ -119,9 +188,8 @@ static void fm_bios_prepare_jump_tables(
 
 
     /*
-     * La RAM basse n'est pas initialisee par un vrai BIOS dans
-     * notre bring-up. On fournit au minimum l'entree que les
-     * patchs libapi utilisent classiquement :
+     * La RAM basse n'est pas initialisée par un vrai BIOS dans
+     * notre bring-up.
      *
      * C0[06] = ExceptionHandler = 0x00000C80.
      */
@@ -159,7 +227,9 @@ static void fm_probe_stop(
 )
 {
     if (!g_probe_armed)
+    {
         return;
+    }
 
 
     g_probe_reason =
@@ -215,7 +285,9 @@ FMRuntimeProbeResult fm_runtime_probe(
 
 
     if (!cpu)
+    {
         return result;
+    }
 
 
     g_probe_cpu =
@@ -447,7 +519,9 @@ void psx_check_interrupts_at(
 )
 {
     if (!g_probe_armed)
+    {
         return;
+    }
 
 
     ++g_probe_checks;
@@ -518,7 +592,9 @@ int psx_syscall(
 
 
     if (!cpu)
+    {
         return 1;
+    }
 
 
     uint32_t func =
@@ -621,7 +697,9 @@ int fm_bios_try_hle(
 )
 {
     if (!cpu)
+    {
         return 0;
+    }
 
 
     uint32_t phys =
@@ -634,40 +712,36 @@ int fm_bios_try_hle(
         cpu->gpr[9]
         &
         0xFFu;
-/*
- * ========================================================
- * Psy-Q internal PAD patch helpers
- *
- * Forbidden Memories récupère B0[5B] via B0:57 puis
- * construit :
- *
- *   B0[5B] + 0x884 -> SetPadEnableFlag
- *   B0[5B] + 0x894 -> ClearPadEnableFlag
- *
- * Notre table B0 retail n'étant pas réellement présente,
- * B0[5B] vaut actuellement 0.
- *
- * Les adresses observées sont donc 0x884 / 0x894.
- *
- * Pour le bring-up, notre gestion PAD est déjà HLE :
- * ces deux fonctions peuvent simplement retourner.
- * ========================================================
- */
 
-if (
-    phys == 0x00000884u
-    ||
-    phys == 0x00000894u
-)
-{
-    cpu->pc =
-        cpu->gpr[31];
 
-    cpu->gpr[0] =
-        0;
+    /*
+     * ========================================================
+     * Psy-Q internal PAD patch helpers
+     *
+     * Observed addresses:
+     *
+     *   0x884 -> SetPadEnableFlag
+     *   0x894 -> ClearPadEnableFlag
+     * ========================================================
+     */
 
-    return 1;
-}
+    if (
+        phys == 0x00000884u
+        ||
+        phys == 0x00000894u
+    )
+    {
+        cpu->pc =
+            cpu->gpr[31];
+
+
+        cpu->gpr[0] =
+            0;
+
+
+        return 1;
+    }
+
 
     /*
      * ========================================================
@@ -678,11 +752,7 @@ if (
     if (phys == 0x000000A0u)
     {
         /*
-         * ----------------------------------------------------
-         * GPU BIOS family
-         *
-         * A0:46..A0:4E
-         * ----------------------------------------------------
+         * GPU BIOS family A0:46..A0:4E.
          */
         if (
             fn >= 0x46u
@@ -704,58 +774,59 @@ if (
 
         switch (fn)
         {
-/*
- * A0:54 / A0:71 _96_init()
- *
- * Initialisation du sous-système CD/IO BIOS.
- *
- * Bring-up minimal :
- * aucune initialisation matérielle supplémentaire ici.
- */
-case 0x54:
-case 0x71:
-{
-    cpu->pc =
-        cpu->gpr[31];
+            /*
+             * A0:44 FlushCache
+             */
+            case 0x44:
+            {
+                cpu->pc =
+                    cpu->gpr[31];
 
-    cpu->gpr[0] =
-        0;
 
-    return 1;
-}
-/*
- * A0:55 / A0:70 _bu_init()
- *
- * Initialisation bas niveau des périphériques memory-card.
- *
- * Pour le bring-up actuel, on n'émule pas encore
- * la carte mémoire complète. On considère simplement
- * l'initialisation comme réussie et on retourne au jeu.
- */
-case 0x55:
-case 0x70:
-{
-    cpu->pc =
-        cpu->gpr[31];
+                cpu->gpr[0] =
+                    0;
 
-    cpu->gpr[0] =
-        0;
 
-    return 1;
-}
-/*
- * A0:44 FlushCache
- *
- * Pas de cache d'instructions guest réel dans notre backend :
- * les écritures RAM sont immédiatement visibles.
- */
-case 0x44:
-{
-    cpu->pc = cpu->gpr[31];
-    cpu->gpr[0] = 0;
+                return 1;
+            }
 
-    return 1;
-}
+
+            /*
+             * A0:54 / A0:71 _96_init()
+             */
+            case 0x54:
+            case 0x71:
+            {
+                cpu->pc =
+                    cpu->gpr[31];
+
+
+                cpu->gpr[0] =
+                    0;
+
+
+                return 1;
+            }
+
+
+            /*
+             * A0:55 / A0:70 _bu_init()
+             */
+            case 0x55:
+            case 0x70:
+            {
+                cpu->pc =
+                    cpu->gpr[31];
+
+
+                cpu->gpr[0] =
+                    0;
+
+
+                return 1;
+            }
+
+
             /*
              * A0:72 _96_remove
              */
@@ -828,6 +899,598 @@ case 0x44:
         switch (fn)
         {
             /*
+             * ------------------------------------------------
+             * B0:07 DeliverEvent(class, spec)
+             * ------------------------------------------------
+             */
+            case 0x07:
+            {
+                uint32_t class_id =
+                    cpu->gpr[4];
+
+
+                uint32_t spec =
+                    cpu->gpr[5];
+
+
+                for (
+                    unsigned i = 0;
+                    i < FM_BIOS_EVENT_COUNT;
+                    ++i
+                )
+                {
+                    FM_BiosEvent *ev =
+                        &g_bios_events[i];
+
+
+                    if (
+                        !ev->used
+                        ||
+                        !ev->enabled
+                        ||
+                        ev->class_id != class_id
+                        ||
+                        ev->spec != spec
+                    )
+                    {
+                        continue;
+                    }
+
+
+                    /*
+                     * Mode 0x2000 = no callback.
+                     *
+                     * Le prochain TestEvent/WaitEvent verra
+                     * l'événement READY.
+                     */
+                    if (ev->mode == 0x2000u)
+                    {
+                        ev->ready =
+                            1;
+                    }
+
+
+                    /*
+                     * Mode 0x1000 utilise normalement un callback.
+                     *
+                     * Pour ce bring-up on ne lance pas encore
+                     * de callback guest imbriqué depuis le BIOS HLE.
+                     * On marque quand même l'événement READY afin
+                     * d'éviter de bloquer les chemins qui le testent.
+                     */
+                    if (ev->mode == 0x1000u)
+                    {
+                        ev->ready =
+                            1;
+                    }
+                }
+
+
+                cpu->gpr[2] =
+                    1;
+
+
+                cpu->pc =
+                    cpu->gpr[31];
+
+
+                cpu->gpr[0] =
+                    0;
+
+
+                return 1;
+            }
+
+
+            /*
+             * ------------------------------------------------
+             * B0:08 OpenEvent(class, spec, mode, func)
+             * ------------------------------------------------
+             */
+            case 0x08:
+            {
+                int slot =
+                    -1;
+
+
+                for (
+                    unsigned i = 0;
+                    i < FM_BIOS_EVENT_COUNT;
+                    ++i
+                )
+                {
+                    if (!g_bios_events[i].used)
+                    {
+                        slot =
+                            (int)i;
+
+                        break;
+                    }
+                }
+
+
+                if (slot < 0)
+                {
+                    cpu->gpr[2] =
+                        0xFFFFFFFFu;
+                }
+                else
+                {
+                    FM_BiosEvent *ev =
+                        &g_bios_events[slot];
+
+
+                    ev->used =
+                        1;
+
+
+                    ev->enabled =
+                        0;
+
+
+                    ev->ready =
+                        0;
+
+
+                    ev->class_id =
+                        cpu->gpr[4];
+
+
+                    ev->spec =
+                        cpu->gpr[5];
+
+
+                    ev->mode =
+                        cpu->gpr[6];
+
+
+                    ev->func =
+                        cpu->gpr[7];
+
+
+                    cpu->gpr[2] =
+                        FM_BIOS_EVENT_HANDLE_BASE
+                        |
+                        (uint32_t)slot;
+                }
+
+
+                cpu->pc =
+                    cpu->gpr[31];
+
+
+                cpu->gpr[0] =
+                    0;
+
+
+                return 1;
+            }
+
+
+            /*
+             * ------------------------------------------------
+             * B0:09 CloseEvent(event)
+             * ------------------------------------------------
+             */
+            case 0x09:
+            {
+                int index =
+                    fm_bios_event_index(
+                        cpu->gpr[4]
+                    );
+
+
+                if (index >= 0)
+                {
+                    g_bios_events[index].used =
+                        0;
+
+
+                    g_bios_events[index].enabled =
+                        0;
+
+
+                    g_bios_events[index].ready =
+                        0;
+
+
+                    g_bios_events[index].class_id =
+                        0;
+
+
+                    g_bios_events[index].spec =
+                        0;
+
+
+                    g_bios_events[index].mode =
+                        0;
+
+
+                    g_bios_events[index].func =
+                        0;
+                }
+
+
+                cpu->gpr[2] =
+                    1;
+
+
+                cpu->pc =
+                    cpu->gpr[31];
+
+
+                cpu->gpr[0] =
+                    0;
+
+
+                return 1;
+            }
+
+
+            /*
+             * ------------------------------------------------
+             * B0:0A WaitEvent(event)
+             * ------------------------------------------------
+             */
+            case 0x0A:
+            {
+                int index =
+                    fm_bios_event_index(
+                        cpu->gpr[4]
+                    );
+
+
+                if (
+                    index < 0
+                    ||
+                    !g_bios_events[index].used
+                    ||
+                    !g_bios_events[index].enabled
+                )
+                {
+                    cpu->gpr[2] =
+                        0;
+                }
+                else if (g_bios_events[index].ready)
+                {
+                    g_bios_events[index].ready =
+                        0;
+
+
+                    cpu->gpr[2] =
+                        1;
+                }
+                else
+                {
+                    /*
+                     * Bring-up non bloquant.
+                     *
+                     * Le guest peut rappeler WaitEvent.
+                     */
+                    cpu->gpr[2] =
+                        0;
+                }
+
+
+                cpu->pc =
+                    cpu->gpr[31];
+
+
+                cpu->gpr[0] =
+                    0;
+
+
+                return 1;
+            }
+
+
+            /*
+             * ------------------------------------------------
+             * B0:0B TestEvent(event)
+             * ------------------------------------------------
+             */
+            case 0x0B:
+            {
+                int index =
+                    fm_bios_event_index(
+                        cpu->gpr[4]
+                    );
+
+
+                if (
+                    index >= 0
+                    &&
+                    g_bios_events[index].used
+                    &&
+                    g_bios_events[index].enabled
+                    &&
+                    g_bios_events[index].ready
+                )
+                {
+                    g_bios_events[index].ready =
+                        0;
+
+
+                    cpu->gpr[2] =
+                        1;
+                }
+                else
+                {
+                    cpu->gpr[2] =
+                        0;
+                }
+
+
+                cpu->pc =
+                    cpu->gpr[31];
+
+
+                cpu->gpr[0] =
+                    0;
+
+
+                return 1;
+            }
+
+
+            /*
+             * ------------------------------------------------
+             * B0:0C EnableEvent(event)
+             * ------------------------------------------------
+             */
+            case 0x0C:
+            {
+                int index =
+                    fm_bios_event_index(
+                        cpu->gpr[4]
+                    );
+
+
+                if (
+                    index >= 0
+                    &&
+                    g_bios_events[index].used
+                )
+                {
+                    g_bios_events[index].enabled =
+                        1;
+
+
+                    g_bios_events[index].ready =
+                        0;
+
+
+                    cpu->gpr[2] =
+                        1;
+                }
+                else
+                {
+                    cpu->gpr[2] =
+                        0;
+                }
+
+
+                cpu->pc =
+                    cpu->gpr[31];
+
+
+                cpu->gpr[0] =
+                    0;
+
+
+                return 1;
+            }
+
+
+            /*
+             * ------------------------------------------------
+             * B0:0D DisableEvent(event)
+             * ------------------------------------------------
+             */
+            case 0x0D:
+            {
+                int index =
+                    fm_bios_event_index(
+                        cpu->gpr[4]
+                    );
+
+
+                if (
+                    index >= 0
+                    &&
+                    g_bios_events[index].used
+                )
+                {
+                    g_bios_events[index].enabled =
+                        0;
+
+
+                    g_bios_events[index].ready =
+                        0;
+
+
+                    cpu->gpr[2] =
+                        1;
+                }
+                else
+                {
+                    cpu->gpr[2] =
+                        0;
+                }
+
+
+                cpu->pc =
+                    cpu->gpr[31];
+
+
+                cpu->gpr[0] =
+                    0;
+
+
+                return 1;
+            }
+
+
+            /*
+             * B0:12 InitPAD2(buf1, siz1, buf2, siz2)
+             */
+            case 0x12:
+            {
+                uint32_t buf1 =
+                    cpu->gpr[4];
+
+
+                uint32_t size1 =
+                    cpu->gpr[5];
+
+
+                uint32_t buf2 =
+                    cpu->gpr[6];
+
+
+                uint32_t size2 =
+                    cpu->gpr[7];
+
+
+                g_bios_pad_buf1 =
+                    buf1;
+
+
+                g_bios_pad_buf2 =
+                    buf2;
+
+
+                g_bios_pad_size1 =
+                    size1;
+
+
+                g_bios_pad_size2 =
+                    size2;
+
+
+                if (size1 > 0x100u)
+                {
+                    size1 =
+                        0x100u;
+                }
+
+
+                if (size2 > 0x100u)
+                {
+                    size2 =
+                        0x100u;
+                }
+
+
+                if (buf1 != 0)
+                {
+                    for (
+                        uint32_t i = 0;
+                        i < size1;
+                        ++i
+                    )
+                    {
+                        cpu->write_byte(
+                            buf1 + i,
+                            0
+                        );
+                    }
+
+
+                    if (size1 != 0)
+                    {
+                        cpu->write_byte(
+                            buf1,
+                            0xFF
+                        );
+                    }
+                }
+
+
+                if (buf2 != 0)
+                {
+                    for (
+                        uint32_t i = 0;
+                        i < size2;
+                        ++i
+                    )
+                    {
+                        cpu->write_byte(
+                            buf2 + i,
+                            0
+                        );
+                    }
+
+
+                    if (size2 != 0)
+                    {
+                        cpu->write_byte(
+                            buf2,
+                            0xFF
+                        );
+                    }
+                }
+
+
+                g_bios_pad_started =
+                    0;
+
+
+                cpu->pc =
+                    cpu->gpr[31];
+
+
+                cpu->gpr[0] =
+                    0;
+
+
+                return 1;
+            }
+
+
+            /*
+             * B0:13 StartPAD2()
+             */
+            case 0x13:
+            {
+                g_bios_pad_started =
+                    1;
+
+
+                cpu->pc =
+                    cpu->gpr[31];
+
+
+                cpu->gpr[0] =
+                    0;
+
+
+                return 1;
+            }
+
+
+            /*
+             * B0:14 StopPAD2()
+             */
+            case 0x14:
+            {
+                g_bios_pad_started =
+                    0;
+
+
+                cpu->pc =
+                    cpu->gpr[31];
+
+
+                cpu->gpr[0] =
+                    0;
+
+
+                return 1;
+            }
+
+
+            /*
              * B0:18 ResetEntryInt
              */
             case 0x18:
@@ -855,155 +1518,7 @@ case 0x44:
                 return 1;
             }
 
-/*
- * B0:12 InitPAD2(buf1, siz1, buf2, siz2)
- */
-case 0x12:
-{
-    uint32_t buf1 =
-        cpu->gpr[4];
 
-    uint32_t size1 =
-        cpu->gpr[5];
-
-    uint32_t buf2 =
-        cpu->gpr[6];
-
-    uint32_t size2 =
-        cpu->gpr[7];
-
-
-    g_bios_pad_buf1 =
-        buf1;
-
-    g_bios_pad_buf2 =
-        buf2;
-
-    g_bios_pad_size1 =
-        size1;
-
-    g_bios_pad_size2 =
-        size2;
-
-
-    /*
-     * Protection bring-up contre une taille corrompue.
-     */
-    if (size1 > 0x100u)
-        size1 = 0x100u;
-
-    if (size2 > 0x100u)
-        size2 = 0x100u;
-
-
-    /*
-     * Le vrai BIOS initialise les buffers.
-     */
-    if (buf1 != 0)
-    {
-        for (
-            uint32_t i = 0;
-            i < size1;
-            ++i
-        )
-        {
-            cpu->write_byte(
-                buf1 + i,
-                0
-            );
-        }
-
-
-        /*
-         * Pour éviter que 0000 soit interprété comme
-         * "tous les boutons appuyés" avant le premier IRQ,
-         * on expose temporairement un pad déconnecté.
-         */
-        if (size1 != 0)
-        {
-            cpu->write_byte(
-                buf1,
-                0xFF
-            );
-        }
-    }
-
-
-    if (buf2 != 0)
-    {
-        for (
-            uint32_t i = 0;
-            i < size2;
-            ++i
-        )
-        {
-            cpu->write_byte(
-                buf2 + i,
-                0
-            );
-        }
-
-
-        if (size2 != 0)
-        {
-            cpu->write_byte(
-                buf2,
-                0xFF
-            );
-        }
-    }
-
-
-    g_bios_pad_started =
-        0;
-
-
-    cpu->pc =
-        cpu->gpr[31];
-
-    cpu->gpr[0] =
-        0;
-
-    return 1;
-}
-
-
-/*
- * B0:13 StartPAD2()
- */
-case 0x13:
-{
-    g_bios_pad_started =
-        1;
-
-
-    cpu->pc =
-        cpu->gpr[31];
-
-    cpu->gpr[0] =
-        0;
-
-    return 1;
-}
-
-
-/*
- * B0:14 StopPAD2()
- */
-case 0x14:
-{
-    g_bios_pad_started =
-        0;
-
-
-    cpu->pc =
-        cpu->gpr[31];
-
-    cpu->gpr[0] =
-        0;
-
-    return 1;
-}
             /*
              * B0:19 HookEntryInt
              */
@@ -1093,58 +1608,61 @@ case 0x14:
 
                 return 1;
             }
-/*
- * B0:4A InitCARD2(pad_enable)
- *
- * Bring-up minimal :
- * on ne simule pas encore le contrôleur mémoire/pad BIOS.
- */
-case 0x4A:
-{
-    cpu->pc =
-        cpu->gpr[31];
-
-    cpu->gpr[0] =
-        0;
-
-    return 1;
-}
 
 
-/*
- * B0:4B StartCARD2()
- */
-case 0x4B:
-{
-    cpu->pc =
-        cpu->gpr[31];
-
-    cpu->gpr[0] =
-        0;
-
-    return 1;
-}
+            /*
+             * B0:4A InitCARD2(pad_enable)
+             */
+            case 0x4A:
+            {
+                cpu->pc =
+                    cpu->gpr[31];
 
 
-/*
- * B0:4C StopCARD2()
- */
-case 0x4C:
-{
-    cpu->pc =
-        cpu->gpr[31];
+                cpu->gpr[0] =
+                    0;
 
-    cpu->gpr[0] =
-        0;
 
-    return 1;
-}
+                return 1;
+            }
+
+
+            /*
+             * B0:4B StartCARD2()
+             */
+            case 0x4B:
+            {
+                cpu->pc =
+                    cpu->gpr[31];
+
+
+                cpu->gpr[0] =
+                    0;
+
+
+                return 1;
+            }
+
+
+            /*
+             * B0:4C StopCARD2()
+             */
+            case 0x4C:
+            {
+                cpu->pc =
+                    cpu->gpr[31];
+
+
+                cpu->gpr[0] =
+                    0;
+
+
+                return 1;
+            }
+
 
             /*
              * B0:56 GetC0Table()
-             *
-             * Retail SCPH-1001/PSOne:
-             * C0 jump table = 0x00000674.
              */
             case 0x56:
             {
@@ -1171,9 +1689,6 @@ case 0x4C:
 
             /*
              * B0:57 GetB0Table()
-             *
-             * Retail SCPH-1001/PSOne:
-             * B0 jump table = 0x00000874.
              */
             case 0x57:
             {
@@ -1337,7 +1852,7 @@ case 0x4C:
                     unsigned safety = 0;
                     node != 0
                     &&
-                    safety < 64;
+                    safety < 64u;
                     ++safety
                 )
                 {
@@ -1413,9 +1928,7 @@ case 0x4C:
              */
             case 0x0A:
             {
-                if (
-                    a0 < FM_BIOS_RCNT_COUNT
-                )
+                if (a0 < FM_BIOS_RCNT_COUNT)
                 {
                     uint32_t old_flag =
                         g_bios_change_clear_rcnt[
