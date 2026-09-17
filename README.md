@@ -4,136 +4,154 @@ Projet expérimental de portage/recompilation de **Yu-Gi-Oh! Forbidden Memories*
 (version française **SLES-03948**) vers **New Nintendo 3DS**.
 
 > [!IMPORTANT]
-> Le port **New 3DS n'est pas encore jouable**. Un prototype natif ARM11 compile
-> en `.3dsx`, mais le CPU du jeu n'est pas encore raccordé et son exécution sur
-> console physique n'a pas encore été validée.
+> Le port New 3DS n'est **pas encore jouable**, mais le projet a dépassé le stade
+> du simple prototype graphique : le PS-X EXE français est chargé, du code MIPS
+> est recompilé statiquement en ARM11, un fallback R3000A exécute les blocs non
+> couverts, plusieurs services BIOS sont émulés et le chemin GPU PS1 est branché
+> sur le rasteriseur logiciel.
 
-## État du projet — 16 septembre 2026
+## État du projet — 17 septembre 2026
 
 | Partie | État actuel |
 | --- | --- |
-| Identification du disque français | ✅ Profil SLES-03948 vérifié |
+| Profil PAL France / SLES-03948 | ✅ Vérifié |
 | Extraction / analyse PS-X EXE | ✅ Fonctionnelle |
-| Analyse statique / outils Ghidra | ✅ Première passe et outils disponibles |
-| Runtime expérimental PC | ✅ Menu principal atteint |
-| Nouvelle partie sur PC | ✅ Introduction française parcourue |
-| Premier duel sur PC | ✅ Main distribuée, carte posée, tour terminé |
+| Analyse Ghidra française | ✅ Plusieurs passes + overlays SU étudiés |
+| Runtime PC | ✅ Menu, nouvelle partie et premier duel atteints |
 | Build native New 3DS | ✅ `.3dsx` ARM11 compilé avec devkitARM/libctru |
-| Affichage 3DS | ✅ RGB555 PS1 → framebuffer 3DS + rasteriseur logiciel ARM |
-| Lecture du BIN depuis SD | ✅ MODE2/Form1 + chargement du PS-X EXE |
-| Exécution du jeu sur 3DS | ❌ Pas encore raccordée |
-| Audio / XA / SPU / sauvegarde 3DS | ❌ Pas encore implémentés |
+| Code résident recompilé ARM11 | ✅ Lié dans le binaire 3DS |
+| CPU PS1 / registres / RAM 2 Mio | ✅ Initialisés |
+| Dispatch hybride | ✅ ARM recompilé + fallback R3000A |
+| Appels BIOS nécessaires au boot | 🟡 HLE partiel, extension au fil du boot |
+| GP0 / GP1 PS1 | ✅ Routés vers le bridge GPU |
+| Commandes BIOS GPU A0:46..4E | ✅ Bridge présent |
+| Rasteriseur PS1 logiciel | ✅ Compilé ARM11 et raccordé |
+| Première image réelle du jeu sur 3DS | ❌ Pas encore obtenue |
+| I_STAT / I_MASK / VBlank | 🟡 Prochain chantier prioritaire |
+| DMA GPU / DMA2 | ❌ À fiabiliser / compléter |
+| CD-ROM asynchrone / overlays complets | ❌ À compléter |
+| GTE complet | ❌ À compléter |
+| XA / SPU / audio | ❌ Non implémentés |
+| Sauvegarde | ❌ Non implémentée |
 | Test sur New 3DS physique | ❌ Pas encore validé |
 
-### Avancement PC vérifié
+Le diagnostic Azahar le plus récent confirme que le fallback R3000A est utilisé,
+que le jeu continue après plusieurs appels BIOS et que le bridge GPU reçoit des
+mots GP0. Après correction d'une boucle BIOS A0:49, le compteur GP0 est redevenu
+cohérent. Le blocage courant est un nouvel appel BIOS **A0:44 (`FlushCache`)** ;
+le dernier MMIO observé reste **`0x1F801074` (I_MASK)**.
 
-Le runtime PC expérimental a permis de démarrer la version française, atteindre
-le menu principal, créer une nouvelle partie, parcourir l'introduction et entrer
-dans le premier duel contre Simon Muran. Une carte a été posée face cachée et le
-tour a été terminé avec apparition du tour adverse.
+Voir :
+[État courant](docs/CURRENT_STATUS.md) ·
+[Plan d'action](docs/ACTION_PLAN.md) ·
+[Handoff Work](docs/WORK_HANDOFF.md) ·
+[Prototype New 3DS](docs/NEW3DS_PROTOTYPE.md)
+
+## Architecture actuelle
+
+```text
+SLES_039.48
+    |
+    v
+PSXRecomp -> C statique -> objets ARM11
+    |                       |
+    |                       v
+    |                 dispatcher natif
+    |                       |
+    |              cible inconnue ?
+    |                  /         \
+    |                non         oui
+    |                 |           |
+    |                 v           v
+    |             code ARM   fallback R3000A
+    |                             |
+    +-----------------------------+
+                  |
+                  v
+             BIOS HLE / MMIO
+                  |
+        +---------+---------+
+        |                   |
+       GPU                 CD/IRQ
+        |
+  gpu_sw_renderer
+        |
+      VRAM
+        |
+ écran supérieur 3DS
+```
+
+Cette architecture est volontairement hybride. Les fonctions résidentes fiables
+peuvent tourner nativement en ARM11 ; les destinations indirectes et futurs
+overlays peuvent être exécutés par l'interpréteur R3000A sans imposer une
+régénération à chaque adresse manquante.
+
+## Avancement PC vérifié
+
+Le runtime PC expérimental a démarré la version française, atteint le menu
+principal, créé une nouvelle partie, parcouru l'introduction et atteint le
+premier duel contre Simon Muran. Une carte a été posée et un tour terminé.
 
 <p align="center">
   <img src="research/first-duel/duel.png" width="48%" alt="Premier duel sur le runtime PC">
   <img src="research/first-duel/card-set.png" width="48%" alt="Carte posée pendant le premier duel">
 </p>
 
-Ces captures proviennent du **runtime PC**, pas encore de la New 3DS.
-
-Documentation associée :
-[Premier menu](docs/FIRST_MENU.md) ·
-[Premier duel](docs/FIRST_DUEL.md) ·
-[Runtime PC](docs/PC_RUNTIME_BUILD.md)
+Ces captures proviennent du runtime PC et restent des jalons historiques ; elles
+ne représentent pas encore le rendu New 3DS.
 
 ## Prototype New 3DS actuel
 
-Le dossier [`3ds/`](3ds/) contient maintenant une vraie application native
-libctru. Elle permet de valider la couche plateforme avant de raccorder
-l'exécution du jeu.
+Le dossier [`3ds/`](3ds/) contient une application native libctru avec :
 
-Le prototype sait actuellement :
+- lecture du BIN français MODE2/2352 depuis SD ;
+- chargement du PS-X EXE à `0x80010000`, entrée `0x800128CC` ;
+- RAM PS1 2 Mio + scratchpad + alias KSEG0/KSEG1 ;
+- `CPUState` PSXRecomp et code résident recompilé pour ARM11 ;
+- dispatcher statique ;
+- fallback R3000A pour les blocs non recompilés ;
+- HLE BIOS minimal utilisé par le boot ;
+- bridge GPU GP0/GP1 et appels BIOS GPU ;
+- rasteriseur logiciel PSXRecomp sur ARM11 ;
+- diagnostics CPU, BIOS, MMIO, GPU et interpréteur sur l'écran inférieur.
 
-- initialiser l'affichage et les entrées avec **libctru** ;
-- activer l'accélération New 3DS ;
-- présenter une image PS1 **BGR/RGB555 320×256** sur l'écran supérieur ;
-- utiliser le rasteriseur logiciel PSX de **PSXRecomp** compilé pour ARM11 ;
-- convertir les boutons 3DS vers un masque de manette PS1 ;
-- lire le BIN français directement depuis la carte SD sans charger le disque
-  complet en RAM ;
-- vérifier la structure MODE2/Form1 du disque ;
-- charger le `PS-X EXE` français dans une RAM PS1 de 2 Mio et retrouver son point
-  d'entrée `0x800128CC`.
-
-Le point d'entrée est seulement **chargé et affiché : il n'est pas encore
-exécuté**. Le CPU/dispatch, les interruptions, le contrôleur CD complet, XA,
-SPU, les sauvegardes et les commandes GPU du jeu restent à raccorder.
-
-Voir [`docs/NEW3DS_PROTOTYPE.md`](docs/NEW3DS_PROTOTYPE.md) et la preuve de build
-[`research/new3ds/build.json`](research/new3ds/build.json).
+Le triangle historique de démonstration n'est plus le cœur du chantier : le
+jalon actuel est de produire une **VRAM réellement écrite par Forbidden Memories**
+puis de la présenter sur l'écran supérieur.
 
 ## Compiler le prototype New 3DS
 
-### Prérequis
-
-- devkitPro avec le groupe **3ds-dev** (`devkitARM`, `libctru`, `3dsxtool`) ;
-- Git ;
-- Python 3.11+ pour les outils de préparation ;
-- une copie locale de PSXRecomp à la révision utilisée par ce projet.
-
-Depuis la racine du dépôt :
+Prérequis : devkitPro `3ds-dev`, Git, Python 3.11+ et la révision PSXRecomp
+utilisée par le projet.
 
 ```sh
 git clone https://github.com/Unchiga/psxrecomp.git work/upstream-psxrecomp
 git -C work/upstream-psxrecomp checkout 1965b2df424da03483a5370340433a862f78f103
+export PATH=$DEVKITARM/bin:$PATH
+make -C 3ds clean
 make -C 3ds PSXRECOMP_ROOT=../work/upstream-psxrecomp -j4
 ```
 
-Sous Windows, utiliser de préférence le shell **MSYS2/devkitPro** afin que
-`DEVKITPRO`, `DEVKITARM`, `make` et les outils 3DS soient correctement exposés.
-
-La sortie attendue est :
+Sorties attendues :
 
 ```text
+3ds/fm-new3ds.elf
 3ds/fm-new3ds.3dsx
 ```
 
-## Préparer la carte SD
+Le build New 3DS dépend aussi de l'objet combiné produit à partir du code C
+généré dans `work/arm-generated-objects/fm-generated-combined.o`. Voir
+[`docs/NEW3DS_PROTOTYPE.md`](docs/NEW3DS_PROTOTYPE.md) pour la procédure détaillée.
 
-Le script fourni peut construire automatiquement un dossier prêt à copier :
+## Préparer la SD / Azahar
 
-```sh
-python tools/prepare_3ds_sd.py \
-  --app 3ds/fm-new3ds.3dsx \
-  --preview research/first-duel/duel.png \
-  --output work/3ds-sd
-```
-
-Puis copier le dossier `work/3ds-sd/3ds/` à la racine de la carte SD.
-
-Structure obtenue :
+Le runtime cherche actuellement :
 
 ```text
-SD:/
-└── 3ds/
-    └── fm-new3ds/
-        ├── fm-new3ds.3dsx
-        ├── preview.rgb555   # optionnel
-        └── disc.bin         # optionnel, dump personnel vérifié
+sdmc:/3ds/fm-new3ds/disc.bin
 ```
 
-Le disque n'est **pas nécessaire** pour afficher la démonstration graphique.
-Pour tester également son ouverture et le chargement du PS-X EXE :
-
-```sh
-python tools/prepare_3ds_sd.py \
-  --app 3ds/fm-new3ds.3dsx \
-  --preview research/first-duel/duel.png \
-  --disc "chemin/vers/votre/disc.bin" \
-  --output work/3ds-sd-disc
-```
-
-Le script refuse un BIN ne correspondant pas au profil français connu.
-
-### Profil du disque actuellement supporté
+Profil supporté :
 
 ```text
 Version       : PAL France / SLES-03948
@@ -143,67 +161,49 @@ SHA-256       : 9ef0d0ba5e42b838bd8312ecfe4071b09c44bc08ee896f6b76f913a41fe4b835
 Point d'entrée: 0x800128CC
 ```
 
-## Commandes du prototype 3DS
+Pour Azahar, placer le fichier dans la SD virtuelle au même chemin. Aucun dump,
+BIOS Sony ou contenu propriétaire du jeu n'est distribué par ce dépôt.
 
-| Bouton | Action actuelle |
+## Commandes de diagnostic 3DS
+
+| Bouton | Action |
 | --- | --- |
-| `X` | Alterner capture PC fixe / rasteriseur PSX ARM |
-| `Y` | Basculer image complète 4:3 / affichage 1:1 recadré |
-| Croix directionnelle | Déplacer le triangle de démonstration |
+| `A` | RUN / PAUSE |
+| `B` | RESET JEU |
+| `X` / `Y` | Contrôles d'affichage de diagnostic selon le build |
 | `START + SELECT` | Quitter |
 
-Le triangle du rasteriseur est une **primitive de démonstration** : il ne
-provient pas encore des commandes GPU exécutées par Forbidden Memories.
+L'écran inférieur affiche notamment le PC PS1, les registres, le dernier MMIO,
+le résultat du dispatcher, l'état du fallback R3000A, les compteurs GP0, la
+position d'affichage VRAM et les arrêts diagnostiques.
 
-## Outils de rétro-ingénierie
+## Documentation
 
-Extraction et inventaire du disque :
+Le point d'entrée recommandé est [`docs/README.md`](docs/README.md).
+Les documents PC/Ghidra/SU plus anciens sont conservés comme **preuves
+historiques datées** ; ils ne décrivent pas tous l'état courant du backend 3DS.
 
-```sh
-python tools/inspect_disc.py "chemin/Forbidden Memories (France).bin" work/extracted
-```
+## Priorités immédiates
 
-Première analyse Ghidra automatisée :
+1. implémenter `A0:44 FlushCache` et poursuivre le boot sans stopper sur les
+   appels BIOS simples ;
+2. émuler correctement `I_STAT` / `I_MASK` et introduire un VBlank minimal ;
+3. fiabiliser DMA2 / linked-list GPU et confirmer une première écriture VRAM ;
+4. afficher la VRAM produite par le jeu sur l'écran supérieur ;
+5. poursuivre jusqu'au premier overlay dynamique puis au menu ;
+6. seulement ensuite élargir CD-ROM, GTE, audio et sauvegardes.
 
-```sh
-python tools/run_ghidra.py \
-  --ghidra "chemin/vers/ghidra" \
-  --payload work/extracted/payload.bin
-```
-
-Le dépôt contient aussi des outils pour le bootstrap PC, les probes du runtime,
-le suivi des overlays et la préparation de la SD 3DS.
-
-## Organisation du dépôt
-
-- [`3ds/`](3ds/) — prototype natif New 3DS, Makefile, code plateforme et licences ;
-- [`pc/`](pc/) — intégration du runtime expérimental PC ;
-- [`tools/`](tools/) — extraction, Ghidra, bootstrap/replay PC et préparation 3DS ;
-- [`profiles/`](profiles/) — empreintes et paramètres de la version française ;
-- [`docs/`](docs/) — analyses, preuves de progression et documentation technique ;
-- [`research/`](research/) — captures, manifests et éléments de validation reproductibles ;
-- `work/` — fichiers générés/localement récupérés, ignorés par Git.
-
-## Prochains jalons
-
-1. raccorder le CPU/dispatch du runtime au prototype ARM11 ;
-2. implémenter les interruptions et les accès CD nécessaires au démarrage ;
-3. envoyer les vraies commandes GPU du jeu au rasteriseur ;
-4. obtenir le premier menu **calculé par le jeu directement sur New 3DS** ;
-5. mesurer les performances et la mémoire sur console physique ;
-6. raccorder audio, XA/SPU, sauvegardes et overlays jusqu'à obtenir un duel puis
-   la campagne complète.
+Le plan détaillé et les critères de succès sont dans
+[`docs/ACTION_PLAN.md`](docs/ACTION_PLAN.md).
 
 ## Données du jeu et licences
 
-**Aucun disque, BIOS PlayStation, exécutable original ou contenu propriétaire du
-jeu n'est distribué dans ce dépôt.** Les utilisateurs doivent fournir leur propre
-copie du jeu lorsqu'un test l'exige. Ne commitez jamais de BIN/CUE, dumps RAM ou
-autres données extraites du jeu.
+**Aucun disque, BIOS PlayStation propriétaire, exécutable original ou contenu
+propriétaire du jeu n'est distribué dans ce dépôt.** Les utilisateurs doivent
+fournir leur propre copie du jeu lorsqu'un test l'exige.
 
-Le prototype 3DS réutilise du code du rasteriseur de PSXRecomp et libctru. Les
-informations de provenance et licences correspondantes se trouvent dans
-[`3ds/licenses/`](3ds/licenses/).
+Le prototype réutilise le rasteriseur de PSXRecomp et libctru. Les notices sont
+dans [`3ds/licenses/`](3ds/licenses/).
 
 Yu-Gi-Oh! et Forbidden Memories appartiennent à leurs ayants droit respectifs.
-Ce projet communautaire de recherche et de portage n'est pas affilié à Konami.
+Ce projet de recherche et de portage n'est pas affilié à Konami.
