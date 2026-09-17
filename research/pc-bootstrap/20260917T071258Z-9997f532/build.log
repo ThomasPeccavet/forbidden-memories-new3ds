@@ -1,0 +1,6 @@
+[  1%] Built target psxrecomp_baked_codegen_hash
+[  7%] Built target fmt
+[ 77%] Built target rabbitizer
+[100%] Built target psxrecomp-game
+[ 50%] Built target fmt
+[100%] Built target psxrecomp-toml

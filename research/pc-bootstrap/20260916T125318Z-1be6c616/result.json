@@ -1,0 +1,38 @@
+{
+  "framework_commit": "1965b2df424da03483a5370340433a862f78f103",
+  "mode": "french-main-exe",
+  "steps": [
+    {
+      "step": "configure",
+      "exit_code": 0,
+      "log": "configure.log"
+    },
+    {
+      "step": "build",
+      "exit_code": 0,
+      "log": "build.log"
+    },
+    {
+      "step": "emitter-version",
+      "exit_code": 0,
+      "log": "emitter-version.log"
+    },
+    {
+      "step": "generate",
+      "exit_code": 0,
+      "log": "generate.log"
+    }
+  ],
+  "status": "generation-complete",
+  "game_booted": false,
+  "input_sha256": "57ecdfb9a9e1faf8b342fe7c7304c23723810861f3ab2fa3bef9eb27b5146b44",
+  "payload_size": 1900544,
+  "analysis_size": 577536,
+  "analysis_end": "0x8009D000",
+  "overlays_integrated": false,
+  "runtime_linked": false,
+  "generated_c_files": 15,
+  "generated_c_bytes": 18706527,
+  "generation_warning_lines": 0,
+  "generated_functions": 719
+}

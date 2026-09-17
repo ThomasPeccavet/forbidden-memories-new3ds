@@ -1,0 +1,8 @@
+-- Version: 9.1.1
+-- Build type: Release
+-- CXX_STANDARD: 20
+-- Required features: cxx_variadic_templates
+-- test-registration guard: 155 test file(s), all registered
+-- Configuring done (0.2s)
+-- Generating done (0.7s)
+-- Build files have been written to: /home/mao/documents/forbidden-memories-new3ds/work/upstream-psxrecomp/recompiler/build-pc
