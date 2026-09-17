@@ -1,3 +1,6 @@
+> [!NOTE]
+> **Jalon historique PC.** Ce document décrit la validation du 15 septembre 2026 et reste conservé comme preuve. Le backend New 3DS a depuis progressé jusqu'à l'exécution ARM11 + fallback R3000A + BIOS/GPU partiels. Voir [CURRENT_STATUS.md](CURRENT_STATUS.md) et [ACTION_PLAN.md](ACTION_PLAN.md) pour l'état courant.
+
 # Premier menu français obtenu sur PC
 
 Le 15 septembre 2026, le runtime construit dans ce dépôt a affiché le logo
@@ -66,9 +69,8 @@ code recompilé et prise en charge du code dynamique, notamment par
 interprétation : ce résultat ne prouve pas que les overlays SU sont tous
 recompilés. Il ne constitue pas encore un port natif New 3DS.
 
-Prochain jalon : parcourir le menu, lancer une nouvelle partie puis atteindre
-un premier duel, en capturant les overlays effectivement chargés. Cette base
-servira ensuite à mesurer et remplacer les dépendances incompatibles New 3DS.
+Prochain jalon historique : parcourir le menu, lancer une nouvelle partie puis atteindre
+un premier duel, en capturant les overlays effectivement chargés. Ce jalon a depuis été atteint ; voir [FIRST_DUEL.md](FIRST_DUEL.md).
 
 Les preuves machine du scénario réussi sont conservées dans
 [evidence.json](../research/first-menu/evidence.json).
