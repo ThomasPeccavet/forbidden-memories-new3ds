@@ -1,32 +1,19 @@
+> [!NOTE]
+> **Analyse historique d'overlay.** Cette page décrit la première cartographie statique de SU.MRG. Le backend New 3DS dispose maintenant d'un fallback R3000A destiné précisément à exécuter ces images dynamiques avant toute recompilation dédiée. Voir [CURRENT_STATUS.md](CURRENT_STATUS.md) et [ACTION_PLAN.md](ACTION_PLAN.md).
+
 # Piste SU.MRG et chargement par étapes
 
-Analyse statique des exports research/ghidra-fr/export/pseudo-c. Aucun essai
-Ghidra, extraction du disque ou test console effectué pendant cette passe.
+Analyse statique des exports `research/ghidra-fr/export/pseudo-c`.
 
 ## Chemin suivi
 
-80012a44 appelle 80043e3c(0), qui appelle notamment 8006b560 puis attend via
-80013700. 8006b560 configure 80014d38 avec : mode 1, symbole de chaîne
-s_M__mrgSU_SU_mrg_800117fc, position DAT_8009c44b * 0x88, longueur 0x73,
-callback 8006b350. Le nom exact de la chaîne n'est pas exporté : seul son
-symbole apparaît dans le pseudo-C.
+`80012a44` appelle `80043e3c(0)`, qui appelle notamment `8006b560` puis attend via `80013700`. `8006b560` configure `80014d38` avec une requête associée au symbole `s_M__mrgSU_SU_mrg_800117fc`, une position liée à `DAT_8009c44b`, une longueur `0x73` et le callback `8006b350`.
 
-80014d38 passe la requête à 800138b4, qui appelle 8001385c. Cette dernière
-convertit les longueurs négatives en octets avec un facteur 0x800, et les
-positions positives par un décalage de 11 bits. Le champ +0x24 ajoute la base
-DAT_800eb198[mode & 0xf]. L'association au fichier SU.MRG est une hypothèse
-fortement appuyée par le symbole, mais la base doit être vérifiée.
+`80014d38` passe la requête à `800138b4`, qui appelle `8001385c`. Cette dernière convertit les longueurs négatives en octets avec un facteur `0x800` et les positions positives par un décalage de 11 bits.
 
-80012c50 -> 80012f70 -> 80014978 -> 80014478 assure le traitement récurrent.
-Dans 80014478, DAT_800eb1d8 est invoquée avec le contexte 800eb1b8 et un index
-qui est incrémenté. 800138b4 stocke précisément le callback au champ +0x20,
-soit 800eb1d8 pour ce contexte. Cela relie la requête aux étapes ci-dessous.
+Le chemin `80012c50 -> 80012f70 -> 80014978 -> 80014478` assure le traitement récurrent.
 
 ## Étapes de 8006b350
-
-Offsets dans la structure de requête, en octets : +8/+0xc adresses ; +0x1c
-taille du segment ; +0x46 mode de traitement. Interprétation du transfert
-encore à confirmer dans ses routines de bas niveau.
 
 | Index | Taille | Destination indiquée |
 |---|---|---|
@@ -36,47 +23,21 @@ encore à confirmer dans ses routines de bas niveau.
 | 3 | 0x8000 | PTR_DAT_8001002c, mode 1 |
 | 4 | 0x800 | 0x801af800, mode 1 |
 
-Somme : 0x39800 = 0x73 * 0x800, exactement la taille de la requête.
-La capture de références fournie par Thomas identifie PTR_DAT_8001002c comme
-pointant à 0x80180000. À confirmer par lecture du mot dans le programme.
-Sous hypothèse de consommation séquentielle, l'étape 3 commence à +0x31000
-au sein de la requête. Pour les variantes 0 et 1, les offsets candidats dans
-SU.MRG sont respectivement 0x31000 et 0x75000. La sélection 0/1 est un sondage,
-pas une liste exhaustive de variantes ni une attribution linguistique.
+Somme : `0x39800 = 0x73 * 0x800`.
 
-Cette correspondance est une piste de code dynamique, pas encore une preuve :
-il faut examiner les octets et confirmer la consommation séquentielle. La
-zone 0x80180000 apparaît également dans le traitement de modèles.
+La capture de références fournie lors de l'analyse identifie `PTR_DAT_8001002c` comme pointant vers `0x80180000`. Sous hypothèse de consommation séquentielle, l'étape 3 commence à `+0x31000` dans la requête.
 
-## Autres observations
+## Ce qui a été confirmé ensuite
 
-8008a208 convertit des offsets en mots en adresses à partir de la base du bloc
-et pose le bit 0 du champ +4. Cela confirme une relocation de données, sans
-identifier à lui seul un format standard ou une fonction du SDK.
+Le sondage SU et la seconde passe Ghidra ont fortement confirmé que le bloc chargé à `0x80180000` contient du code MIPS cohérent et correspond à un overlay de menu. Voir :
 
-80043dc8 utilise une autre requête : position param_1*0x6e+0x1962, callback
-80043658. Ce callback emploie PTR_DAT_800101e0/1e4/1e8 ; leurs valeurs restent
-à relever avant toute interprétation de la mémoire concernée.
+- [SU_PROBE_RESULTS.md](SU_PROBE_RESULTS.md)
+- [SU_MENU_ANALYSIS.md](SU_MENU_ANALYSIS.md)
 
-## Sondage groupé à exécuter une fois
+Cette zone dynamique ne doit pas être considérée comme une fonction permanente : différentes images peuvent réutiliser la même adresse.
 
-Mettre à jour le dépôt cloné avec Pull origin, puis, depuis sa racine :
+## Conséquence pour le backend New 3DS
 
-```bat
-py -3 tools\probe_su_overlay.py "CHEMIN_COMPLET_VERS_LE_BIN"
-```
+Le fallback R3000A permet maintenant d'exécuter immédiatement un bloc chargé dans `0x801xxxxx` sans attendre une nouvelle génération PSXRecomp. Une recompilation ARM dédiée pourra être ajoutée plus tard pour les overlays chauds et identifiés de manière stable.
 
-L'outil contrôle la taille et le SHA-256 du disque français, lit les tables
-initiales de l'exécutable, extrait deux segments candidats de SU.MRG et écrit
-research/su-probe/<date>/report.json. Il ne lance pas Ghidra et ne modifie pas
-le disque. Les deux .bin extraits restent locaux, ignorés par Git.
-
-Envoyer uniquement report.json via GitHub Desktop (commit puis push). Il
-contient les pointeurs, 32 mots bruts autour de la table d'états (sans garantir
-32 entrées valides), les bases initiales des sources, des empreintes et des
-extraits hexadécimaux des segments candidats.
-
-Validation : code relu, mais non exécuté dans cette session dépourvue de
-terminal. L'extraction et les hypothèses d'offset attendent cette vérification.
-Les bases à 800eb198 peuvent être initialisées à l'exécution : leurs octets
-initiaux seuls ne prouvent pas la configuration effective.
+Le prochain travail lié aux overlays consiste à journaliser l'adresse, la taille, la source et une empreinte de chaque image réellement chargée pendant le boot New 3DS.
