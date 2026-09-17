@@ -38,7 +38,13 @@ static uint32_t g_bios_clear_pad = 0;
 static uint32_t g_bios_memory_megabytes = 2;
 
 static uint32_t g_bios_tty_bytes = 0;
+static uint32_t g_bios_pad_buf1 = 0;
+static uint32_t g_bios_pad_buf2 = 0;
 
+static uint32_t g_bios_pad_size1 = 0;
+static uint32_t g_bios_pad_size2 = 0;
+
+static int g_bios_pad_started = 0;
 
 /*
  * Adresses des tables BIOS retail SCPH-1001/PSOne.
@@ -628,7 +634,40 @@ int fm_bios_try_hle(
         cpu->gpr[9]
         &
         0xFFu;
+/*
+ * ========================================================
+ * Psy-Q internal PAD patch helpers
+ *
+ * Forbidden Memories récupère B0[5B] via B0:57 puis
+ * construit :
+ *
+ *   B0[5B] + 0x884 -> SetPadEnableFlag
+ *   B0[5B] + 0x894 -> ClearPadEnableFlag
+ *
+ * Notre table B0 retail n'étant pas réellement présente,
+ * B0[5B] vaut actuellement 0.
+ *
+ * Les adresses observées sont donc 0x884 / 0x894.
+ *
+ * Pour le bring-up, notre gestion PAD est déjà HLE :
+ * ces deux fonctions peuvent simplement retourner.
+ * ========================================================
+ */
 
+if (
+    phys == 0x00000884u
+    ||
+    phys == 0x00000894u
+)
+{
+    cpu->pc =
+        cpu->gpr[31];
+
+    cpu->gpr[0] =
+        0;
+
+    return 1;
+}
 
     /*
      * ========================================================
@@ -665,6 +704,58 @@ int fm_bios_try_hle(
 
         switch (fn)
         {
+/*
+ * A0:54 / A0:71 _96_init()
+ *
+ * Initialisation du sous-système CD/IO BIOS.
+ *
+ * Bring-up minimal :
+ * aucune initialisation matérielle supplémentaire ici.
+ */
+case 0x54:
+case 0x71:
+{
+    cpu->pc =
+        cpu->gpr[31];
+
+    cpu->gpr[0] =
+        0;
+
+    return 1;
+}
+/*
+ * A0:55 / A0:70 _bu_init()
+ *
+ * Initialisation bas niveau des périphériques memory-card.
+ *
+ * Pour le bring-up actuel, on n'émule pas encore
+ * la carte mémoire complète. On considère simplement
+ * l'initialisation comme réussie et on retourne au jeu.
+ */
+case 0x55:
+case 0x70:
+{
+    cpu->pc =
+        cpu->gpr[31];
+
+    cpu->gpr[0] =
+        0;
+
+    return 1;
+}
+/*
+ * A0:44 FlushCache
+ *
+ * Pas de cache d'instructions guest réel dans notre backend :
+ * les écritures RAM sont immédiatement visibles.
+ */
+case 0x44:
+{
+    cpu->pc = cpu->gpr[31];
+    cpu->gpr[0] = 0;
+
+    return 1;
+}
             /*
              * A0:72 _96_remove
              */
@@ -764,7 +855,155 @@ int fm_bios_try_hle(
                 return 1;
             }
 
+/*
+ * B0:12 InitPAD2(buf1, siz1, buf2, siz2)
+ */
+case 0x12:
+{
+    uint32_t buf1 =
+        cpu->gpr[4];
 
+    uint32_t size1 =
+        cpu->gpr[5];
+
+    uint32_t buf2 =
+        cpu->gpr[6];
+
+    uint32_t size2 =
+        cpu->gpr[7];
+
+
+    g_bios_pad_buf1 =
+        buf1;
+
+    g_bios_pad_buf2 =
+        buf2;
+
+    g_bios_pad_size1 =
+        size1;
+
+    g_bios_pad_size2 =
+        size2;
+
+
+    /*
+     * Protection bring-up contre une taille corrompue.
+     */
+    if (size1 > 0x100u)
+        size1 = 0x100u;
+
+    if (size2 > 0x100u)
+        size2 = 0x100u;
+
+
+    /*
+     * Le vrai BIOS initialise les buffers.
+     */
+    if (buf1 != 0)
+    {
+        for (
+            uint32_t i = 0;
+            i < size1;
+            ++i
+        )
+        {
+            cpu->write_byte(
+                buf1 + i,
+                0
+            );
+        }
+
+
+        /*
+         * Pour éviter que 0000 soit interprété comme
+         * "tous les boutons appuyés" avant le premier IRQ,
+         * on expose temporairement un pad déconnecté.
+         */
+        if (size1 != 0)
+        {
+            cpu->write_byte(
+                buf1,
+                0xFF
+            );
+        }
+    }
+
+
+    if (buf2 != 0)
+    {
+        for (
+            uint32_t i = 0;
+            i < size2;
+            ++i
+        )
+        {
+            cpu->write_byte(
+                buf2 + i,
+                0
+            );
+        }
+
+
+        if (size2 != 0)
+        {
+            cpu->write_byte(
+                buf2,
+                0xFF
+            );
+        }
+    }
+
+
+    g_bios_pad_started =
+        0;
+
+
+    cpu->pc =
+        cpu->gpr[31];
+
+    cpu->gpr[0] =
+        0;
+
+    return 1;
+}
+
+
+/*
+ * B0:13 StartPAD2()
+ */
+case 0x13:
+{
+    g_bios_pad_started =
+        1;
+
+
+    cpu->pc =
+        cpu->gpr[31];
+
+    cpu->gpr[0] =
+        0;
+
+    return 1;
+}
+
+
+/*
+ * B0:14 StopPAD2()
+ */
+case 0x14:
+{
+    g_bios_pad_started =
+        0;
+
+
+    cpu->pc =
+        cpu->gpr[31];
+
+    cpu->gpr[0] =
+        0;
+
+    return 1;
+}
             /*
              * B0:19 HookEntryInt
              */
@@ -854,7 +1093,52 @@ int fm_bios_try_hle(
 
                 return 1;
             }
+/*
+ * B0:4A InitCARD2(pad_enable)
+ *
+ * Bring-up minimal :
+ * on ne simule pas encore le contrôleur mémoire/pad BIOS.
+ */
+case 0x4A:
+{
+    cpu->pc =
+        cpu->gpr[31];
 
+    cpu->gpr[0] =
+        0;
+
+    return 1;
+}
+
+
+/*
+ * B0:4B StartCARD2()
+ */
+case 0x4B:
+{
+    cpu->pc =
+        cpu->gpr[31];
+
+    cpu->gpr[0] =
+        0;
+
+    return 1;
+}
+
+
+/*
+ * B0:4C StopCARD2()
+ */
+case 0x4C:
+{
+    cpu->pc =
+        cpu->gpr[31];
+
+    cpu->gpr[0] =
+        0;
+
+    return 1;
+}
 
             /*
              * B0:56 GetC0Table()

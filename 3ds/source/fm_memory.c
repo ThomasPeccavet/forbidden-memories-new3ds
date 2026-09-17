@@ -13,15 +13,40 @@
  */
 
 #define PSX_RAM_SIZE        (2u * 1024u * 1024u)
-
 #define PSX_RAM_MIRROR_END  0x00800000u
 
 #define PSX_SCRATCH_BASE    0x1F800000u
 #define PSX_SCRATCH_SIZE    0x00000400u
 
+
+/*
+ * ============================================================
+ * Interrupt controller
+ * ============================================================
+ */
+
+#define PSX_I_STAT          0x1F801070u
+#define PSX_I_MASK          0x1F801074u
+
+#define PSX_IRQ_VBLANK      0x0001u
+#define PSX_IRQ_VALID_MASK  0x07FFu
+
+
+/*
+ * ============================================================
+ * GPU
+ * ============================================================
+ */
+
 #define PSX_GPU_GP0         0x1F801810u
 #define PSX_GPU_GP1         0x1F801814u
 
+
+/*
+ * ============================================================
+ * RAM / scratchpad
+ * ============================================================
+ */
 
 static uint8_t *g_ram = NULL;
 
@@ -35,7 +60,18 @@ static uint8_t g_scratch[
 
 /*
  * ============================================================
- * Diagnostic unmapped accesses
+ * Interrupt controller state
+ * ============================================================
+ */
+
+static uint16_t g_i_stat = 0;
+
+static uint16_t g_i_mask = 0;
+
+
+/*
+ * ============================================================
+ * Diagnostics
  * ============================================================
  */
 
@@ -50,18 +86,13 @@ static unsigned g_unmapped_count = 0;
  * ============================================================
  */
 
-/*
- * PS1 virtual address -> physical address.
- *
- * Handles:
- *
- * 0x80000000 KSEG0
- * 0xA0000000 KSEG1
- */
 static inline uint32_t fm_phys(
     uint32_t addr
 )
 {
+    /*
+     * KSEG0 / KSEG1 -> physical.
+     */
     return
         addr
         &
@@ -92,8 +123,8 @@ static uint8_t *fm_ram_ptr(
 )
 {
     /*
-     * La RAM 2 Mo est répétée quatre fois dans
-     * l'espace physique 0x00000000..0x007FFFFF.
+     * Les 2 Mio de RAM PS1 sont répétés quatre fois
+     * entre 0x00000000 et 0x007FFFFF.
      */
     if (
         g_ram
@@ -181,6 +212,20 @@ void fm_memory_init(
     );
 
 
+    /*
+     * Interrupt controller reset.
+     */
+    g_i_stat =
+        0;
+
+
+    g_i_mask =
+        0;
+
+
+    /*
+     * Diagnostics reset.
+     */
     g_last_unmapped =
         0;
 
@@ -206,6 +251,12 @@ uint8_t fm_memory_read_byte(
         );
 
 
+    /*
+     * --------------------------------------------------------
+     * RAM
+     * --------------------------------------------------------
+     */
+
     uint8_t *p =
         fm_ram_ptr(
             phys
@@ -218,6 +269,12 @@ uint8_t fm_memory_read_byte(
             *p;
     }
 
+
+    /*
+     * --------------------------------------------------------
+     * Scratchpad
+     * --------------------------------------------------------
+     */
 
     p =
         fm_scratch_ptr(
@@ -233,11 +290,13 @@ uint8_t fm_memory_read_byte(
 
 
     /*
-     * GPUSTAT peut être lu comme un registre 32 bits.
+     * --------------------------------------------------------
+     * GPUSTAT
      *
-     * On autorise ici la lecture byte afin de ne pas
-     * casser un éventuel code guest utilisant LBU.
+     * Lecture byte permise pour les éventuels LBU guest.
+     * --------------------------------------------------------
      */
+
     if (
         phys >= PSX_GPU_GP1
         &&
@@ -268,8 +327,13 @@ uint8_t fm_memory_read_byte(
 
 
     /*
-     * GPUREAD n'est pas encore implémenté dans notre bridge.
+     * --------------------------------------------------------
+     * GPUREAD
+     *
+     * Pas encore implémenté.
+     * --------------------------------------------------------
      */
+
     if (
         phys >= PSX_GPU_GP0
         &&
@@ -278,6 +342,16 @@ uint8_t fm_memory_read_byte(
     {
         return 0;
     }
+
+
+    /*
+     * IMPORTANT :
+     *
+     * Pas d'accès byte pour I_STAT / I_MASK pour le moment.
+     *
+     * Ils seront volontairement signalés comme unmapped
+     * si le jeu tente d'utiliser LB/LBU/SB dessus.
+     */
 
 
     fm_note_unmapped(
@@ -306,6 +380,12 @@ void fm_memory_write_byte(
         );
 
 
+    /*
+     * --------------------------------------------------------
+     * RAM
+     * --------------------------------------------------------
+     */
+
     uint8_t *p =
         fm_ram_ptr(
             phys
@@ -321,6 +401,12 @@ void fm_memory_write_byte(
         return;
     }
 
+
+    /*
+     * --------------------------------------------------------
+     * Scratchpad
+     * --------------------------------------------------------
+     */
 
     p =
         fm_scratch_ptr(
@@ -339,11 +425,16 @@ void fm_memory_write_byte(
 
 
     /*
-     * Les ports GPU sont des ports 32 bits.
+     * --------------------------------------------------------
+     * GPU
      *
-     * On ne simule pas les écritures partielles pour
-     * éviter de fabriquer des commandes GPU incorrectes.
+     * GP0 / GP1 sont des ports 32 bits.
+     *
+     * On ignore volontairement les écritures byte afin
+     * de ne pas fabriquer une commande GP0/GP1 incorrecte.
+     * --------------------------------------------------------
      */
+
     if (
         (
             phys >= PSX_GPU_GP0
@@ -360,6 +451,11 @@ void fm_memory_write_byte(
     {
         return;
     }
+
+
+    /*
+     * Pas d'accès byte pour I_STAT / I_MASK actuellement.
+     */
 
 
     fm_note_unmapped(
@@ -384,6 +480,32 @@ uint16_t fm_memory_read_half(
         );
 
 
+    /*
+     * --------------------------------------------------------
+     * Interrupt controller
+     * --------------------------------------------------------
+     */
+
+    if (phys == PSX_I_STAT)
+    {
+        return
+            g_i_stat;
+    }
+
+
+    if (phys == PSX_I_MASK)
+    {
+        return
+            g_i_mask;
+    }
+
+
+    /*
+     * --------------------------------------------------------
+     * RAM
+     * --------------------------------------------------------
+     */
+
     uint8_t *p =
         fm_ram_ptr(
             phys
@@ -393,8 +515,12 @@ uint16_t fm_memory_read_half(
     if (
         p
         &&
+        g_ram_size >= 2
+        &&
         (
-            phys & 0x001FFFFFu
+            phys
+            &
+            0x001FFFFFu
         )
         <=
         g_ram_size - 2
@@ -410,6 +536,12 @@ uint16_t fm_memory_read_half(
             );
     }
 
+
+    /*
+     * --------------------------------------------------------
+     * Scratchpad
+     * --------------------------------------------------------
+     */
 
     p =
         fm_scratch_ptr(
@@ -441,8 +573,11 @@ uint16_t fm_memory_read_half(
 
 
     /*
-     * GPUSTAT.
+     * --------------------------------------------------------
+     * GPUSTAT
+     * --------------------------------------------------------
      */
+
     if (
         phys == PSX_GPU_GP1
         ||
@@ -473,8 +608,11 @@ uint16_t fm_memory_read_half(
 
 
     /*
-     * GPUREAD non encore implémenté.
+     * --------------------------------------------------------
+     * GPUREAD
+     * --------------------------------------------------------
      */
+
     if (
         phys == PSX_GPU_GP0
         ||
@@ -511,6 +649,51 @@ void fm_memory_write_half(
         );
 
 
+    /*
+     * --------------------------------------------------------
+     * I_STAT
+     *
+     * Écrire 0 sur un bit = acquitter l'IRQ.
+     * Écrire 1 sur un bit = conserver son état.
+     * --------------------------------------------------------
+     */
+
+    if (phys == PSX_I_STAT)
+    {
+        g_i_stat &=
+            value
+            &
+            PSX_IRQ_VALID_MASK;
+
+
+        return;
+    }
+
+
+    /*
+     * --------------------------------------------------------
+     * I_MASK
+     * --------------------------------------------------------
+     */
+
+    if (phys == PSX_I_MASK)
+    {
+        g_i_mask =
+            value
+            &
+            PSX_IRQ_VALID_MASK;
+
+
+        return;
+    }
+
+
+    /*
+     * --------------------------------------------------------
+     * RAM
+     * --------------------------------------------------------
+     */
+
     uint8_t *p =
         fm_ram_ptr(
             phys
@@ -520,8 +703,12 @@ void fm_memory_write_half(
     if (
         p
         &&
+        g_ram_size >= 2
+        &&
         (
-            phys & 0x001FFFFFu
+            phys
+            &
+            0x001FFFFFu
         )
         <=
         g_ram_size - 2
@@ -533,13 +720,21 @@ void fm_memory_write_half(
 
         p[1] =
             (uint8_t)(
-                value >> 8
+                value
+                >>
+                8
             );
 
 
         return;
     }
 
+
+    /*
+     * --------------------------------------------------------
+     * Scratchpad
+     * --------------------------------------------------------
+     */
 
     p =
         fm_scratch_ptr(
@@ -565,7 +760,9 @@ void fm_memory_write_half(
 
         p[1] =
             (uint8_t)(
-                value >> 8
+                value
+                >>
+                8
             );
 
 
@@ -574,9 +771,13 @@ void fm_memory_write_half(
 
 
     /*
-     * Ports GPU 32 bits :
-     * pas d'écriture partielle pour le moment.
+     * --------------------------------------------------------
+     * GPU
+     *
+     * GP0 / GP1 restent 32 bits.
+     * --------------------------------------------------------
      */
+
     if (
         phys == PSX_GPU_GP0
         ||
@@ -615,24 +816,39 @@ uint32_t fm_memory_read_word(
 
     /*
      * --------------------------------------------------------
-     * GPU
+     * Interrupt controller
      * --------------------------------------------------------
      */
 
-    /*
-     * GPUREAD
-     *
-     * Notre bridge n'expose pas encore le registre de lecture.
-     */
-    if (phys == PSX_GPU_GP0)
+    if (phys == PSX_I_STAT)
     {
-        return 0;
+        return
+            g_i_stat;
+    }
+
+
+    if (phys == PSX_I_MASK)
+    {
+        return
+            g_i_mask;
     }
 
 
     /*
-     * GPUSTAT
+     * --------------------------------------------------------
+     * GPU
+     * --------------------------------------------------------
      */
+
+    if (phys == PSX_GPU_GP0)
+    {
+        /*
+         * GPUREAD non encore implémenté.
+         */
+        return 0;
+    }
+
+
     if (phys == PSX_GPU_GP1)
     {
         return
@@ -655,8 +871,12 @@ uint32_t fm_memory_read_word(
     if (
         p
         &&
+        g_ram_size >= 4
+        &&
         (
-            phys & 0x001FFFFFu
+            phys
+            &
+            0x001FFFFFu
         )
         <=
         g_ram_size - 4
@@ -760,17 +980,40 @@ void fm_memory_write_word(
 
     /*
      * --------------------------------------------------------
-     * GPU
+     * Interrupt controller
      * --------------------------------------------------------
      */
 
+    if (phys == PSX_I_STAT)
+    {
+        g_i_stat &=
+            (uint16_t)value
+            &
+            PSX_IRQ_VALID_MASK;
+
+
+        return;
+    }
+
+
+    if (phys == PSX_I_MASK)
+    {
+        g_i_mask =
+            (uint16_t)value
+            &
+            PSX_IRQ_VALID_MASK;
+
+
+        return;
+    }
+
+
     /*
-     * GP0 :
-     *
-     * primitives
-     * transferts VRAM
-     * environnement de dessin
+     * --------------------------------------------------------
+     * GPU GP0
+     * --------------------------------------------------------
      */
+
     if (phys == PSX_GPU_GP0)
     {
         fm_gpu_gp0_write(
@@ -783,13 +1026,11 @@ void fm_memory_write_word(
 
 
     /*
-     * GP1 :
-     *
-     * reset
-     * affichage
-     * mode vidéo
-     * DMA direction
+     * --------------------------------------------------------
+     * GPU GP1
+     * --------------------------------------------------------
      */
+
     if (phys == PSX_GPU_GP1)
     {
         fm_gpu_gp1_write(
@@ -816,8 +1057,12 @@ void fm_memory_write_word(
     if (
         p
         &&
+        g_ram_size >= 4
+        &&
         (
-            phys & 0x001FFFFFu
+            phys
+            &
+            0x001FFFFFu
         )
         <=
         g_ram_size - 4
@@ -829,19 +1074,25 @@ void fm_memory_write_word(
 
         p[1] =
             (uint8_t)(
-                value >> 8
+                value
+                >>
+                8
             );
 
 
         p[2] =
             (uint8_t)(
-                value >> 16
+                value
+                >>
+                16
             );
 
 
         p[3] =
             (uint8_t)(
-                value >> 24
+                value
+                >>
+                24
             );
 
 
@@ -879,19 +1130,25 @@ void fm_memory_write_word(
 
         p[1] =
             (uint8_t)(
-                value >> 8
+                value
+                >>
+                8
             );
 
 
         p[2] =
             (uint8_t)(
-                value >> 16
+                value
+                >>
+                16
             );
 
 
         p[3] =
             (uint8_t)(
-                value >> 24
+                value
+                >>
+                24
             );
 
 
@@ -902,6 +1159,41 @@ void fm_memory_write_word(
     fm_note_unmapped(
         addr
     );
+}
+
+
+/*
+ * ============================================================
+ * VBlank / IRQ helpers
+ * ============================================================
+ */
+
+void fm_memory_vblank_tick(void)
+{
+    /*
+     * VBlank est latché dans I_STAT.
+     *
+     * I_MASK ne contrôle pas l'existence de l'événement,
+     * seulement sa visibilité côté CPU.
+     *
+     * L'injection réelle dans COP0 arrivera ensuite.
+     */
+    g_i_stat |=
+        PSX_IRQ_VBLANK;
+}
+
+
+uint16_t fm_memory_i_stat(void)
+{
+    return
+        g_i_stat;
+}
+
+
+uint16_t fm_memory_i_mask(void)
+{
+    return
+        g_i_mask;
 }
 
 
@@ -924,9 +1216,9 @@ int fm_memory_self_test(void)
 
 
     /*
-     * Garder le contenu original pour ne pas perturber
-     * le PS-X EXE.
+     * Sauvegarder les valeurs originales.
      */
+
     uint32_t old_ram =
         fm_memory_read_word(
             0x80001000u
@@ -1001,7 +1293,7 @@ int fm_memory_self_test(void)
 
     /*
      * --------------------------------------------------------
-     * 2 MiB mirror
+     * RAM mirror
      * --------------------------------------------------------
      */
 
@@ -1042,8 +1334,9 @@ int fm_memory_self_test(void)
 
 
     /*
-     * Restaurer.
+     * Restaurer les données originales.
      */
+
     fm_memory_write_word(
         0x80001000u,
         old_ram

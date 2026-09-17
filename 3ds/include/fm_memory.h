@@ -22,3 +22,7 @@ int fm_memory_self_test(void);
 
 uint32_t fm_memory_last_unmapped(void);
 unsigned fm_memory_unmapped_count(void);
+void fm_memory_vblank_tick(void);
+
+uint16_t fm_memory_i_stat(void);
+uint16_t fm_memory_i_mask(void);
