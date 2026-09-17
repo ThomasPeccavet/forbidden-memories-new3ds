@@ -1,60 +1,33 @@
+> [!NOTE]
+> **Jalon historique d'analyse.** Ces résultats ont servi à confirmer le code dynamique chargé vers `0x80180000`. Le backend New 3DS actuel possède un fallback R3000A capable d'exécuter ce type de bloc ; voir [CURRENT_STATUS.md](CURRENT_STATUS.md).
+
 # Résultat du sondage SU
 
-Source : research/su-probe/20260914T191332Z-c4ce3241/report.json.
+Source : `research/su-probe/20260914T191332Z-c4ce3241/report.json`.
 
 ## Constats
 
-- Le mot initial à 8001002c vaut 80180000, comme celui à 80010008.
-- Les deux blocs de 32768 octets ont des empreintes distinctes, mais leurs
-  extraits de 256 octets et ceux à +0x390 sont identiques.
-- Le début comprend 0x33 et des adresses dans la plage 80180000.
-  À +0x1c : mot 0x3c022e8b (lui v0,0x2e8b), suivi d'instructions cohérentes.
-- À +0x390 : d8ffbd27 = addiu sp,sp,-40 ; 1000b0af = sw s0,16(sp).
-  Ce prologue remplace précisément le contenu invalide analysé précédemment
-  à 80180390. Forte preuve de code MIPS dans le segment extrait.
-- L'association à un overlay chargé à 80180000 est très fortement appuyée
-  par les appels résidents, le pointeur de destination et le code retrouvé.
-  Son exécution effective reste à observer ; aucune capture RAM n'est disponible.
-- Les bases initiales à 800eb198 sont nulles : ne pas les interpréter comme les
-  valeurs effectives de lecture du disque après initialisation.
+- le mot initial à `8001002c` vaut `80180000`, comme celui à `80010008` ;
+- les deux blocs de 32768 octets sondés ont des empreintes distinctes ;
+- à `+0x390`, le prologue `d8ffbd27 1000b0af` correspond à du code MIPS cohérent ;
+- l'association à un overlay chargé à `0x80180000` est fortement appuyée par les pointeurs de destination, les appels résidents et le code retrouvé ;
+- les bases initiales à `800eb198` sont nulles et ne doivent pas être interprétées comme les valeurs effectives après initialisation.
 
 ## Table des états
 
-Les 17 premiers mots à 80091f7c sont des pointeurs dans le code résident.
-Le suivant est 01030103 : ne pas créer arbitrairement 32 fonctions avec le
-masque 0x1f. Cette frontière probable reste à vérifier dans le Listing.
-Sur les 17 chemins de fichiers par adresse consultés, seuls 8002d354.c et
-8002dbe0.c sont présents ; 15 renvoient 404. Cela ne prouve pas que leurs octets
-n'apparaissent dans aucune autre fonction exportée. La seconde passe les
-déclare explicitement comme points d'entrée.
+Les 17 premiers mots à `80091f7c` sont des pointeurs dans le code résident. Le mot suivant `01030103` marque une frontière probable : ne pas extrapoler arbitrairement 32 fonctions à partir du masque `0x1f`.
 
 ## Nouvelle passe groupée
 
-Les scripts tools/run_su_ghidra.py et tools/ghidra/PrepareSU.java créent deux
-projets neufs. Chaque projet importe le payload français complet, remplace
-uniquement [80180000,80188000) par un candidat vérifié par SHA-256, puis ajoute
-les points d'entrée de démarrage, les 17 états et les trois appels SU connus.
+Les scripts `tools/run_su_ghidra.py` et `tools/ghidra/PrepareSU.java` construisent des instantanés statiques pour analyser les variantes candidates. Ils ne prétendent pas reproduire toute la RAM d'un instant d'exécution.
 
-Ce sont des instantanés statiques construits pour l'analyse. Ils ne prétendent
-pas reproduire toute la RAM à un instant du jeu. Les autres overlays sont
-toujours absents. Les deux variantes ne sont pas supposées correspondre à des
-langues particulières.
+## Conséquence actuelle
 
-Depuis le dépôt cloné mis à jour :
+Cette analyse est désormais intégrée à la stratégie 3DS :
 
-```bat
-py -3 tools\run_su_ghidra.py --ghidra "C:\Dev\ghidra" --probe-dir "research\su-probe\20260914T191332Z-c4ce3241" --payload "CHEMIN_COMPLET_VERS_PAYLOAD.bin"
-```
+1. les zones dynamiques `0x801xxxxx` sont considérées comme des images chargées, pas comme du code résident permanent ;
+2. le fallback R3000A permet leur exécution immédiate ;
+3. une éventuelle recompilation ARM doit être associée à une empreinte de l'image réellement chargée ;
+4. les prochains tests 3DS devront journaliser les chargements d'overlay au moment où le contrôleur CD devient fonctionnel.
 
-Les deux candidats BIN doivent être présents dans le dossier du sondage local.
-Ils sont exclus de Git : utiliser le dossier où probe_su_overlay.py a réellement
-été exécuté s'il diffère de celui du clone.
-
-Résultats texte : research/su-ghidra/<date>, à envoyer par commit et push.
-Projets Ghidra : work/su-ghidra/<date>, restent locaux.
-Le fichier run-summary.json indique le résultat de chaque exécution.
-Les compteurs COMPLETE ne garantissent pas l'absence de halt_baddata.
-
-Validation : empreintes et extraits du rapport inspectés ; scripts relus mais
-non exécutés faute d'environnement local. Leur premier lancement reste à
-valider. La nouvelle analyse n'est pas encore une recompilation New 3DS.
+Voir [SU_MENU_ANALYSIS.md](SU_MENU_ANALYSIS.md) pour l'analyse du menu et [ACTION_PLAN.md](ACTION_PLAN.md) pour l'intégration runtime.
