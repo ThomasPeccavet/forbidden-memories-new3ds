@@ -1,87 +1,144 @@
-# Premier prototype natif New 3DS — 16 septembre 2026
+# Prototype natif New 3DS — état du 17 septembre 2026
 
-**Prototype de plateforme compilé, pas encore un jeu jouable. Aucun lancement
-sur console physique n'a été vérifié.** Les tests de progression sur PC sont
-suspendus au profit de l'adaptation 3DS.
+Le prototype n'est pas encore un jeu jouable, mais il exécute désormais réellement le code français avec une architecture hybride ARM11 + R3000A.
 
-## Essayer maintenant
+## Ce que fait le backend 3DS
 
-1. Décompresser `fm-new3ds-prototype.zip`.
-2. Copier le dossier `3ds` à la racine de la carte SD d'une New 3DS disposant
-   déjà du Homebrew Launcher.
-3. Ouvrir Homebrew Launcher et lancer `fm-new3ds.3dsx`.
+- application native libctru ;
+- accélération New 3DS ;
+- lecture du BIN français MODE2/2352 depuis SD ;
+- chargement du PS-X EXE à `0x80010000` ;
+- CPUState PSXRecomp, RAM 2 Mio, scratchpad et alias KSEG ;
+- code résident généré par PSXRecomp et recompilé pour ARM11 ;
+- dispatcher statique ;
+- fallback R3000A pour les blocs inconnus ;
+- HLE BIOS partiel ;
+- bridge GP0/GP1 et wrappers BIOS GPU ;
+- rasteriseur logiciel PSXRecomp compilé pour ARM11 ;
+- diagnostics CPU/BIOS/MMIO/GPU/interpréteur sur l'écran inférieur.
 
-Le disque n'est pas nécessaire pour afficher le prototype. La capture fixe du
-duel, provenant du PC, est identifiée **CAPTURE PC FIXE** sur l'écran inférieur.
-Elle sert à juger la lisibilité et le format, pas à simuler un portage terminé.
+## Architecture
 
-| Commande | Action dans ce prototype |
-| --- | --- |
-| X | Alterner capture fixe / rasteriseur PS1 natif ARM |
-| Y | Image complète 4:3 / pixels 1:1 avec 8 lignes coupées en haut et en bas |
-| Croix directionnelle | Déplacer le triangle dans la vue du rasteriseur |
-| START + SELECT | Quitter |
+```text
+EXE français
+   |
+   v
+CPUState + RAM PS1
+   |
+   v
+Dispatcher ARM11
+   |\
+   | \ adresse inconnue
+   |  v
+   |  R3000A fallback
+   |  |
+   +--+
+      |
+      v
+ BIOS HLE / MMIO
+      |
+      +--> GPU GP0/GP1 --> software renderer --> VRAM --> écran supérieur
+      |
+      +--> IRQ/CD/etc. à compléter
+```
 
-Le rasteriseur est celui de PSXRecomp, recompilé pour ARM11 et alimenté par des
-primitives de démonstration. Le triangle se déplace et change de couleur. Il ne
-reçoit pas encore les commandes GPU du jeu. Aucun débit d'images du jeu n'est
-mesuré par cette démonstration.
+Le fallback R3000A a déjà été observé en fonctionnement dans Azahar : une destination non recompilée est exécutée par basic block puis le contrôle revient au dispatcher.
 
-## Première couche du portage
+## GPU
 
-- `3ds/source/platform.c` : présentation RGB555 PS1 vers framebuffer BGR8 libctru,
-  écran supérieur 400×240, viewport 320×240 centré, stéréoscopie désactivée ;
-  conversion des boutons en masque PS1 actif à zéro.
-- `3ds/source/disc.c` : lecture de secteurs MODE2/Form1 depuis SD, contrôle de
-  taille/synchronisation/PVD, chargement du payload de SLES_039.48 en RAM PS1.
-- `3ds/source/main.c` : initialisation libctru, demande d'accélération New 3DS,
-  boucle graphique, entrées et démonstration du rasteriseur partagé.
-- Le binaire intègre `gpu_sw_renderer.c` et `gpu_vram_dirty.c` du moteur épinglé.
-  Aucun SDL, OpenGL, serveur de débogage, BIOS ni code généré du jeu n'est lié.
+`fm_gpu.c` parse déjà des commandes GP0 : environnement de dessin, polygones, lignes, rectangles/sprites, transferts CPU→VRAM, VRAM→VRAM et listes liées BIOS.
 
-En ajoutant le BIN français vérifié sous `3ds/fm-new3ds/disc.bin`, le prototype
-charge son EXE en mémoire et affiche l'entrée `800128CC`. **Il ne l'exécute pas.**
-Le lecteur ne couvre pas encore les secteurs Form2, CD-DA, XA ou les commandes
-asynchrones du contrôleur CD. Il ne constitue pas un remplacement complet du CD.
+Les accès `0x1F801810` et `0x1F801814` sont routés depuis `fm_memory.c` vers GP0/GP1. Les appels BIOS GPU A0:46..4E passent par `fm_gpu_bios_call`.
 
-Le masque de boutons prépare B→croix, A→rond, X→triangle, Y→carré,
-L/R→L1/R1 et ZL/ZR→L2/R2. X et Y restent utilisés par l'interface de ce prototype.
+Un bug de retour BIOS GPU a été corrigé : les handlers remettent maintenant `cpu->pc` à `$ra`. Avant correction, A0:49 se répétait et gonflait artificiellement le compteur GP0 à environ 90 000 mots ; après correction, le même stade du boot montre environ 4 mots GP0.
+
+Le dernier test affiche encore `Frame VRAM = NON` : aucune image réelle du jeu n'est encore présentée.
+
+## BIOS / kernel
+
+Le shim couvre actuellement les services nécessaires déjà rencontrés :
+
+```text
+A0:72  _96_remove
+A0:9F  SetMem
+B0:18  ResetEntryInt
+B0:19  HookEntryInt
+B0:35  write
+B0:56  GetC0Table
+B0:57  GetB0Table
+B0:5B  ChangeClearPAD
+C0:02  SysEnqIntRP
+C0:03  SysDeqIntRP
+C0:0A  ChangeClearRCnt
+A0:46..4E GPU family
+```
+
+Le prochain appel observé est `A0:44 FlushCache`.
+
+## MMIO / IRQ
+
+Le dernier MMIO observé est `0x1F801074`, soit `I_MASK`. `I_STAT`/`I_MASK` et un VBlank minimal sont donc les prochains éléments kernel/hardware prioritaires.
 
 ## Compilation
 
-Chaîne officiellement supportée par libctru : [devkitARM et devkitPro](https://github.com/devkitPro/libctru#setup).
-Installer le groupe `3ds-dev` avec les outils devkitPro. Depuis le dépôt :
+Prérequis : devkitPro `3ds-dev`, Git, Python 3.11+ et PSXRecomp épinglé à :
+
+```text
+1965b2df424da03483a5370340433a862f78f103
+```
+
+Depuis la racine :
 
 ```sh
 git clone https://github.com/Unchiga/psxrecomp.git work/upstream-psxrecomp
 git -C work/upstream-psxrecomp checkout 1965b2df424da03483a5370340433a862f78f103
+export PATH=$DEVKITARM/bin:$PATH
+make -C 3ds clean
 make -C 3ds PSXRECOMP_ROOT=../work/upstream-psxrecomp -j4
 ```
 
-Sortie : `3ds/fm-new3ds.3dsx`. `DEVKITPRO`, `DEVKITARM` et le PATH des outils doivent
-être configurés par devkitPro. Sous Windows, lancer `make` dans son shell MSYS2.
+Le build utilise aussi :
 
-Préparer un nouveau dossier SD (Python 3.11+, Pillow pour la capture) :
-
-```sh
-python tools/prepare_3ds_sd.py --app 3ds/fm-new3ds.3dsx --preview research/first-duel/duel.png --output work/3ds-sd
+```text
+work/arm-generated-objects/fm-generated-combined.o
 ```
 
-Ajouter éventuellement `--disc "chemin/vers/le/disque.bin"`. Le script vérifie
-alors la taille et le SHA-256 français avant de copier le disque. Ne jamais
-committer ce disque ou les dossiers de travail.
+qui doit être généré localement à partir des shards français et ne doit pas être versionné.
 
-## Validation effectuée et limites
+Sorties :
 
-Compilation et édition de liens ARM11 effectuées avec devkitARM GCC 16.1.0,
-libctru issue de l'image officielle devkitpro/devkitarm. En-tête 3DSX et symboles
-du rasteriseur présents. Les avertissements de compilation observés concernent
-l'indentation et un commentaire dans le rasteriseur amont.
+```text
+3ds/fm-new3ds.elf
+3ds/fm-new3ds.3dsx
+```
 
-Pas de validation sur matériel, pas de preuve de performance d'un duel, pas de
-son ni de sauvegarde. Le prochain jalon est de raccorder le CPU/dispatch, les
-interruptions, le CD et les commandes GPU à cette cible, puis d'obtenir le menu
-animé calculé par le jeu. Le chargement de l'EXE seul ne suffit pas à ce jalon.
+## Azahar
 
-Licences et provenance : `3ds/licenses/`. Preuve de compilation :
-`research/new3ds/build.json`.
+Le disque est attendu à :
+
+```text
+sdmc:/3ds/fm-new3ds/disc.bin
+```
+
+Commandes principales :
+
+| Bouton | Action |
+| --- | --- |
+| A | RUN / PAUSE |
+| B | RESET JEU |
+| START + SELECT | Quitter |
+
+L'écran inférieur affiche le dernier PC, les registres, le dernier MMIO, le résultat du dispatcher, l'état du fallback R3000A et les compteurs GPU.
+
+## Limites actuelles
+
+- aucune image réelle de Forbidden Memories sur l'écran supérieur ;
+- IRQ/VBlank incomplets ;
+- DMA GPU à fiabiliser ;
+- contrôleur CD asynchrone incomplet ;
+- GTE complet absent ;
+- audio/SPU/XA absents ;
+- sauvegarde absente ;
+- pas encore de validation sur New 3DS physique.
+
+Voir [CURRENT_STATUS.md](CURRENT_STATUS.md) et [ACTION_PLAN.md](ACTION_PLAN.md) pour la suite.
