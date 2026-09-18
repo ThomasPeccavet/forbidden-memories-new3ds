@@ -30,7 +30,31 @@
 
 #define PSX_IRQ_VBLANK      0x0001u
 #define PSX_IRQ_DMA         0x0008u
+#define PSX_IRQ_TIMER0      0x0010u
+#define PSX_IRQ_TIMER1      0x0020u
+#define PSX_IRQ_TIMER2      0x0040u
 #define PSX_IRQ_VALID_MASK  0x07FFu
+
+
+/*
+ * ============================================================
+ * Root counters / timers
+ * ============================================================
+ */
+
+#define PSX_TIMER0_COUNT    0x1F801100u
+#define PSX_TIMER0_MODE     0x1F801104u
+#define PSX_TIMER0_TARGET   0x1F801108u
+
+#define PSX_TIMER1_COUNT    0x1F801110u
+#define PSX_TIMER1_MODE     0x1F801114u
+#define PSX_TIMER1_TARGET   0x1F801118u
+
+#define PSX_TIMER2_COUNT    0x1F801120u
+#define PSX_TIMER2_MODE     0x1F801124u
+#define PSX_TIMER2_TARGET   0x1F801128u
+
+#define PSX_TIMER_COUNT     3u
 
 
 /*
@@ -44,6 +68,13 @@
 #define PSX_DMA2_MADR       0x1F8010A0u
 #define PSX_DMA2_BCR        0x1F8010A4u
 #define PSX_DMA2_CHCR       0x1F8010A8u
+
+/*
+ * Canal 6 = OTC (Ordering Table Clear).
+ */
+#define PSX_DMA6_MADR       0x1F8010E0u
+#define PSX_DMA6_BCR        0x1F8010E4u
+#define PSX_DMA6_CHCR       0x1F8010E8u
 
 #define PSX_DMA_DPCR        0x1F8010F0u
 #define PSX_DMA_DICR        0x1F8010F4u
@@ -83,6 +114,26 @@ static uint16_t g_i_mask = 0;
 
 /*
  * ============================================================
+ * Root counter state
+ * ============================================================
+ */
+
+typedef struct FMRootCounter
+{
+    uint16_t count;
+    uint16_t mode;
+    uint16_t target;
+    uint8_t irq_fired_once;
+} FMRootCounter;
+
+
+static FMRootCounter g_timers[
+    PSX_TIMER_COUNT
+];
+
+
+/*
+ * ============================================================
  * DMA state
  * ============================================================
  */
@@ -90,6 +141,10 @@ static uint16_t g_i_mask = 0;
 static uint32_t g_dma2_madr = 0;
 static uint32_t g_dma2_bcr = 0;
 static uint32_t g_dma2_chcr = 0;
+
+static uint32_t g_dma6_madr = 0;
+static uint32_t g_dma6_bcr = 0;
+static uint32_t g_dma6_chcr = 0;
 
 static uint32_t g_dma_dpcr = 0;
 static uint32_t g_dma_dicr = 0;
@@ -100,6 +155,16 @@ static uint32_t g_dma_dicr = 0;
  */
 static uint32_t g_dma2_transfer_count = 0;
 static uint64_t g_dma2_word_count = 0;
+
+static uint32_t g_dma2_linked_transfer_count = 0;
+static uint32_t g_dma2_last_start_madr = 0;
+static uint32_t g_dma2_last_chcr = 0;
+static uint32_t g_dma2_last_nodes = 0;
+static uint32_t g_dma2_last_words = 0;
+static uint32_t g_dma2_last_first_header = 0;
+
+static uint32_t g_dma6_transfer_count = 0;
+static uint64_t g_dma6_word_count = 0;
 
 
 /*
@@ -216,6 +281,822 @@ static uint8_t *fm_scratch_ptr(
 
 /*
  * ============================================================
+ * Root counter helpers
+ * ============================================================
+ *
+ * MODE bits used by this bring-up implementation:
+ *   3      reset counter on target
+ *   4      IRQ on target
+ *   5      IRQ on overflow
+ *   6      IRQ repeat
+ *   7      IRQ toggle
+ *   8..9   clock source
+ *   10     IRQ request state
+ *   11     reached target
+ *   12     reached FFFF
+ *
+ * The emulation is intentionally deterministic rather than
+ * cycle-perfect. Timers move on every host VBlank and also make
+ * a small amount of progress when COUNT is polled repeatedly.
+ */
+
+static uint16_t fm_timer_irq_bit(
+    unsigned index
+)
+{
+    switch (index)
+    {
+        case 0:
+            return PSX_IRQ_TIMER0;
+
+        case 1:
+            return PSX_IRQ_TIMER1;
+
+        default:
+            return PSX_IRQ_TIMER2;
+    }
+}
+
+
+static void fm_timer_raise_irq(
+    unsigned index
+)
+{
+    FMRootCounter *timer =
+        &g_timers[index];
+
+
+    if (
+        (
+            timer->mode
+            &
+            0x0040u
+        )
+        ==
+        0
+        &&
+        timer->irq_fired_once
+    )
+    {
+        return;
+    }
+
+
+    timer->irq_fired_once =
+        1;
+
+
+    if (
+        timer->mode
+        &
+        0x0080u
+    )
+    {
+        timer->mode ^=
+            0x0400u;
+    }
+    else
+    {
+        timer->mode &=
+            (uint16_t)~0x0400u;
+    }
+
+
+    g_i_stat |=
+        fm_timer_irq_bit(
+            index
+        );
+}
+
+
+static void fm_timer_mark_target(
+    unsigned index
+)
+{
+    FMRootCounter *timer =
+        &g_timers[index];
+
+
+    timer->mode |=
+        0x0800u;
+
+
+    if (
+        timer->mode
+        &
+        0x0010u
+    )
+    {
+        fm_timer_raise_irq(
+            index
+        );
+    }
+}
+
+
+static void fm_timer_mark_overflow(
+    unsigned index
+)
+{
+    FMRootCounter *timer =
+        &g_timers[index];
+
+
+    timer->mode |=
+        0x1000u;
+
+
+    if (
+        timer->mode
+        &
+        0x0020u
+    )
+    {
+        fm_timer_raise_irq(
+            index
+        );
+    }
+}
+
+
+static void fm_timer_advance(
+    unsigned index,
+    uint32_t delta
+)
+{
+    if (
+        index >= PSX_TIMER_COUNT
+        ||
+        delta == 0
+    )
+    {
+        return;
+    }
+
+
+    FMRootCounter *timer =
+        &g_timers[index];
+
+
+    /*
+     * In pulse mode, bit10 returns high on the next timer step.
+     */
+    if (
+        (
+            timer->mode
+            &
+            0x0080u
+        )
+        ==
+        0
+        &&
+        (
+            timer->mode
+            &
+            0x0400u
+        )
+        ==
+        0
+    )
+    {
+        timer->mode |=
+            0x0400u;
+    }
+
+
+    uint32_t old_count =
+        timer->count;
+
+
+    uint32_t target =
+        timer->target;
+
+
+    if (
+        timer->mode
+        &
+        0x0008u
+    )
+    {
+        uint32_t period =
+            target
+            +
+            1u;
+
+
+        if (period == 0u)
+        {
+            period =
+                0x10000u;
+        }
+
+
+        old_count %=
+            period;
+
+
+        uint64_t total =
+            (uint64_t)old_count
+            +
+            (uint64_t)delta;
+
+
+        if (
+            total
+            >=
+            period
+        )
+        {
+            fm_timer_mark_target(
+                index
+            );
+
+
+            if (target == 0xFFFFu)
+            {
+                fm_timer_mark_overflow(
+                    index
+                );
+            }
+        }
+
+
+        timer->count =
+            (uint16_t)(
+                total
+                %
+                period
+            );
+
+
+        return;
+    }
+
+
+    uint64_t total =
+        (uint64_t)old_count
+        +
+        (uint64_t)delta;
+
+
+    uint32_t new_count =
+        (uint32_t)total
+        &
+        0xFFFFu;
+
+
+    int overflowed =
+        total
+        >
+        0xFFFFu;
+
+
+    int reached_target =
+        0;
+
+
+    if (!overflowed)
+    {
+        if (
+            old_count < target
+            &&
+            new_count >= target
+        )
+        {
+            reached_target =
+                1;
+        }
+    }
+    else
+    {
+        if (
+            target > old_count
+            ||
+            target <= new_count
+        )
+        {
+            reached_target =
+                1;
+        }
+    }
+
+
+    if (reached_target)
+    {
+        fm_timer_mark_target(
+            index
+        );
+    }
+
+
+    if (overflowed)
+    {
+        fm_timer_mark_overflow(
+            index
+        );
+    }
+
+
+    timer->count =
+        (uint16_t)new_count;
+}
+
+
+
+static uint32_t fm_timer_vblank_delta(
+    unsigned index
+)
+{
+    FMRootCounter *timer =
+        &g_timers[index];
+
+
+    /*
+     * PAL-oriented approximations for bring-up.
+     */
+    if (index == 1u)
+    {
+        uint32_t source =
+            (
+                timer->mode
+                >>
+                8
+            )
+            &
+            3u;
+
+
+        if (
+            source == 1u
+            ||
+            source == 3u
+        )
+        {
+            return 314u;
+        }
+
+
+        return 4096u;
+    }
+
+
+    if (index == 2u)
+    {
+        return
+            (
+                timer->mode
+                &
+                0x0200u
+            )
+                ? 4096u
+                : 32768u;
+    }
+
+
+    return 4096u;
+}
+
+
+static int fm_timer_decode(
+    uint32_t phys,
+    unsigned *out_index,
+    unsigned *out_reg,
+    unsigned *out_byte
+)
+{
+    if (
+        phys < PSX_TIMER0_COUNT
+        ||
+        phys >=
+        (
+            PSX_TIMER2_TARGET
+            +
+            4u
+        )
+    )
+    {
+        return 0;
+    }
+
+
+    uint32_t relative =
+        phys
+        -
+        PSX_TIMER0_COUNT;
+
+
+    unsigned index =
+        (unsigned)(
+            relative
+            /
+            0x10u
+        );
+
+
+    if (index >= PSX_TIMER_COUNT)
+    {
+        return 0;
+    }
+
+
+    uint32_t within =
+        relative
+        %
+        0x10u;
+
+
+    unsigned reg;
+
+
+    if (within < 4u)
+    {
+        reg = 0u;
+    }
+    else if (within < 8u)
+    {
+        reg = 1u;
+    }
+    else if (within < 12u)
+    {
+        reg = 2u;
+    }
+    else
+    {
+        return 0;
+    }
+
+
+    *out_index =
+        index;
+
+
+    *out_reg =
+        reg;
+
+
+    *out_byte =
+        (unsigned)(
+            within
+            &
+            3u
+        );
+
+
+    return 1;
+}
+
+
+static uint16_t fm_timer_read16(
+    unsigned index,
+    unsigned reg
+)
+{
+    FMRootCounter *timer =
+        &g_timers[index];
+
+
+    switch (reg)
+    {
+        case 0:
+        {
+            /*
+             * IMPORTANT:
+             *
+             * Une lecture COUNT doit être sans effet de bord.
+             *
+             * Forbidden Memories lit parfois deux fois le même
+             * compteur de suite afin d'obtenir une valeur stable.
+             * Si on incrémente ici, ces deux lectures ne peuvent
+             * jamais être égales et le jeu boucle jusqu'au watchdog.
+             *
+             * Les compteurs avancent dans fm_memory_vblank_tick().
+             */
+            return
+                timer->count;
+        }
+
+
+        case 1:
+        {
+            uint16_t value =
+                timer->mode;
+
+
+            /*
+             * Reached-target / reached-FFFF clear on MODE read.
+             */
+            timer->mode &=
+                (uint16_t)~(
+                    0x0800u
+                    |
+                    0x1000u
+                );
+
+
+            return
+                value;
+        }
+
+
+        default:
+            return
+                timer->target;
+    }
+}
+
+
+static void fm_timer_write16(
+    unsigned index,
+    unsigned reg,
+    uint16_t value
+)
+{
+    FMRootCounter *timer =
+        &g_timers[index];
+
+
+    switch (reg)
+    {
+        case 0:
+            timer->count =
+                value;
+
+            return;
+
+
+        case 1:
+            /*
+             * Writing MODE resets COUNT and status bits.
+             */
+            timer->mode =
+                (
+                    value
+                    &
+                    0x03FFu
+                )
+                |
+                0x0400u;
+
+
+            timer->count =
+                0;
+
+
+            timer->irq_fired_once =
+                0;
+
+
+            return;
+
+
+        default:
+            timer->target =
+                value;
+
+            return;
+    }
+}
+
+
+static uint8_t fm_timer_read_byte(
+    uint32_t phys
+)
+{
+    unsigned index;
+    unsigned reg;
+    unsigned byte_index;
+
+
+    if (
+        !fm_timer_decode(
+            phys,
+            &index,
+            &reg,
+            &byte_index
+        )
+        ||
+        byte_index >= 2u
+    )
+    {
+        return 0;
+    }
+
+
+    uint16_t value =
+        fm_timer_read16(
+            index,
+            reg
+        );
+
+
+    return
+        (uint8_t)(
+            value
+            >>
+            (
+                byte_index
+                *
+                8u
+            )
+        );
+}
+
+
+static void fm_timer_write_byte(
+    uint32_t phys,
+    uint8_t value
+)
+{
+    unsigned index;
+    unsigned reg;
+    unsigned byte_index;
+
+
+    if (
+        !fm_timer_decode(
+            phys,
+            &index,
+            &reg,
+            &byte_index
+        )
+        ||
+        byte_index >= 2u
+    )
+    {
+        return;
+    }
+
+
+    uint16_t old_value;
+
+
+    switch (reg)
+    {
+        case 0:
+            old_value =
+                g_timers[index].count;
+            break;
+
+        case 1:
+            old_value =
+                g_timers[index].mode;
+            break;
+
+        default:
+            old_value =
+                g_timers[index].target;
+            break;
+    }
+
+
+    unsigned shift =
+        byte_index
+        *
+        8u;
+
+
+    uint16_t mask =
+        (uint16_t)(
+            0x00FFu
+            <<
+            shift
+        );
+
+
+    uint16_t merged =
+        (uint16_t)(
+            (
+                old_value
+                &
+                (uint16_t)~mask
+            )
+            |
+            (
+                (uint16_t)value
+                <<
+                shift
+            )
+        );
+
+
+    fm_timer_write16(
+        index,
+        reg,
+        merged
+    );
+}
+
+
+static uint16_t fm_timer_read_half(
+    uint32_t phys
+)
+{
+    unsigned index;
+    unsigned reg;
+    unsigned byte_index;
+
+
+    if (
+        !fm_timer_decode(
+            phys,
+            &index,
+            &reg,
+            &byte_index
+        )
+        ||
+        byte_index != 0u
+    )
+    {
+        return 0;
+    }
+
+
+    return
+        fm_timer_read16(
+            index,
+            reg
+        );
+}
+
+
+static void fm_timer_write_half(
+    uint32_t phys,
+    uint16_t value
+)
+{
+    unsigned index;
+    unsigned reg;
+    unsigned byte_index;
+
+
+    if (
+        !fm_timer_decode(
+            phys,
+            &index,
+            &reg,
+            &byte_index
+        )
+        ||
+        byte_index != 0u
+    )
+    {
+        return;
+    }
+
+
+    fm_timer_write16(
+        index,
+        reg,
+        value
+    );
+}
+
+
+static uint32_t fm_timer_read_word(
+    uint32_t phys
+)
+{
+    return
+        (uint32_t)
+            fm_timer_read_half(
+                phys
+            );
+}
+
+
+static void fm_timer_write_word(
+    uint32_t phys,
+    uint32_t value
+)
+{
+    fm_timer_write_half(
+        phys,
+        (uint16_t)value
+    );
+}
+
+
+static int fm_timer_is_register(
+    uint32_t phys
+)
+{
+    unsigned index;
+    unsigned reg;
+    unsigned byte_index;
+
+
+    return
+        fm_timer_decode(
+            phys,
+            &index,
+            &reg,
+            &byte_index
+        );
+}
+
+
+/*
+ * ============================================================
  * Raw RAM helpers used by DMA
  * ============================================================
  *
@@ -252,6 +1133,54 @@ static uint32_t fm_dma_ram_read_word(
         ((uint32_t)g_ram[offset + 2] << 16)
         |
         ((uint32_t)g_ram[offset + 3] << 24);
+}
+
+
+
+static void fm_dma_ram_write_word(
+    uint32_t addr,
+    uint32_t value
+)
+{
+    uint32_t offset =
+        addr
+        &
+        0x001FFFFCu;
+
+    if (
+        !g_ram
+        ||
+        g_ram_size < 4
+        ||
+        offset > g_ram_size - 4
+    )
+    {
+        return;
+    }
+
+    g_ram[offset + 0] =
+        (uint8_t)value;
+
+    g_ram[offset + 1] =
+        (uint8_t)(
+            value
+            >>
+            8
+        );
+
+    g_ram[offset + 2] =
+        (uint8_t)(
+            value
+            >>
+            16
+        );
+
+    g_ram[offset + 3] =
+        (uint8_t)(
+            value
+            >>
+            24
+        );
 }
 
 
@@ -415,6 +1344,27 @@ static int fm_dma2_linked_list(void)
         &
         0x001FFFFCu;
 
+
+    g_dma2_last_start_madr =
+        g_dma2_madr;
+
+    g_dma2_last_chcr =
+        g_dma2_chcr;
+
+    g_dma2_last_nodes =
+        0;
+
+    g_dma2_last_words =
+        0;
+
+    g_dma2_last_first_header =
+        fm_dma_ram_read_word(
+            addr
+        );
+
+    ++g_dma2_linked_transfer_count;
+
+
     for (
         unsigned node = 0;
         node < 65536u;
@@ -425,6 +1375,10 @@ static int fm_dma2_linked_list(void)
             fm_dma_ram_read_word(
                 addr
             );
+
+
+        ++g_dma2_last_nodes;
+
 
         uint32_t count =
             header
@@ -461,6 +1415,8 @@ static int fm_dma2_linked_list(void)
             );
 
             ++g_dma2_word_count;
+
+            ++g_dma2_last_words;
 
             command_addr =
                 (
@@ -753,6 +1709,152 @@ static void fm_dma2_try_start(void)
 
 /*
  * ============================================================
+ * DMA6 OTC - Ordering Table Clear
+ * ============================================================
+ *
+ * Le canal OTC construit en RAM une chaîne inverse :
+ *
+ *   [addr]     = addr - 4
+ *   [addr - 4] = addr - 8
+ *   ...
+ *   dernier    = 00FFFFFF
+ *
+ * Cette table est ensuite utilisée par le DMA2 GPU en linked-list.
+ */
+
+static void fm_dma6_complete(void)
+{
+    g_dma6_chcr &=
+        ~(
+            0x01000000u
+            |
+            0x10000000u
+        );
+
+    /*
+     * DICR flag canal 6 = bit 30.
+     */
+    g_dma_dicr |=
+        1u
+        <<
+        30;
+
+    ++g_dma6_transfer_count;
+
+    fm_dma_update_irq();
+}
+
+
+static int fm_dma6_otc(void)
+{
+    uint32_t words =
+        g_dma6_bcr
+        &
+        0xFFFFu;
+
+    if (words == 0u)
+    {
+        words =
+            0x10000u;
+    }
+
+    /*
+     * Garde-fou : une OT réelle du jeu est très largement
+     * inférieure à 65536 entrées.
+     */
+    if (words > 0x10000u)
+    {
+        words =
+            0x10000u;
+    }
+
+    uint32_t addr =
+        g_dma6_madr
+        &
+        0x001FFFFCu;
+
+    for (
+        uint32_t i = 0;
+        i < words;
+        ++i
+    )
+    {
+        uint32_t value;
+
+        if (i + 1u == words)
+        {
+            value =
+                0x00FFFFFFu;
+        }
+        else
+        {
+            value =
+                (
+                    addr
+                    -
+                    4u
+                )
+                &
+                0x001FFFFFu;
+        }
+
+        fm_dma_ram_write_word(
+            addr,
+            value
+        );
+
+        ++g_dma6_word_count;
+
+        addr =
+            (
+                addr
+                -
+                4u
+            )
+            &
+            0x001FFFFCu;
+    }
+
+    g_dma6_madr =
+        addr;
+
+    return 1;
+}
+
+
+static void fm_dma6_try_start(void)
+{
+    /*
+     * CHCR bit24 = START/BUSY.
+     */
+    if (
+        (
+            g_dma6_chcr
+            &
+            0x01000000u
+        )
+        ==
+        0
+    )
+    {
+        return;
+    }
+
+    /*
+     * OTC est un DMA vers RAM, pas de transfert GP0.
+     *
+     * Le jeu utilise le mode manuel classique
+     * (souvent CHCR=0x11000002).
+     */
+    if (fm_dma6_otc())
+    {
+        fm_dma6_complete();
+    }
+}
+
+
+/*
+ * ============================================================
  * DMA sub-word access helpers
  * ============================================================
  *
@@ -788,6 +1890,24 @@ static int fm_dma_is_register(
         )
         ||
         (
+            phys >= PSX_DMA6_MADR
+            &&
+            phys < PSX_DMA6_MADR + 4u
+        )
+        ||
+        (
+            phys >= PSX_DMA6_BCR
+            &&
+            phys < PSX_DMA6_BCR + 4u
+        )
+        ||
+        (
+            phys >= PSX_DMA6_CHCR
+            &&
+            phys < PSX_DMA6_CHCR + 4u
+        )
+        ||
+        (
             phys >= PSX_DMA_DPCR
             &&
             phys < PSX_DMA_DPCR + 4u
@@ -815,6 +1935,15 @@ static uint32_t fm_dma_register_read32(
 
         case PSX_DMA2_CHCR:
             return g_dma2_chcr;
+
+        case PSX_DMA6_MADR:
+            return g_dma6_madr;
+
+        case PSX_DMA6_BCR:
+            return g_dma6_bcr;
+
+        case PSX_DMA6_CHCR:
+            return g_dma6_chcr;
 
         case PSX_DMA_DPCR:
             return g_dma_dpcr;
@@ -857,6 +1986,33 @@ static uint32_t fm_dma_register_base(
     )
     {
         return PSX_DMA2_CHCR;
+    }
+
+    if (
+        phys >= PSX_DMA6_MADR
+        &&
+        phys < PSX_DMA6_MADR + 4u
+    )
+    {
+        return PSX_DMA6_MADR;
+    }
+
+    if (
+        phys >= PSX_DMA6_BCR
+        &&
+        phys < PSX_DMA6_BCR + 4u
+    )
+    {
+        return PSX_DMA6_BCR;
+    }
+
+    if (
+        phys >= PSX_DMA6_CHCR
+        &&
+        phys < PSX_DMA6_CHCR + 4u
+    )
+    {
+        return PSX_DMA6_CHCR;
     }
 
     if (
@@ -1002,6 +2158,66 @@ static void fm_dma_register_write32_masked(
              * chaque écriture partielle.
              */
             fm_dma2_try_start();
+
+            return;
+
+
+        case PSX_DMA6_MADR:
+        {
+            uint32_t merged =
+                (
+                    g_dma6_madr
+                    &
+                    ~write_mask
+                )
+                |
+                (
+                    value
+                    &
+                    write_mask
+                );
+
+            g_dma6_madr =
+                merged
+                &
+                0x00FFFFFFu;
+
+            return;
+        }
+
+
+        case PSX_DMA6_BCR:
+            g_dma6_bcr =
+                (
+                    g_dma6_bcr
+                    &
+                    ~write_mask
+                )
+                |
+                (
+                    value
+                    &
+                    write_mask
+                );
+
+            return;
+
+
+        case PSX_DMA6_CHCR:
+            g_dma6_chcr =
+                (
+                    g_dma6_chcr
+                    &
+                    ~write_mask
+                )
+                |
+                (
+                    value
+                    &
+                    write_mask
+                );
+
+            fm_dma6_try_start();
 
             return;
 
@@ -1208,6 +2424,32 @@ void fm_memory_init(
     g_i_mask =
         0;
 
+
+    /*
+     * Root counters reset.
+     */
+    memset(
+        g_timers,
+        0,
+        sizeof(g_timers)
+    );
+
+
+    for (
+        unsigned i = 0;
+        i < PSX_TIMER_COUNT;
+        ++i
+    )
+    {
+        g_timers[i].mode =
+            0x0400u;
+
+
+        g_timers[i].target =
+            0xFFFFu;
+    }
+
+
     /*
      * DMA reset.
      */
@@ -1220,6 +2462,15 @@ void fm_memory_init(
     g_dma2_chcr =
         0;
 
+    g_dma6_madr =
+        0;
+
+    g_dma6_bcr =
+        0;
+
+    g_dma6_chcr =
+        0;
+
     g_dma_dpcr =
         0;
 
@@ -1230,6 +2481,30 @@ void fm_memory_init(
         0;
 
     g_dma2_word_count =
+        0;
+
+    g_dma2_linked_transfer_count =
+        0;
+
+    g_dma2_last_start_madr =
+        0;
+
+    g_dma2_last_chcr =
+        0;
+
+    g_dma2_last_nodes =
+        0;
+
+    g_dma2_last_words =
+        0;
+
+    g_dma2_last_first_header =
+        0;
+
+    g_dma6_transfer_count =
+        0;
+
+    g_dma6_word_count =
         0;
 
     /*
@@ -1291,6 +2566,21 @@ uint8_t fm_memory_read_byte(
         return
             *p;
     }
+
+    /*
+     * --------------------------------------------------------
+     * Root counters - byte access
+     * --------------------------------------------------------
+     */
+
+    if (fm_timer_is_register(phys))
+    {
+        return
+            fm_timer_read_byte(
+                phys
+            );
+    }
+
 
     /*
      * --------------------------------------------------------
@@ -1422,6 +2712,23 @@ void fm_memory_write_byte(
 
     /*
      * --------------------------------------------------------
+     * Root counters - byte access
+     * --------------------------------------------------------
+     */
+
+    if (fm_timer_is_register(phys))
+    {
+        fm_timer_write_byte(
+            phys,
+            value
+        );
+
+        return;
+    }
+
+
+    /*
+     * --------------------------------------------------------
      * DMA controller - byte access
      * --------------------------------------------------------
      */
@@ -1497,6 +2804,25 @@ uint16_t fm_memory_read_half(
         return
             g_i_mask;
     }
+
+    /*
+     * --------------------------------------------------------
+     * Root counters - half access
+     * --------------------------------------------------------
+     */
+
+    if (
+        fm_timer_is_register(phys)
+        &&
+        (phys & 3u) == 0u
+    )
+    {
+        return
+            fm_timer_read_half(
+                phys
+            );
+    }
+
 
     /*
      * --------------------------------------------------------
@@ -1709,6 +3035,27 @@ void fm_memory_write_half(
 
     /*
      * --------------------------------------------------------
+     * Root counters - half access
+     * --------------------------------------------------------
+     */
+
+    if (
+        fm_timer_is_register(phys)
+        &&
+        (phys & 3u) == 0u
+    )
+    {
+        fm_timer_write_half(
+            phys,
+            value
+        );
+
+        return;
+    }
+
+
+    /*
+     * --------------------------------------------------------
      * DMA controller - half access
      * --------------------------------------------------------
      */
@@ -1867,6 +3214,25 @@ uint32_t fm_memory_read_word(
 
     /*
      * --------------------------------------------------------
+     * Root counters
+     * --------------------------------------------------------
+     */
+
+    if (
+        fm_timer_is_register(phys)
+        &&
+        (phys & 3u) == 0u
+    )
+    {
+        return
+            fm_timer_read_word(
+                phys
+            );
+    }
+
+
+    /*
+     * --------------------------------------------------------
      * DMA2 GPU
      * --------------------------------------------------------
      */
@@ -1887,6 +3253,30 @@ uint32_t fm_memory_read_word(
     {
         return
             g_dma2_chcr;
+    }
+
+    /*
+     * --------------------------------------------------------
+     * DMA6 OTC
+     * --------------------------------------------------------
+     */
+
+    if (phys == PSX_DMA6_MADR)
+    {
+        return
+            g_dma6_madr;
+    }
+
+    if (phys == PSX_DMA6_BCR)
+    {
+        return
+            g_dma6_bcr;
+    }
+
+    if (phys == PSX_DMA6_CHCR)
+    {
+        return
+            g_dma6_chcr;
     }
 
     /*
@@ -2071,6 +3461,27 @@ void fm_memory_write_word(
 
     /*
      * --------------------------------------------------------
+     * Root counters
+     * --------------------------------------------------------
+     */
+
+    if (
+        fm_timer_is_register(phys)
+        &&
+        (phys & 3u) == 0u
+    )
+    {
+        fm_timer_write_word(
+            phys,
+            value
+        );
+
+        return;
+    }
+
+
+    /*
+     * --------------------------------------------------------
      * DMA2 GPU
      * --------------------------------------------------------
      */
@@ -2099,6 +3510,40 @@ void fm_memory_write_word(
             value;
 
         fm_dma2_try_start();
+
+        return;
+    }
+
+    /*
+     * --------------------------------------------------------
+     * DMA6 OTC
+     * --------------------------------------------------------
+     */
+
+    if (phys == PSX_DMA6_MADR)
+    {
+        g_dma6_madr =
+            value
+            &
+            0x00FFFFFFu;
+
+        return;
+    }
+
+    if (phys == PSX_DMA6_BCR)
+    {
+        g_dma6_bcr =
+            value;
+
+        return;
+    }
+
+    if (phys == PSX_DMA6_CHCR)
+    {
+        g_dma6_chcr =
+            value;
+
+        fm_dma6_try_start();
 
         return;
     }
@@ -2308,6 +3753,24 @@ void fm_memory_vblank_tick(void)
      */
     g_i_stat |=
         PSX_IRQ_VBLANK;
+
+
+    /*
+     * Faire progresser les trois Root Counters.
+     */
+    for (
+        unsigned i = 0;
+        i < PSX_TIMER_COUNT;
+        ++i
+    )
+    {
+        fm_timer_advance(
+            i,
+            fm_timer_vblank_delta(
+                i
+            )
+        );
+    }
 }
 
 
@@ -2466,6 +3929,75 @@ int fm_memory_self_test(void)
     );
 
     return 0;
+}
+
+
+
+void fm_memory_dma_debug(
+    FMDmaDebugStats *out
+)
+{
+    if (!out)
+    {
+        return;
+    }
+
+
+    memset(
+        out,
+        0,
+        sizeof(*out)
+    );
+
+
+    out->dma2_transfer_count =
+        g_dma2_transfer_count;
+
+    out->dma2_word_count =
+        g_dma2_word_count;
+
+    out->dma2_linked_transfer_count =
+        g_dma2_linked_transfer_count;
+
+    out->dma2_madr =
+        g_dma2_madr;
+
+    out->dma2_bcr =
+        g_dma2_bcr;
+
+    out->dma2_chcr =
+        g_dma2_chcr;
+
+    out->dma2_last_start_madr =
+        g_dma2_last_start_madr;
+
+    out->dma2_last_chcr =
+        g_dma2_last_chcr;
+
+    out->dma2_last_nodes =
+        g_dma2_last_nodes;
+
+    out->dma2_last_words =
+        g_dma2_last_words;
+
+    out->dma2_last_first_header =
+        g_dma2_last_first_header;
+
+
+    out->dma6_transfer_count =
+        g_dma6_transfer_count;
+
+    out->dma6_word_count =
+        g_dma6_word_count;
+
+    out->dma6_madr =
+        g_dma6_madr;
+
+    out->dma6_bcr =
+        g_dma6_bcr;
+
+    out->dma6_chcr =
+        g_dma6_chcr;
 }
 
 

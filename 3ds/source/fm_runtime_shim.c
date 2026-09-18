@@ -509,6 +509,117 @@ uint32_t psx_cyc_lwc2_read(
 
 /*
  * ============================================================
+ * Forbidden Memories VBlank bridge
+ * ============================================================
+ *
+ * Le runtime 3DS n'exécute pas encore toute la chaîne d'exception
+ * R3000A/BIOS. Le jeu attend pourtant qu'un callback VBlank mette
+ * à jour ses compteurs logiciels.
+ *
+ * Tant que l'IRQ VBlank est pendante ET masquée active, reproduire
+ * uniquement les deux effets observés nécessaires au bring-up:
+ *
+ *   80093EE8 : compteur VSync global
+ *   8009C428 : compteur/sémaphore de frame attendu par 80012CB8
+ *
+ * Puis acquitter uniquement VBlank dans I_STAT.
+ *
+ * Cette passerelle est volontairement ciblée; elle pourra être
+ * retirée lorsque la livraison IRQ R3000A complète sera portée.
+ */
+
+static void fm_runtime_service_vblank_hle(
+    CPUState *cpu
+)
+{
+    if (!cpu)
+    {
+        return;
+    }
+
+
+    uint16_t pending =
+        fm_memory_i_stat()
+        &
+        fm_memory_i_mask();
+
+
+    if (
+        (
+            pending
+            &
+            0x0001u
+        )
+        ==
+        0
+    )
+    {
+        return;
+    }
+
+
+    /*
+     * VSync software counter.
+     */
+    uint32_t vsync_count =
+        cpu->read_word(
+            0x80093EE8u
+        );
+
+
+    cpu->write_word(
+        0x80093EE8u,
+        vsync_count + 1u
+    );
+
+
+    /*
+     * FUN_80012CB8 attend:
+     *
+     *   DAT_8009C428 >= DAT_8009C424
+     *
+     * DAT_8009C424 est un petit compteur/objectif de frame.
+     * Sur hardware réel il est satisfait par la chaîne VBlank.
+     */
+    uint32_t frame_target =
+        cpu->read_byte(
+            0x8009C424u
+        );
+
+
+    int32_t frame_done =
+        (int32_t)
+            cpu->read_word(
+                0x8009C428u
+            );
+
+
+    if (
+        frame_done
+        <
+        (int32_t)frame_target
+    )
+    {
+        cpu->write_word(
+            0x8009C428u,
+            frame_target
+        );
+    }
+
+
+    /*
+     * I_STAT est "write 0 to clear / write 1 to keep".
+     * 0x07FE efface seulement VBlank (bit0).
+     */
+    fm_memory_write_word(
+        0x1F801070u,
+        0x000007FEu
+    );
+}
+
+
+/*
+ * ============================================================
  * Interrupt checkpoints
  * ============================================================
  */
@@ -518,6 +629,16 @@ void psx_check_interrupts_at(
     uint32_t resume_pc
 )
 {
+    /*
+     * Service VBlank avant le watchdog. Cela permet aux boucles
+     * guest de synchronisation image de voir progresser leurs
+     * compteurs logiciels au prochain checkpoint généré.
+     */
+    fm_runtime_service_vblank_hle(
+        cpu
+    );
+
+
     if (!g_probe_armed)
     {
         return;

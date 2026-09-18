@@ -68,6 +68,638 @@ static uint32_t g_bios_debug_fn = 0;
 static int g_bios_debug_result = -1;
 
 
+/*
+ * Dernier message texte que le jeu essaie d'envoyer à sa console
+ * de debug via FUN_80090CF8.
+ *
+ * Cette fonction n'a pas d'effet gameplay : elle écrit seulement
+ * le texte caractère par caractère via FUN_800901A8. L'intercepter
+ * évite de perdre énormément de temps dans cette sortie et nous
+ * donne directement le message d'erreur/timeout réel.
+ */
+static char g_game_log[128];
+static uint32_t g_game_log_ptr = 0;
+static uint32_t g_game_log_count = 0;
+
+
+/*
+ * ============================================================
+ * VSync HLE
+ * ============================================================
+ *
+ * FUN_800746B8 est la VSync Psy-Q de Forbidden Memories.
+ *
+ * La version native du jeu attend que DAT_80093EE8 soit incrémenté
+ * par l'IRQ VBlank. Tant que notre chaîne d'exception R3000A/BIOS
+ * n'est pas complète, la fonction finit dans "VSync: timeout".
+ *
+ * On la synchronise directement sur les VBlank de la boucle 3DS.
+ */
+static int g_vsync_wait_active = 0;
+static uint32_t g_vsync_wait_until_frame = 0;
+static int32_t g_vsync_wait_mode = 0;
+
+static uint32_t g_vsync_hle_calls = 0;
+static uint32_t g_vsync_hle_wait_calls = 0;
+static uint32_t g_vsync_hle_query_calls = 0;
+static int32_t g_vsync_hle_last_mode = 0;
+
+
+/*
+ * ============================================================
+ * STR intro skip - bring-up temporaire
+ * ============================================================
+ *
+ * Le runtime PC validé montre que le boot reste longtemps dans
+ * FUN_8006A4D8 en attendant des secteurs STR, puis que l'appui
+ * Start permet d'atteindre le titre/menu.
+ *
+ * Sur 3DS, notre chaîne CD streaming STR n'alimente pas encore
+ * FUN_80078B58. Pour débloquer le jalon graphique sans afficher
+ * d'image artificielle, on force UNE SEULE FOIS la fin du premier
+ * flux vidéo. Les écrans suivants restent entièrement produits
+ * par le code du jeu.
+ */
+static int g_str_intro_skip_pending = 1;
+static uint32_t g_str_intro_skip_count = 0;
+
+static uint32_t g_str_intro_last_base = 0;
+static uint8_t g_str_intro_last_done = 0;
+
+
+/*
+ * ============================================================
+ * Main state-machine diagnostics
+ * ============================================================
+ *
+ * DAT_8009C60A est l'état principal dispatché par FUN_8002DF60.
+ * Le bit 7 est le flag "initialisé"; les 5 bits bas choisissent
+ * l'entrée de la jump-table du jeu.
+ */
+static uint8_t g_main_state = 0;
+static uint8_t g_main_state_last = 0xFFu;
+static uint32_t g_main_state_changes = 0;
+static uint32_t g_main_state_stable_frames = 0;
+
+static uint8_t g_main_state_60c = 0;
+static uint8_t g_main_state_60d = 0;
+static uint8_t g_main_state_60e = 0;
+
+static uint32_t g_main_render_ctx = 0;
+static uint8_t g_main_frame_target = 0;
+static int32_t g_main_frame_done = 0;
+
+static uint32_t g_main_flags_6a0 = 0;
+static uint32_t g_main_flags_710 = 0;
+static uint32_t g_main_flags_72c = 0;
+
+
+/*
+ * ============================================================
+ * Fade / transition bridge
+ * ============================================================
+ *
+ * Le boot est actuellement bloqué avant FUN_8002DF60 :
+ *
+ *   FUN_80044084
+ *     -> FUN_800158F4
+ *       -> FUN_8001569C
+ *         EB24D = FF
+ *         EB24E = 80
+ *       -> FUN_800158B4
+ *          attend tant que (EB24E & 80) != 0
+ *
+ * Sur PS1, FUN_80015400 -> FUN_8001522C fait progresser EB24C
+ * vers EB24D à chaque service de frame, puis efface bit7.
+ *
+ * Notre bring-up 3DS ne livre pas encore toute la chaîne
+ * d'événements/IRQ de façon identique. On reproduit uniquement
+ * cette machine de transition en RAM, sans fabriquer d'image.
+ */
+
+static uint8_t g_fade_current = 0;
+static uint8_t g_fade_target = 0;
+static uint8_t g_fade_flags = 0;
+static uint8_t g_fade_step = 0;
+static uint32_t g_fade_scale = 0;
+
+static uint32_t g_fade_bridge_ticks = 0;
+static uint32_t g_fade_bridge_completions = 0;
+
+
+static void fm_service_fade_bridge(void)
+{
+    uint8_t current =
+        fm_memory_read_byte(
+            0x800EB24Cu
+        );
+
+    uint8_t target =
+        fm_memory_read_byte(
+            0x800EB24Du
+        );
+
+    uint8_t flags =
+        fm_memory_read_byte(
+            0x800EB24Eu
+        );
+
+    uint8_t step =
+        fm_memory_read_byte(
+            0x800EB24Fu
+        );
+
+    uint32_t scale =
+        fm_memory_read_word(
+            0x8009C43Cu
+        );
+
+
+    g_fade_current =
+        current;
+
+    g_fade_target =
+        target;
+
+    g_fade_flags =
+        flags;
+
+    g_fade_step =
+        step;
+
+    g_fade_scale =
+        scale;
+
+
+    /*
+     * Rien à faire si aucune transition n'est active.
+     */
+    if (
+        (
+            flags
+            &
+            0x80u
+        )
+        ==
+        0
+    )
+    {
+        return;
+    }
+
+
+    /*
+     * Le bit0 sélectionne un autre chemin (FUN_800150F4).
+     * Ne pas l'émuler ici : le bridge cible uniquement la
+     * transition linéaire qui bloque le boot.
+     */
+    if (
+        flags
+        &
+        0x01u
+    )
+    {
+        return;
+    }
+
+
+    uint32_t delta =
+        (uint32_t)step
+        *
+        scale;
+
+
+    /*
+     * Si le multiplicateur vaut zéro, ne pas inventer de vitesse.
+     * Le diagnostic l'affichera directement.
+     */
+    if (delta == 0u)
+    {
+        return;
+    }
+
+
+    ++g_fade_bridge_ticks;
+
+
+    if (current != target)
+    {
+        uint32_t next;
+
+
+        if (current < target)
+        {
+            next =
+                (uint32_t)current
+                +
+                delta;
+
+
+            if (next > target)
+            {
+                next =
+                    target;
+            }
+        }
+        else
+        {
+            if (delta >= current)
+            {
+                next =
+                    0;
+            }
+            else
+            {
+                next =
+                    (uint32_t)current
+                    -
+                    delta;
+            }
+
+
+            if (next < target)
+            {
+                next =
+                    target;
+            }
+        }
+
+
+        fm_memory_write_byte(
+            0x800EB24Cu,
+            (uint8_t)next
+        );
+
+
+        g_fade_current =
+            (uint8_t)next;
+
+
+        return;
+    }
+
+
+    /*
+     * Reproduire le cas de fin de transition observé dans
+     * FUN_8001522C.
+     */
+    uint8_t result_flags =
+        flags
+        &
+        0x7Fu;
+
+
+    /*
+     * La fonction originale nettoie d'abord 0x86.
+     */
+    uint8_t cleaned_flags =
+        flags
+        &
+        0x79u;
+
+
+    fm_memory_write_byte(
+        0x800EB24Eu,
+        cleaned_flags
+    );
+
+
+    if (current == 0xFFu)
+    {
+        /*
+         * FUN_80015C18()
+         */
+        fm_memory_write_byte(
+            0x8009C4B8u,
+            1u
+        );
+
+
+        fm_memory_write_byte(
+            0x8009C4C4u,
+            0u
+        );
+
+        fm_memory_write_byte(
+            0x8009C4C5u,
+            0u
+        );
+
+
+        /*
+         * Couleurs/états cibles -> courants.
+         */
+        fm_memory_write_byte(
+            0x8009C4BBu,
+            fm_memory_read_byte(
+                0x8009C4BEu
+            )
+        );
+
+        fm_memory_write_byte(
+            0x8009C4BAu,
+            fm_memory_read_byte(
+                0x8009C4BDu
+            )
+        );
+
+        fm_memory_write_byte(
+            0x8009C4B9u,
+            fm_memory_read_byte(
+                0x8009C4BCu
+            )
+        );
+
+
+        result_flags =
+            cleaned_flags;
+    }
+
+
+    /*
+     * Cas courant du boot :
+     * 80 -> 00 lorsque C atteint D=FF.
+     */
+    fm_memory_write_byte(
+        0x800EB24Eu,
+        result_flags
+    );
+
+
+    g_fade_flags =
+        result_flags;
+
+
+    ++g_fade_bridge_completions;
+}
+
+
+static void fm_update_game_state_debug(void)
+{
+    uint8_t state =
+        fm_memory_read_byte(
+            0x8009C60Au
+        );
+
+
+    if (state != g_main_state_last)
+    {
+        ++g_main_state_changes;
+
+        g_main_state_last =
+            state;
+
+        g_main_state_stable_frames =
+            0;
+    }
+    else
+    {
+        ++g_main_state_stable_frames;
+    }
+
+
+    g_main_state =
+        state;
+
+
+    g_main_state_60c =
+        fm_memory_read_byte(
+            0x8009C60Cu
+        );
+
+    g_main_state_60d =
+        fm_memory_read_byte(
+            0x8009C60Du
+        );
+
+    g_main_state_60e =
+        fm_memory_read_byte(
+            0x8009C60Eu
+        );
+
+
+    g_main_render_ctx =
+        fm_memory_read_word(
+            0x8009C414u
+        );
+
+
+    g_main_frame_target =
+        fm_memory_read_byte(
+            0x8009C424u
+        );
+
+
+    g_main_frame_done =
+        (int32_t)
+            fm_memory_read_word(
+                0x8009C428u
+            );
+
+
+    g_main_flags_6a0 =
+        fm_memory_read_word(
+            0x8009C6A0u
+        );
+
+
+    g_main_flags_710 =
+        fm_memory_read_word(
+            0x8009C710u
+        );
+
+
+    g_main_flags_72c =
+        fm_memory_read_word(
+            0x8009C72Cu
+        );
+
+
+    /*
+     * STR context seulement observé ici.
+     * On ne force plus rien : la capture précédente a prouvé que
+     * le lecteur STR n'est même pas encore initialisé.
+     */
+    g_str_intro_last_base =
+        fm_memory_read_word(
+            0x8009C818u
+        );
+
+
+    g_str_intro_last_done =
+        fm_memory_read_byte(
+            0x8009C3EBu
+        );
+}
+
+
+/*
+ * Force la fin du premier flux STR depuis la boucle hôte.
+ *
+ * Pourquoi ici et pas uniquement dans le dispatcher ?
+ *
+ * FUN_8006A4D8 peut être appelée directement par du code statiquement
+ * recompilé. Dans ce cas, le dispatcher principal ne voit jamais son
+ * adresse exacte et l'interception par "phys == 0x0006A4D8" ne peut
+ * pas se déclencher.
+ *
+ * En revanche, les variables de contexte STR sont en RAM PS1 et sont
+ * observables depuis la boucle 3DS :
+ *
+ *   8009C818 = base/workspace du lecteur vidéo
+ *   8009C3EB = drapeau "stream finished"
+ *
+ * On attend que le workspace soit réellement initialisé, que l'ISO
+ * soit trouvé et que VSync tourne déjà, puis on positionne une seule
+ * fois le drapeau de fin.
+ */
+static void fm_try_force_intro_stream_end(
+    int game_running
+)
+{
+    g_str_intro_last_base =
+        fm_memory_read_word(
+            0x8009C818u
+        );
+
+
+    g_str_intro_last_done =
+        fm_memory_read_byte(
+            0x8009C3EBu
+        );
+
+
+    if (
+        !g_str_intro_skip_pending
+        ||
+        !game_running
+        ||
+        !g_cd_search_ok
+        ||
+        g_vsync_hle_calls < 120u
+        ||
+        g_str_intro_last_base == 0u
+    )
+    {
+        return;
+    }
+
+
+    /*
+     * Si le jeu l'a déjà terminé naturellement, considérer le skip
+     * comme consommé sans modifier la RAM.
+     */
+    if (g_str_intro_last_done != 0u)
+    {
+        g_str_intro_skip_pending =
+            0;
+
+
+        return;
+    }
+
+
+    fm_memory_write_byte(
+        0x8009C3EBu,
+        1u
+    );
+
+
+    g_str_intro_last_done =
+        1u;
+
+
+    g_str_intro_skip_pending =
+        0;
+
+
+    ++g_str_intro_skip_count;
+}
+
+
+static void fm_capture_guest_string(
+    CPUState *cpu,
+    uint32_t guest_ptr
+)
+{
+    g_game_log_ptr =
+        guest_ptr;
+
+    ++g_game_log_count;
+
+
+    if (
+        !cpu
+        ||
+        guest_ptr == 0
+    )
+    {
+        strncpy(
+            g_game_log,
+            "<NULL>",
+            sizeof(g_game_log) - 1
+        );
+
+        g_game_log[
+            sizeof(g_game_log) - 1
+        ] =
+            '\0';
+
+        return;
+    }
+
+
+    unsigned i = 0;
+
+
+    while (
+        i < sizeof(g_game_log) - 1
+    )
+    {
+        uint8_t c =
+            cpu->read_byte(
+                guest_ptr + i
+            );
+
+
+        /*
+         * Conserver uniquement quelque chose d'affichable sur la
+         * console 3DS. Les CR/LF deviennent des espaces.
+         */
+        if (
+            c == '\r'
+            ||
+            c == '\n'
+            ||
+            c == '\t'
+        )
+        {
+            c =
+                ' ';
+        }
+
+
+        g_game_log[i] =
+            (char)c;
+
+
+        if (c == 0)
+        {
+            break;
+        }
+
+
+        ++i;
+    }
+
+
+    g_game_log[
+        sizeof(g_game_log) - 1
+    ] =
+        '\0';
+}
+
+
 static uint32_t fm_bcd_to_u32(uint8_t value)
 {
     return
@@ -100,6 +732,51 @@ static void fm_cd_hle_reset(void)
     g_bios_debug_addr = 0;
     g_bios_debug_fn = 0;
     g_bios_debug_result = -1;
+
+    g_game_log[0] = '\0';
+    g_game_log_ptr = 0;
+    g_game_log_count = 0;
+
+    g_vsync_wait_active = 0;
+    g_vsync_wait_until_frame = 0;
+    g_vsync_wait_mode = 0;
+
+    g_vsync_hle_calls = 0;
+    g_vsync_hle_wait_calls = 0;
+    g_vsync_hle_query_calls = 0;
+    g_vsync_hle_last_mode = 0;
+
+    g_str_intro_skip_pending = 1;
+    g_str_intro_skip_count = 0;
+
+    g_str_intro_last_base = 0;
+    g_str_intro_last_done = 0;
+
+    g_main_state = 0;
+    g_main_state_last = 0xFFu;
+    g_main_state_changes = 0;
+    g_main_state_stable_frames = 0;
+
+    g_main_state_60c = 0;
+    g_main_state_60d = 0;
+    g_main_state_60e = 0;
+
+    g_main_render_ctx = 0;
+    g_main_frame_target = 0;
+    g_main_frame_done = 0;
+
+    g_main_flags_6a0 = 0;
+    g_main_flags_710 = 0;
+    g_main_flags_72c = 0;
+
+    g_fade_current = 0;
+    g_fade_target = 0;
+    g_fade_flags = 0;
+    g_fade_step = 0;
+    g_fade_scale = 0;
+
+    g_fade_bridge_ticks = 0;
+    g_fade_bridge_completions = 0;
 }
 
 
@@ -371,6 +1048,19 @@ int main(void)
     uint64_t render_ticks = 0;
     unsigned render_count = 0;
 
+    /*
+     * GP0 par frame :
+     *
+     * fm_gpu_gp0_count() est cumulatif. Cette valeur permet de
+     * distinguer un jeu réellement actif d'un compteur simplement
+     * très élevé depuis le boot.
+     */
+    uint64_t gp0_prev_frame =
+        fm_gpu_gp0_count();
+
+    uint64_t gp0_last_frame =
+        0;
+
     fm_cd_hle_reset();
 
 
@@ -640,6 +1330,327 @@ int main(void)
                      */
                     g_bios_debug_result =
                         2;
+
+                    static_miss =
+                        0;
+
+                    continue;
+                }
+
+
+                /*
+                 * ============================================
+                 * STR intro - fin de flux forcée UNE FOIS
+                 *
+                 * FUN_8006A4D8()
+                 * ============================================
+                 *
+                 * Cette fonction renvoie 1 lorsque DAT_8009C3EB
+                 * indique que le flux vidéo est terminé.
+                 *
+                 * Le streaming STR/CD asynchrone n'est pas encore
+                 * porté sur 3DS. On reproduit donc cet état de fin
+                 * uniquement pour le premier flux du boot afin de
+                 * passer à l'écran titre/menu réellement rendu par
+                 * Forbidden Memories.
+                 */
+                if (
+                    phys == 0x0006A4D8u
+                    &&
+                    g_str_intro_skip_pending
+                )
+                {
+                    /*
+                     * DAT_8009C3EB = "stream finished".
+                     */
+                    cpu->write_byte(
+                        0x8009C3EBu,
+                        1
+                    );
+
+
+                    /*
+                     * La fonction originale renvoie 1 dans cet état.
+                     */
+                    cpu->gpr[2] =
+                        1;
+
+
+                    cpu->pc =
+                        cpu->gpr[31];
+
+
+                    cpu->gpr[0] =
+                        0;
+
+
+                    g_str_intro_skip_pending =
+                        0;
+
+
+                    ++g_str_intro_skip_count;
+
+
+                    static_miss =
+                        0;
+
+
+                    continue;
+                }
+
+
+                /*
+                 * ============================================
+                 * VSync HLE - FUN_800746B8
+                 * ============================================
+                 *
+                 * Psy-Q:
+                 *
+                 *   VSync(-1) -> compteur VBlank courant
+                 *   VSync(1)  -> temps depuis le dernier VSync
+                 *                 en unités HSync
+                 *   VSync(0)  -> attend le prochain VBlank
+                 *   VSync(n)  -> attend n VBlanks
+                 *
+                 * Ici l'attente est réellement étalée sur la
+                 * boucle GSP 3DS : pas de busy-loop, pas de timeout,
+                 * et le jeu reste cadencé par le VBlank hôte.
+                 */
+                if (phys == 0x000746B8u)
+                {
+                    int32_t mode =
+                        (int32_t)cpu->gpr[4];
+
+
+                    ++g_vsync_hle_calls;
+
+                    g_vsync_hle_last_mode =
+                        mode;
+
+
+                    uint32_t timer_now =
+                        cpu->read_half(
+                            0x1F801110u
+                        );
+
+
+                    uint32_t timer_last =
+                        cpu->read_word(
+                            0x80092DB8u
+                        )
+                        &
+                        0xFFFFu;
+
+
+                    uint32_t timer_delta =
+                        (
+                            timer_now
+                            -
+                            timer_last
+                        )
+                        &
+                        0xFFFFu;
+
+
+                    /*
+                     * VSync(-1) :
+                     *
+                     * Le compteur de frame 3DS est notre horloge
+                     * VBlank monotone pour le bring-up.
+                     */
+                    if (mode < 0)
+                    {
+                        ++g_vsync_hle_query_calls;
+
+
+                        cpu->write_word(
+                            0x80093EE8u,
+                            frame
+                        );
+
+
+                        cpu->gpr[2] =
+                            frame;
+
+
+                        cpu->pc =
+                            cpu->gpr[31];
+
+
+                        cpu->gpr[0] =
+                            0;
+
+
+                        static_miss =
+                            0;
+
+
+                        continue;
+                    }
+
+
+                    /*
+                     * VSync(1) :
+                     * ne bloque pas.
+                     */
+                    if (mode == 1)
+                    {
+                        cpu->gpr[2] =
+                            timer_delta;
+
+
+                        cpu->pc =
+                            cpu->gpr[31];
+
+
+                        cpu->gpr[0] =
+                            0;
+
+
+                        static_miss =
+                            0;
+
+
+                        continue;
+                    }
+
+
+                    /*
+                     * VSync(0) = prochain VBlank.
+                     * VSync(n) = n VBlanks.
+                     */
+                    uint32_t wait_frames =
+                        mode <= 0
+                            ? 1u
+                            : (uint32_t)mode;
+
+
+                    if (!g_vsync_wait_active)
+                    {
+                        g_vsync_wait_active =
+                            1;
+
+
+                        g_vsync_wait_mode =
+                            mode;
+
+
+                        g_vsync_wait_until_frame =
+                            frame
+                            +
+                            wait_frames;
+
+
+                        ++g_vsync_hle_wait_calls;
+                    }
+
+
+                    /*
+                     * Ne pas exécuter une boucle guest d'attente.
+                     *
+                     * On garde PC sur FUN_800746B8 et on rend la
+                     * main à la boucle principale 3DS. Au VBlank
+                     * suivant, la même entrée sera retestée.
+                     */
+                    if (
+                        frame
+                        <
+                        g_vsync_wait_until_frame
+                    )
+                    {
+                        static_miss =
+                            0;
+
+
+                        break;
+                    }
+
+
+                    /*
+                     * Attente terminée.
+                     *
+                     * Reproduire les globals principaux vus dans
+                     * FUN_800746B8 :
+                     *
+                     * 80093EE8 = compteur VBlank
+                     * 80092DBC = dernier VBlank synchronisé
+                     * 80092DB8 = cache Timer1
+                     */
+                    cpu->write_word(
+                        0x80093EE8u,
+                        frame
+                    );
+
+
+                    cpu->write_word(
+                        0x80092DBCu,
+                        frame
+                    );
+
+
+                    cpu->write_word(
+                        0x80092DB8u,
+                        timer_now
+                    );
+
+
+                    cpu->gpr[2] =
+                        timer_delta;
+
+
+                    cpu->pc =
+                        cpu->gpr[31];
+
+
+                    cpu->gpr[0] =
+                        0;
+
+
+                    g_vsync_wait_active =
+                        0;
+
+
+                    g_vsync_wait_until_frame =
+                        0;
+
+
+                    static_miss =
+                        0;
+
+
+                    continue;
+                }
+
+
+                /*
+                 * ============================================
+                 * Jeu : console debug
+                 *
+                 * FUN_80090CF8(char *message)
+                 *
+                 * Le code original parcourt toute la chaîne puis
+                 * appelle FUN_800901A8 pour chaque caractère.
+                 *
+                 * Sur notre bring-up cela peut coûter beaucoup de
+                 * temps, surtout lorsqu'un timeout est répété.
+                 *
+                 * Aucun état gameplay n'est modifié par cette
+                 * fonction : on capture le texte puis on retourne.
+                 * ============================================
+                 */
+                if (phys == 0x00090CF8u)
+                {
+                    fm_capture_guest_string(
+                        cpu,
+                        cpu->gpr[4]
+                    );
+
+
+                    cpu->pc =
+                        cpu->gpr[31];
+
+                    cpu->gpr[0] =
+                        0;
 
                     static_miss =
                         0;
@@ -1624,15 +2635,41 @@ int main(void)
             );
 
 
-            printf(
-                "--- GPU PS1 --- GP0 words : %llu\n",
-                (unsigned long long)
-                    fm_gpu_gp0_count()
+            FMGpuDebugStats gpu_debug;
+
+            fm_gpu_debug_stats(
+                &gpu_debug
             );
 
 
             printf(
-                "Frame VRAM   : %s\n",
+                "--- GPU --- GP0 T/F : %llu / %llu\n",
+                (unsigned long long)gpu_debug.gp0_words,
+                (unsigned long long)gp0_last_frame
+            );
+
+
+            printf(
+                "Pkt F/D/C/U/E: %llu/%llu/%llu/%llu/%llu\n",
+                (unsigned long long)gpu_debug.packets_fill,
+                (unsigned long long)gpu_debug.packets_draw,
+                (unsigned long long)gpu_debug.packets_copy,
+                (unsigned long long)gpu_debug.packets_upload,
+                (unsigned long long)gpu_debug.packets_env
+            );
+
+
+            printf(
+                "VRAM NZ 0/320/D: %lu/%lu/%lu\n",
+                (unsigned long)gpu_debug.nonzero_page0,
+                (unsigned long)gpu_debug.nonzero_page320,
+                (unsigned long)gpu_debug.nonzero_display
+            );
+
+
+            printf(
+                "VRAM total   : %lu  Frame:%s\n",
+                (unsigned long)gpu_debug.nonzero_vram,
                 fm_gpu_has_frame()
                     ? "OUI"
                     : "NON"
@@ -1640,16 +2677,24 @@ int main(void)
 
 
             printf(
-                "Display XY   : %u,%u\n",
-                fm_gpu_display_x(),
-                fm_gpu_display_y()
+                "Disp %u,%u %s Area %d,%d-%d,%d\n",
+                gpu_debug.display_x,
+                gpu_debug.display_y,
+                gpu_debug.display_disabled
+                    ? "OFF"
+                    : "ON",
+                gpu_debug.draw_x1,
+                gpu_debug.draw_y1,
+                gpu_debug.draw_x2,
+                gpu_debug.draw_y2
             );
 
 
             printf(
-                "GPUSTAT      : %08lX\n",
-                (unsigned long)
-                    fm_gpu_status()
+                "Off %d,%d  GPUSTAT:%08lX\n",
+                gpu_debug.offset_x,
+                gpu_debug.offset_y,
+                (unsigned long)fm_gpu_status()
             );
 
 
@@ -1661,23 +2706,45 @@ int main(void)
             );
 
 
-            printf(
-                "--- LOW RAM JUMP --- From/Target : %08lX / %08lX\n",
-                (unsigned long)low_jump_from,
-                (unsigned long)low_jump_target
+            FMDmaDebugStats dma_debug;
+
+            fm_memory_dma_debug(
+                &dma_debug
             );
 
 
             printf(
-                "Opcode       : %08lX\n",
-                (unsigned long)low_jump_opcode
+                "--- DMA2 --- Xfer/LL : %lu/%lu\n",
+                (unsigned long)dma_debug.dma2_transfer_count,
+                (unsigned long)dma_debug.dma2_linked_transfer_count
             );
 
 
             printf(
-                "RA / T1      : %08lX / %02lX\n",
-                (unsigned long)low_jump_ra,
-                (unsigned long)low_jump_t1
+                "Words T/L    : %llu/%lu\n",
+                (unsigned long long)dma_debug.dma2_word_count,
+                (unsigned long)dma_debug.dma2_last_words
+            );
+
+
+            printf(
+                "Nodes/Header : %lu/%08lX\n",
+                (unsigned long)dma_debug.dma2_last_nodes,
+                (unsigned long)dma_debug.dma2_last_first_header
+            );
+
+
+            printf(
+                "MADR/CHCR    : %08lX/%08lX\n",
+                (unsigned long)dma_debug.dma2_last_start_madr,
+                (unsigned long)dma_debug.dma2_last_chcr
+            );
+
+
+            printf(
+                "DMA6 X/W     : %lu/%llu\n",
+                (unsigned long)dma_debug.dma6_transfer_count,
+                (unsigned long long)dma_debug.dma6_word_count
             );
 
 
@@ -1733,6 +2800,81 @@ int main(void)
             );
 
 
+            printf(
+                "VSYNC HLE C/W/Q: %lu/%lu/%lu M:%ld\n",
+                (unsigned long)g_vsync_hle_calls,
+                (unsigned long)g_vsync_hle_wait_calls,
+                (unsigned long)g_vsync_hle_query_calls,
+                (long)g_vsync_hle_last_mode
+            );
+
+
+            printf(
+                "STATE 60A    : %02X low:%02X C:%lu S:%lu\n",
+                (unsigned)g_main_state,
+                (unsigned)(g_main_state & 0x1Fu),
+                (unsigned long)g_main_state_changes,
+                (unsigned long)g_main_state_stable_frames
+            );
+
+
+            printf(
+                "60C/D/E      : %02X/%02X/%02X CTX:%08lX\n",
+                (unsigned)g_main_state_60c,
+                (unsigned)g_main_state_60d,
+                (unsigned)g_main_state_60e,
+                (unsigned long)g_main_render_ctx
+            );
+
+
+            printf(
+                "FRAME T/D    : %u/%ld F6A0:%08lX\n",
+                (unsigned)g_main_frame_target,
+                (long)g_main_frame_done,
+                (unsigned long)g_main_flags_6a0
+            );
+
+
+            printf(
+                "F710/F72C    : %08lX/%08lX\n",
+                (unsigned long)g_main_flags_710,
+                (unsigned long)g_main_flags_72c
+            );
+
+
+            printf(
+                "FADE C/D/E/F : %02X/%02X/%02X/%02X S:%lu\n",
+                (unsigned)g_fade_current,
+                (unsigned)g_fade_target,
+                (unsigned)g_fade_flags,
+                (unsigned)g_fade_step,
+                (unsigned long)g_fade_scale
+            );
+
+
+            printf(
+                "FADE bridge  : T:%lu DONE:%lu\n",
+                (unsigned long)g_fade_bridge_ticks,
+                (unsigned long)g_fade_bridge_completions
+            );
+
+
+            printf(
+                "STR OBS      : B:%08lX F:%u\n",
+                (unsigned long)g_str_intro_last_base,
+                (unsigned)g_str_intro_last_done
+            );
+
+
+            printf(
+                "GAME LOG[%lu]: %.46s\n",
+                (unsigned long)g_game_log_count,
+                g_game_log[0]
+                    ? g_game_log
+                    : "-"
+            );
+
+
             /*
              * Reset des compteurs de mesure de rendu sans
              * consommer une ligne supplémentaire à l'écran.
@@ -1751,6 +2893,26 @@ int main(void)
         old_pad =
             pad;
 
+
+        /*
+         * GP0 émis pendant cette frame 3DS.
+         */
+        {
+            uint64_t gp0_now =
+                fm_gpu_gp0_count();
+
+
+            gp0_last_frame =
+                gp0_now
+                -
+                gp0_prev_frame;
+
+
+            gp0_prev_frame =
+                gp0_now;
+        }
+
+
         ++frame;
 
 
@@ -1760,6 +2922,21 @@ int main(void)
         if (memory_status == 0)
         {
             fm_memory_vblank_tick();
+        }
+
+
+        /*
+         * Observer l'état réel du jeu.
+         *
+         * On ne force plus la fin STR ici : la capture précédente
+         * a montré que DAT_8009C818 vaut encore zéro, donc le boot
+         * n'a même pas atteint l'initialisation du lecteur vidéo.
+         */
+        if (memory_status == 0)
+        {
+            fm_service_fade_bridge();
+
+            fm_update_game_state_debug();
         }
 
 

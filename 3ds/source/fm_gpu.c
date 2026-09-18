@@ -41,6 +41,25 @@ static unsigned g_cmd_need = 0;
 
 static uint64_t g_gp0_count = 0;
 
+/*
+ * Paquets GP0 terminés.
+ *
+ * g_gp0_count compte les mots; ces compteurs permettent de savoir
+ * si le flux est composé de vraies primitives, de copies d'image
+ * ou seulement de commandes d'environnement.
+ */
+static uint64_t g_packet_total = 0;
+static uint64_t g_packet_nop = 0;
+static uint64_t g_packet_fill = 0;
+static uint64_t g_packet_draw = 0;
+static uint64_t g_packet_copy = 0;
+static uint64_t g_packet_upload = 0;
+static uint64_t g_packet_readback = 0;
+static uint64_t g_packet_env = 0;
+static uint64_t g_packet_other = 0;
+
+static uint64_t g_upload_data_words = 0;
+
 static int g_has_frame = 0;
 
 
@@ -615,6 +634,69 @@ static void execute_command(void)
         )
         &
         0xFFu;
+
+
+    /*
+     * --------------------------------------------------------
+     * Diagnostic packet classification
+     * --------------------------------------------------------
+     */
+
+    ++g_packet_total;
+
+
+    if (
+        opcode == 0x00u
+        ||
+        opcode == 0x01u
+    )
+    {
+        ++g_packet_nop;
+    }
+    else if (opcode == 0x02u)
+    {
+        ++g_packet_fill;
+    }
+    else if (
+        opcode >= 0x20u
+        &&
+        opcode <= 0x7Fu
+    )
+    {
+        ++g_packet_draw;
+    }
+    else if (
+        opcode >= 0x80u
+        &&
+        opcode <= 0x9Fu
+    )
+    {
+        ++g_packet_copy;
+    }
+    else if (
+        opcode >= 0xA0u
+        &&
+        opcode <= 0xBFu
+    )
+    {
+        ++g_packet_upload;
+    }
+    else if (
+        opcode >= 0xC0u
+        &&
+        opcode <= 0xDFu
+    )
+    {
+        ++g_packet_readback;
+    }
+    else if (opcode >= 0xE0u)
+    {
+        ++g_packet_env;
+    }
+    else
+    {
+        ++g_packet_other;
+    }
 
 
     /*
@@ -1879,6 +1961,37 @@ void fm_gpu_init(
         0;
 
 
+    g_packet_total =
+        0;
+
+    g_packet_nop =
+        0;
+
+    g_packet_fill =
+        0;
+
+    g_packet_draw =
+        0;
+
+    g_packet_copy =
+        0;
+
+    g_packet_upload =
+        0;
+
+    g_packet_readback =
+        0;
+
+    g_packet_env =
+        0;
+
+    g_packet_other =
+        0;
+
+    g_upload_data_words =
+        0;
+
+
     g_has_frame =
         0;
 
@@ -1978,6 +2091,9 @@ void fm_gpu_gp0_write(
 
     if (g_state == FM_GPU_VRAM_WRITE)
     {
+        ++g_upload_data_words;
+
+
         for (
             unsigned half = 0;
             half < 2;
@@ -2601,6 +2717,213 @@ static void bios_return(
 
     cpu->gpr[0] =
         0;
+}
+
+
+
+/*
+ * ============================================================
+ * Diagnostic VRAM
+ * ============================================================
+ */
+
+static uint32_t fm_gpu_count_nonzero_rect(
+    unsigned start_x,
+    unsigned start_y,
+    unsigned width,
+    unsigned height
+)
+{
+    if (!g_vram)
+    {
+        return 0;
+    }
+
+
+    uint32_t count =
+        0;
+
+
+    for (
+        unsigned y = 0;
+        y < height;
+        ++y
+    )
+    {
+        unsigned sy =
+            (
+                start_y
+                +
+                y
+            )
+            &
+            511u;
+
+
+        for (
+            unsigned x = 0;
+            x < width;
+            ++x
+        )
+        {
+            unsigned sx =
+                (
+                    start_x
+                    +
+                    x
+                )
+                &
+                1023u;
+
+
+            uint16_t pixel =
+                g_vram[
+                    sy * 1024u
+                    +
+                    sx
+                ];
+
+
+            /*
+             * Bit15 = mask bit.
+             * On ne le compte pas comme couleur visible.
+             */
+            if (
+                pixel
+                &
+                0x7FFFu
+            )
+            {
+                ++count;
+            }
+        }
+    }
+
+
+    return count;
+}
+
+
+void fm_gpu_debug_stats(
+    FMGpuDebugStats *out
+)
+{
+    if (!out)
+    {
+        return;
+    }
+
+
+    memset(
+        out,
+        0,
+        sizeof(*out)
+    );
+
+
+    out->gp0_words =
+        g_gp0_count;
+
+
+    out->packets_total =
+        g_packet_total;
+
+    out->packets_nop =
+        g_packet_nop;
+
+    out->packets_fill =
+        g_packet_fill;
+
+    out->packets_draw =
+        g_packet_draw;
+
+    out->packets_copy =
+        g_packet_copy;
+
+    out->packets_upload =
+        g_packet_upload;
+
+    out->packets_readback =
+        g_packet_readback;
+
+    out->packets_env =
+        g_packet_env;
+
+    out->packets_other =
+        g_packet_other;
+
+    out->upload_data_words =
+        g_upload_data_words;
+
+
+    out->draw_x1 =
+        g_draw_x1;
+
+    out->draw_y1 =
+        g_draw_y1;
+
+    out->draw_x2 =
+        g_draw_x2;
+
+    out->draw_y2 =
+        g_draw_y2;
+
+
+    out->offset_x =
+        g_offset_x;
+
+    out->offset_y =
+        g_offset_y;
+
+
+    out->display_x =
+        g_display_x;
+
+    out->display_y =
+        g_display_y;
+
+    out->display_disabled =
+        g_display_disabled;
+
+
+    /*
+     * Les trois fenêtres qui nous intéressent pour Forbidden
+     * Memories. Le jeu double-bufferise notamment x=0 / x=320.
+     */
+    out->nonzero_page0 =
+        fm_gpu_count_nonzero_rect(
+            0,
+            0,
+            320,
+            256
+        );
+
+
+    out->nonzero_page320 =
+        fm_gpu_count_nonzero_rect(
+            320,
+            0,
+            320,
+            256
+        );
+
+
+    out->nonzero_display =
+        fm_gpu_count_nonzero_rect(
+            g_display_x,
+            g_display_y,
+            320,
+            256
+        );
+
+
+    out->nonzero_vram =
+        fm_gpu_count_nonzero_rect(
+            0,
+            0,
+            1024,
+            512
+        );
 }
 
 

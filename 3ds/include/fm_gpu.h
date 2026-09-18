@@ -4,7 +4,6 @@
 
 #include "cpu_state.h"
 
-
 /*
  * Initialise le bridge GPU PS1 -> software renderer.
  *
@@ -13,7 +12,6 @@
 void fm_gpu_init(
     uint16_t *vram
 );
-
 
 /*
  * Port GP0 :
@@ -24,7 +22,6 @@ void fm_gpu_gp0_write(
     uint32_t value
 );
 
-
 /*
  * Port GP1 :
  *
@@ -34,18 +31,17 @@ void fm_gpu_gp1_write(
     uint32_t value
 );
 
-
 /*
  * GPUSTAT.
  */
 uint32_t fm_gpu_status(void);
 
-
 /*
  * Nombre total de mots GP0 reçus.
+ *
+ * C'est un compteur cumulatif depuis fm_gpu_init().
  */
 uint64_t fm_gpu_gp0_count(void);
-
 
 /*
  * Au moins une primitive / image a réellement
@@ -53,12 +49,75 @@ uint64_t fm_gpu_gp0_count(void);
  */
 int fm_gpu_has_frame(void);
 
-
 /*
  * Position de début du framebuffer PS1 actuellement affiché.
  */
 unsigned fm_gpu_display_x(void);
 unsigned fm_gpu_display_y(void);
+
+
+/*
+ * ============================================================
+ * Diagnostic GPU bring-up
+ * ============================================================
+ *
+ * Les compteurs packets_* comptent les paquets GP0 terminés,
+ * pas les mots GP0.
+ *
+ * nonzero_* compte les pixels RGB555 non noirs dans une fenêtre
+ * 320x256 :
+ *
+ *  page0   : x=0
+ *  page320 : x=320
+ *  display : à partir de GP1(05h) display start
+ *
+ * Le bit masque RGB555 n'est pas considéré comme une couleur.
+ */
+typedef struct FMGpuDebugStats
+{
+    uint64_t gp0_words;
+
+    uint64_t packets_total;
+    uint64_t packets_nop;
+    uint64_t packets_fill;
+    uint64_t packets_draw;
+    uint64_t packets_copy;
+    uint64_t packets_upload;
+    uint64_t packets_readback;
+    uint64_t packets_env;
+    uint64_t packets_other;
+
+    uint64_t upload_data_words;
+
+    uint32_t nonzero_page0;
+    uint32_t nonzero_page320;
+    uint32_t nonzero_display;
+    uint32_t nonzero_vram;
+
+    int draw_x1;
+    int draw_y1;
+    int draw_x2;
+    int draw_y2;
+
+    int offset_x;
+    int offset_y;
+
+    unsigned display_x;
+    unsigned display_y;
+
+    int display_disabled;
+} FMGpuDebugStats;
+
+
+/*
+ * Remplit un snapshot de diagnostic.
+ *
+ * Cette fonction parcourt la VRAM : l'appeler uniquement pour
+ * l'écran de debug, pas à chaque primitive.
+ */
+void fm_gpu_debug_stats(
+    FMGpuDebugStats *out
+);
 
 
 /*
