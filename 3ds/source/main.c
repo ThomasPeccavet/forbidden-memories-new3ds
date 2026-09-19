@@ -307,6 +307,352 @@ static uint32_t g_b32_last_bytes = 0;
 static uint32_t g_b32_last_remaining = 0;
 static uint32_t g_b32_last_rc = 0;
 
+/*
+ * B56 - vrai curseur de flux CD.
+ *
+ * B55 a revele 0x11111111 partout dans la zone overlay.
+ * Le pont B32 relisait req+0x24 a CHAQUE CdlDataReady, alors que
+ * sur une vraie PS1 le lecteur CD avance automatiquement d'un secteur
+ * pendant CdlReadN. Le curseur hardware emule est g_cd_lba.
+ */
+static uint32_t g_b56_stream_reads = 0u;
+static uint32_t g_b56_stream_first_lba = 0u;
+static uint32_t g_b56_stream_last_lba = 0u;
+
+
+/*
+ * ============================================================
+ * B57 - curseur par requete LibCD
+ * ============================================================
+ *
+ * B56 a prouve que l'avance sectorielle etait indispensable, mais
+ * g_cd_lba n'etait pas encore initialise au LBA logique de la
+ * requete : le stream est parti de 0.
+ *
+ * FUN_8001385C place le LBA de depart dans req+0x24. Ce champ reste
+ * fixe pendant la requete, tandis que le lecteur CD physique avance.
+ *
+ * On maintient donc un curseur host par requete :
+ *   premier secteur = req+0x24
+ *   suivants        = +1, +2, ...
+ *
+ * Le curseur est reinitialise si :
+ *   - le pointeur de requete change ;
+ *   - le LBA de base change ;
+ *   - remaining remonte (nouvelle requete sur la meme structure).
+ */
+static uint32_t g_b57_req = 0u;
+static uint32_t g_b57_base_lba = 0u;
+static uint32_t g_b57_next_lba = 0u;
+static uint32_t g_b57_last_remaining = 0u;
+static uint32_t g_b57_resets = 0u;
+static uint32_t g_b57_read_index = 0u;
+
+
+/*
+ * ============================================================
+ * B59 - pont BIOS PAL pour l'overlay charge a 801680F4
+ * ============================================================
+ *
+ * B57 a enfin charge le vrai ecran KONAMI.
+ * B58 montre ensuite une boucle dans l'overlay 801681xx.
+ *
+ * Les quatre premiers mots de l'overlay charges depuis le CD sont :
+ *
+ *   801680F4  3C03BFC8   lui   v1,0xBFC8
+ *   801680F8  9063FF52   lbu   v1,-0xAE(v1) -> 0xBFC7FF52
+ *   801680FC  24020045   addiu v0,zero,0x45
+ *   80168100  1062001A   beq   v1,v0,8016816C
+ *
+ * Le code teste donc explicitement un octet du BIOS PS1 contre 0x45
+ * ('E', region Europe). Notre runtime 3DS n'a pas encore de ROM BIOS
+ * mappee : fm_memory_read_byte(0xBFC7FF52) renvoie 0.
+ *
+ * Pour valider ce verrou sans ajouter encore une ROM BIOS complete,
+ * on remplace UNIQUEMENT l'instruction LBU ci-dessus par :
+ *
+ *   addiu v1,zero,0x45
+ *
+ * La modification n'est appliquee que si les 4 mots correspondent
+ * exactement a la signature observee, donc aucun autre overlay n'est
+ * modifie par erreur.
+ */
+static uint32_t g_b59_pal_patch_count = 0u;
+static uint32_t g_b59_pal_patch_before = 0u;
+static uint32_t g_b59_pal_patch_after = 0u;
+
+
+/*
+ * ============================================================
+ * B60 - trace exacte de FUN_80168160
+ * ============================================================
+ *
+ * B59 a prouve que le vrai verrou est maintenant :
+ *
+ *   80043F44 -> 80168160()
+ *   80043F4C <- v0 != 0
+ *
+ * plusieurs milliers de fois.
+ *
+ * On capture les registres d'entree/sortie et le code machine
+ * reellement charge autour du hot path 801681DC/801681F4.
+ */
+static uint32_t g_b60_ent_a0 = 0u;
+static uint32_t g_b60_ent_a1 = 0u;
+static uint32_t g_b60_ent_a2 = 0u;
+static uint32_t g_b60_ent_a3 = 0u;
+static uint32_t g_b60_ent_s0 = 0u;
+static uint32_t g_b60_ent_s1 = 0u;
+static uint32_t g_b60_ent_s2 = 0u;
+static uint32_t g_b60_ent_s3 = 0u;
+static uint32_t g_b60_ent_sp = 0u;
+static uint32_t g_b60_ent_ra = 0u;
+
+static uint32_t g_b60_ret_v0 = 0u;
+static uint32_t g_b60_ret_s0 = 0u;
+static uint32_t g_b60_ret_s1 = 0u;
+static uint32_t g_b60_ret_s2 = 0u;
+static uint32_t g_b60_ret_s3 = 0u;
+
+
+/*
+ * ============================================================
+ * B61 - sortie controlee de l'attente 80168160
+ * ============================================================
+ *
+ * B60 a confirme que FUN_80168160(1) revient des milliers de fois
+ * avec v0 == 2, et que 80043E3C boucle tant que v0 != 0.
+ *
+ * Le code charge montre une table de statuts autour de 801681D0.
+ * Le statut 2 est donc un etat de travail/attente, pas un crash.
+ *
+ * Pendant le bring-up 3DS, START demande une seule fois au pont host
+ * de convertir ce retour 2 en 0 AU POINT DE RETOUR 80043F4C.
+ *
+ * Important :
+ *   - on ne saute pas la fonction ;
+ *   - elle s'execute normalement une derniere fois ;
+ *   - seul son statut de retour est transforme ;
+ *   - tout le cleanup original de 80043E3C apres la boucle s'execute.
+ *
+ * Ce pont n'est actif que pour le tout premier verrou de boot.
+ */
+static uint32_t g_b61_skip_request = 0u;
+static uint32_t g_b61_bridge_count = 0u;
+static uint32_t g_b61_old_v0 = 0u;
+static uint32_t g_b61_at_return = 0u;
+
+
+/*
+ * ============================================================
+ * B62 - HLE ciblé des wrappers libgte Psy-Q
+ * ============================================================
+ *
+ * B61 a franchi la boucle 80168160 puis s'est arrêté dans :
+ *
+ *   FUN_80087958 -> GTE RTPT
+ *
+ * L'analyse Psy-Q identifie cette fonction comme RotTransPers4.
+ * Le GTE générique n'est pas encore implémenté dans fm_interp /
+ * fm_runtime_shim, donc on HLE seulement les wrappers libgte les
+ * plus immédiats en conservant leur interface exacte.
+ *
+ * Pris en charge ici :
+ *   80087928  NormalClip
+ *   80087958  RotTransPers4
+ *   800879D8  RotAverage3
+ *   80087A38  RotAverage4
+ */
+static uint32_t g_b62_hle_nclip = 0u;
+static uint32_t g_b62_hle_rtp4 = 0u;
+static uint32_t g_b62_hle_ra3 = 0u;
+static uint32_t g_b62_hle_ra4 = 0u;
+static uint32_t g_b62_last_helper = 0u;
+static uint32_t g_b62_last_otz = 0u;
+
+
+/*
+ * ============================================================
+ * B65 - latch de la vraie cause d'arret
+ * ============================================================
+ *
+ * La capture B64 finale est revenue a :
+ *   RUN:N / CPU:800128CC / RA:0
+ * avec tous les compteurs remis a zero.
+ *
+ * Ce motif correspond a un RESET debug, pas a la fin normale du
+ * chargement. On protege donc le reset par une combinaison beaucoup
+ * plus stricte et on memorise toute vraie cause d'arret runtime.
+ *
+ * stop_code :
+ *   0 = aucune
+ *   1 = saut bas inattendu
+ *   2 = BIOS/HLE non gere
+ *   3 = retour statique avec PC=0
+ *   4 = instruction R3000A non supportee
+ *   5 = autre arret runtime natif
+ *   9 = reset debug explicite
+ */
+static uint32_t g_b65_stop_code = 0u;
+static uint32_t g_b65_stop_pc = 0u;
+static uint32_t g_b65_stop_detail = 0u;
+static uint32_t g_b65_stop_ra = 0u;
+static uint32_t g_b65_reset_count = 0u;
+
+
+/*
+ * ============================================================
+ * B66 - publication de CdlComplete dans l'etat LibCD
+ * ============================================================
+ *
+ * B65 a prouve :
+ *   - le dernier chargement est termine ;
+ *   - 406C == 1 : FUN_80043E3C est sortie ;
+ *   - le runtime reste vivant ;
+ *   - le PC boucle dans FUN_80079C8C (CdSync), via VSync
+ *     avec RA = 80079D14.
+ *
+ * Le pont B33 appelait directement le callback utilisateur avec
+ * l'evenement 2 (CdlComplete), mais sautait l'etape interne LibCD
+ * qui met normalement DAT_80094BEC a 2 et copie le resultat dans
+ * DAT_800F7130. CdSync attend donc un evenement qui a deja eu lieu.
+ *
+ * B66 publie cet etat AVANT d'appeler le vrai callback guest.
+ */
+static uint32_t g_b66_complete_publish = 0u;
+static uint32_t g_b66_last_cmd = 0u;
+static uint32_t g_b66_last_sync_before = 0u;
+static uint32_t g_b66_last_sync_after = 0u;
+
+
+/*
+ * ============================================================
+ * B67 - completion de la file async haut niveau
+ * ============================================================
+ *
+ * B66 a libere CdSync, puis le jeu s'est mis a tourner autour de :
+ *
+ *   8007ED88
+ *      -> 8007B78C(...)   // enqueue async, retourne un request id
+ *      -> 8007BDD4(id, out)
+ *           -> 8007E888(0)
+ *                -> CdSync
+ *
+ * Notre HLE de 8007B78C court-circuite la vraie file du jeu :
+ * la commande hardware se termine bien, MAIS aucun element n'est
+ * inscrit dans l'historique 800F7278 consulte par 8007BDD4.
+ *
+ * Resultat : 8007BDD4 ne voit jamais le statut CdlComplete (2).
+ *
+ * B67 conserve notre HLE hardware, mais recrée l'API observable :
+ *   - genere un request id non nul ;
+ *   - le rend "ready" apres retour du vrai callback guest ;
+ *   - 8007BDD4 renvoie 2 et recopie les 8 octets de resultat.
+ */
+static uint32_t g_b67_req_seq = 0u;
+static uint32_t g_b67_req_id = 0u;
+static uint32_t g_b67_req_pending = 0u;
+static uint32_t g_b67_req_ready = 0u;
+static uint32_t g_b67_req_status = 0u;
+
+static uint32_t g_b67_poll_calls = 0u;
+static uint32_t g_b67_poll_complete = 0u;
+static uint32_t g_b67_poll_miss = 0u;
+static uint32_t g_b67_last_poll_id = 0u;
+static uint32_t g_b67_last_out = 0u;
+
+
+/*
+ * ============================================================
+ * B68 - historique des requetes async
+ * ============================================================
+ *
+ * B67 ne conservait qu'UNE requete :
+ *   Q id:6 ...
+ * alors que 8007BDD4 continuait a sonder l'id 1.
+ *
+ * Le vrai LibCD garde un historique circulaire (le code guest
+ * parcourt jusqu'a 8 entrees). On conserve donc plusieurs IDs,
+ * leur statut et leurs 8 octets de resultat.
+ */
+#define B68_REQ_SLOTS 16u
+
+static uint32_t g_b68_ids[B68_REQ_SLOTS];
+static uint8_t  g_b68_status[B68_REQ_SLOTS];
+static uint8_t  g_b68_result[B68_REQ_SLOTS][8];
+
+static uint32_t g_b68_return_req_id = 0u;
+static uint32_t g_b68_alloc_count = 0u;
+static uint32_t g_b68_poll_wait = 0u;
+static uint32_t g_b68_last_poll_status = 0u;
+static uint32_t g_b68_last_slot = 0u;
+
+
+/*
+ * ============================================================
+ * B69 - trace du verrou graphique post-async
+ * ============================================================
+ *
+ * B68 a repare la file async :
+ *   POLL all/ok/wait/miss = 3/3/0/0
+ *
+ * Le CPU est maintenant observe dans FUN_80046750 avec
+ * RA=80049600, donc appelee depuis FUN_800495C8.
+ *
+ * On determine si 80046750 est reellement bloquee dans sa liste
+ * de commandes ou si elle revient normalement et est rappelee.
+ */
+static uint32_t g_b69_495c8_enter = 0u;
+static uint32_t g_b69_495c8_ra = 0u;
+static uint32_t g_b69_46750_enter = 0u;
+static uint32_t g_b69_46750_ra = 0u;
+static uint32_t g_b69_after_46750 = 0u;
+static uint32_t g_b69_after_494a0 = 0u;
+static uint32_t g_b69_after_78588 = 0u;
+static uint32_t g_b69_after_47660 = 0u;
+
+
+/*
+ * ============================================================
+ * B70 - completion host de la commande graphique type 0x20
+ * ============================================================
+ *
+ * B69 prouve que FUN_80046750 est REELLEMENT bloquee :
+ *
+ *   46750 ent/ret = 1/0
+ *   queue count   = 2
+ *   head type     = 0x20
+ *
+ * Le pseudo-C de FUN_80046750 est sans ambiguite :
+ *
+ *   case 0x20:
+ *       if (*(ctx + entry + 0x90) == 0x20) {
+ *           retire l'entree;
+ *       }
+ *       // sinon la boucle recommence sur LA MEME entree
+ *
+ * Sur PS1, ce champ est termine de facon asynchrone par le pipeline
+ * GPU/DMA. Notre runtime rend bien la VRAM, mais ne publie pas encore
+ * cette completion dans la file haut niveau du jeu.
+ *
+ * Le bridge ne touche QUE :
+ *   - FUN_80046750 active;
+ *   - tete de file type 0x20;
+ *   - marqueur +0x10 de l'entree different de 0x20.
+ *
+ * Il transforme alors ce marqueur en 0x20, equivalent au signal de
+ * completion attendu par le code original. FUN_80046750 retire elle-
+ * meme l'entree et poursuit son cleanup normal.
+ */
+static uint32_t g_b70_ready_bridge = 0u;
+static uint32_t g_b70_last_ctx = 0u;
+static uint32_t g_b70_last_count = 0u;
+static uint32_t g_b70_last_type = 0u;
+static uint32_t g_b70_last_marker_before = 0u;
+static uint32_t g_b70_last_marker_after = 0u;
+static uint32_t g_b70_entry1_type = 0u;
+static uint32_t g_b70_entry1_marker = 0u;
+
 static uint32_t g_b32_43e_returned = 0;
 static uint32_t g_b32_43e_return_frame = 0;
 
@@ -420,6 +766,154 @@ static uint32_t g_b37_last_chcr_after = 0;
 static uint32_t g_b37_last_gpustat = 0;
 static uint32_t g_b37_ring_write = 0;
 static uint32_t g_b37_ring_read = 0;
+
+/*
+ * B71 - sortie robuste de la boucle DMA2 observee apres START
+ * sur l'ecran titre.
+ *
+ * B37 savait deja relacher CHCR.START/BUSY. Mais lorsque le CPU
+ * revient comme bloc interprete directement sur 80081A90, il peut
+ * rester sur le basic-block de polling sans repasser par le chemin
+ * normal assez vite. Une fois CHCR effectivement relache, B71 place
+ * le PC au debut du polling GPUSTAT suivant (80081AC0), ce qui est
+ * exactement le chemin "DMA termine" de FUN_800819E0.
+ */
+static uint32_t g_b71_dma_loop_escape = 0u;
+static uint32_t g_b71_last_escape_from = 0u;
+static uint32_t g_b71_last_escape_to = 0u;
+
+
+/*
+ * ============================================================
+ * B72 - START titre : impulsion 10 frames + traces latchees
+ * ============================================================
+ *
+ * Le probe PC valide envoie START actif-bas 0xFFF7 pendant
+ * exactement 10 frames. Sur 3DS un appui bref peut ne durer qu'une
+ * frame hote et etre manque par la chaine input/VBlank guest.
+ *
+ * Une fois le titre reel atteint (bridge G20 + retour 46750 + STR
+ * termine), tout front physique START est donc etire a 10 frames
+ * PS1 : psx_pressed bit 3 == 0x0008.
+ *
+ * Les valeurs sont aussi latchees pour rester visibles APRES que
+ * l'utilisateur a relache START.
+ */
+static uint32_t g_b72_start_down_count = 0u;
+static uint32_t g_b72_start_hold_frames = 0u;
+static uint32_t g_b72_start_last_frame = 0u;
+static uint32_t g_b72_start_last_host_held = 0u;
+static uint32_t g_b72_start_last_host_down = 0u;
+static uint32_t g_b72_start_last_psx = 0u;
+
+static uint32_t g_b72_guest_raw_latched = 0u;
+static uint32_t g_b72_guest_held_latched = 0u;
+static uint32_t g_b72_guest_edge_latched = 0u;
+static uint32_t g_b72_guest_rep_latched = 0u;
+static uint32_t g_b72_guest_nonzero_frame = 0u;
+static uint32_t g_b72_edge8_hits = 0u;
+static uint32_t g_b72_edge8_last_frame = 0u;
+
+/*
+ * Reference du runtime PC quand le menu FR est visible :
+ *   PC ~= 80041C88
+ *   RA ~= 80040BE0
+ *
+ * 80040B48 est la routine de rendu qui conduit a ce chemin.
+ */
+static uint32_t g_b72_hit_40b48 = 0u;
+static uint32_t g_b72_hit_41c88 = 0u;
+static uint32_t g_b72_last_40b48_ra = 0u;
+
+
+/*
+ * ============================================================
+ * B73 - pont de transition titre -> etat 8 (menu SU)
+ * ============================================================
+ *
+ * B72 prouve que START arrive bien jusqu'au guest :
+ *   8009C710 contient 0x0008
+ *   et l'edge START est observe.
+ *
+ * La reference PC/Ghidra montre ensuite que l'etat resident 8
+ * (FUN_8002D75C) charge M:\mrg\SU\SU.mrg puis appelle l'overlay
+ * de menu a 0x8018001C / 0x80180390.
+ *
+ * B73 ne remplace pas ce code : il force uniquement la selection
+ * de l'etat 8 apres l'impulsion START, afin que le vrai chargeur
+ * CD et le vrai overlay prennent ensuite la main.
+ */
+static uint32_t g_b73_menu_force_request = 0u;
+static uint32_t g_b73_menu_force_count = 0u;
+static uint32_t g_b73_menu_force_frame = 0u;
+
+static uint32_t g_b73_state60a_before = 0u;
+static uint32_t g_b73_state60a_after = 0u;
+static uint32_t g_b73_state60d_before = 0u;
+static uint32_t g_b73_state60d_after = 0u;
+
+static uint32_t g_b73_hit_state8 = 0u;
+static uint32_t g_b73_hit_load_su = 0u;
+static uint32_t g_b73_hit_menu_init = 0u;
+static uint32_t g_b73_hit_menu_update = 0u;
+static uint32_t g_b73_hit_menu_destroy = 0u;
+
+
+/*
+ * ============================================================
+ * B74 - trace du rendu reel du menu SU
+ * ============================================================
+ *
+ * B73 prouve que :
+ *   - SU.mrg est charge ;
+ *   - 8018001C (init) est execute ;
+ *   - 80180390 (update) tourne en continu.
+ *
+ * Pourtant l'ecran affiche encore le titre.
+ *
+ * Le menu installe DAT_8009C898 = 0x80180B4C. Cette fonction
+ * doit etre appelee par FUN_80012F70 a chaque tick de service.
+ * B74 verifie donc ce chemin et expose aussi l'etat des objets
+ * UI crees par 8018001C.
+ */
+static uint32_t g_b74_hit_12f70 = 0u;
+static uint32_t g_b74_hit_menu_draw_cb = 0u;
+static uint32_t g_b74_last_menu_draw_ra = 0u;
+static uint32_t g_b74_last_12f70_ra = 0u;
+
+
+/*
+ * ============================================================
+ * B75 - completion de l'animation d'entree du menu SU
+ * ============================================================
+ *
+ * B74 prouve que le menu est reellement charge ET dessine :
+ *
+ *   C898 = 80180B4C
+ *   callback draw appele des centaines de fois
+ *   objets menu valides en RAM
+ *
+ * Mais les objets restent figes dans l'etat initial :
+ *
+ *   OBJ0 x=-160  from=-160  to=160  timer=16  flags=0x0088
+ *   OBJ5 x= 480  from= 480  to=160  timer=16
+ *
+ * Le pseudo-C de 80180390 montre que l'animation normale doit :
+ *   - decrementer +0x60 de 16 vers 0 ;
+ *   - amener +0x30 vers +0x38 ;
+ *   - poser le bit 0x40 sur le groupe visible ;
+ *   - remettre DAT_801847C5 a 0 a la fin.
+ *
+ * Cette branche ne progresse pas dans notre runtime actuel.
+ * B75 ne dessine rien artificiellement : il finalise uniquement
+ * l'animation d'entree, puis rend la main au VRAI callback menu.
+ */
+static uint32_t g_b75_menu_entrance_bridge = 0u;
+static uint32_t g_b75_menu_entrance_frame = 0u;
+static uint32_t g_b75_last_c0 = 0u;
+static uint32_t g_b75_last_c5_before = 0u;
+static uint32_t g_b75_last_c5_after = 0u;
+static uint32_t g_b75_objects_settled = 0u;
 static uint32_t g_hit_delay_wait = 0;
 static uint32_t g_hit_intro_init = 0;
 static uint32_t g_hit_boot_loop = 0;
@@ -428,6 +922,213 @@ static uint32_t g_hit_main_loop = 0;
 static uint32_t g_hit_str = 0;
 static uint32_t g_hit_ov16 = 0;
 static uint32_t g_hit_ov18 = 0;
+
+
+/*
+ * ============================================================
+ * B47 - progression exacte de FUN_80043E3C / overlay 80168xxx
+ * ============================================================
+ *
+ * Le sprite marron est maintenant explique : le jeu selectionne bien
+ * E1=0x204 juste avant. On arrete donc de le traiter comme verrou.
+ *
+ * Cette trace cherche le vrai point ou le boot reste dans 43E3C.
+ * 43E3C appelle:
+ *   80013700
+ *   ...
+ *   801680F4
+ *   puis boucle sur 80168160 tant que v0 != 0
+ *   ...
+ *   jusqu'au second 80013700 et au retour.
+ */
+static uint32_t g_b47_m_43eb8 = 0u;
+static uint32_t g_b47_m_43f3c = 0u;
+static uint32_t g_b47_m_43f44 = 0u;
+static uint32_t g_b47_m_43f4c = 0u;
+static uint32_t g_b47_m_43f54 = 0u;
+static uint32_t g_b47_m_43ff8 = 0u;
+static uint32_t g_b47_m_44054 = 0u;
+static uint32_t g_b47_m_44064 = 0u;
+static uint32_t g_b47_m_4406c = 0u;
+
+static uint32_t g_b47_680f4_enter = 0u;
+static uint32_t g_b47_68160_enter = 0u;
+static uint32_t g_b47_68160_return = 0u;
+static uint32_t g_b47_68160_v0_zero = 0u;
+static uint32_t g_b47_68160_v0_nonzero = 0u;
+static uint32_t g_b47_68160_last_v0 = 0u;
+static uint32_t g_b47_68160_last_ra = 0u;
+
+static uint32_t g_b47_last_milestone = 0u;
+static uint32_t g_b47_last_milestone_frame = 0u;
+
+
+/*
+ * ============================================================
+ * B49 - chemin exact entre 43EB8 et 43F3C
+ * ============================================================
+ *
+ * B48 a prouve :
+ *   - 43EB8 est atteint une fois ;
+ *   - 43F3C n'est jamais atteint ;
+ *   - le runtime ne s'arrete PAS sur le GTE (PROBE=RETURN).
+ *
+ * On trace donc chaque appel intermediaire de FUN_80043E3C :
+ *
+ *   43EB8 -> 8001569C
+ *   43EC0 -> 80040350
+ *   43ECC -> 800403D0
+ *   43F08 -> 80042BD8
+ *   43F20 -> 80043A78
+ *   43F2C -> 80043CD4
+ *   43F34 -> 8007E8E8
+ *   43F3C -> 801680F4
+ *
+ * Les compteurs "fn" confirment aussi l'entree effective dans les
+ * fonctions ciblees. Aucun comportement du jeu n'est modifie.
+ */
+static uint32_t g_b49_m_43ec0 = 0u;
+static uint32_t g_b49_m_43ecc = 0u;
+static uint32_t g_b49_m_43f08 = 0u;
+static uint32_t g_b49_m_43f20 = 0u;
+static uint32_t g_b49_m_43f2c = 0u;
+static uint32_t g_b49_m_43f34 = 0u;
+
+static uint32_t g_b49_fn_1569c = 0u;
+static uint32_t g_b49_fn_40350 = 0u;
+static uint32_t g_b49_fn_403d0 = 0u;
+static uint32_t g_b49_fn_42bd8 = 0u;
+static uint32_t g_b49_fn_43a78 = 0u;
+static uint32_t g_b49_fn_7e8e8 = 0u;
+
+static uint32_t g_b49_ra_1569c = 0u;
+static uint32_t g_b49_ra_40350 = 0u;
+static uint32_t g_b49_ra_403d0 = 0u;
+static uint32_t g_b49_ra_42bd8 = 0u;
+static uint32_t g_b49_ra_43a78 = 0u;
+static uint32_t g_b49_ra_7e8e8 = 0u;
+
+
+/*
+ * ============================================================
+ * B50 - cleanup CD manquant avant FUN_80043CD4
+ * ============================================================
+ *
+ * B49 a isole le verrou :
+ *   43A78 est atteint
+ *   43CD4 est atteint
+ *   7E8E8 n'est jamais atteint
+ *
+ * FUN_80043CD4 boucle jusqu'a ce que :
+ *   (C460 & 0x02000030) == 0
+ *   et C484 == 0
+ *
+ * La capture B49 montre C460=01C00054, donc bit 0x10 encore actif
+ * alors que le dernier secteur est deja consomme (remaining == 0).
+ *
+ * Au premier passage dans 43CD4 avec une requete CD terminee, on
+ * appelle le VRAI cleanup guest FUN_800143D4 en pseudo-interruption,
+ * avec sauvegarde/restauration complete du contexte comme B35/B36.
+ */
+static uint32_t g_b50_cleanup_triggered = 0u;
+static uint32_t g_b50_cleanup_done = 0u;
+static uint32_t g_b50_cleanup_active = 0u;
+static uint32_t g_b50_c460_before = 0u;
+static uint32_t g_b50_c460_after = 0u;
+static uint32_t g_b50_c484_before = 0u;
+static uint32_t g_b50_c484_after = 0u;
+static uint32_t g_b50_remaining = 0u;
+
+
+/*
+ * ============================================================
+ * B51 - relance du dernier CdlDataReady partiel
+ * ============================================================
+ *
+ * B50 confirme que FUN_80043CD4 est le verrou, mais le cleanup
+ * n'a pas ete declenche. Le moteur CD est arrive a une queue de
+ * requete inferieure a un secteur. Sur PS1, le controleur continue
+ * a livrer CdlDataReady jusqu'au dernier fragment.
+ *
+ * Si notre pseudo-IRQ a perdu cette derniere livraison, on ne
+ * touche PAS a la RAM de la requete : on rearme simplement le
+ * callback CdlDataReady deja implemente en B34.
+ */
+static uint32_t g_b51_rearm_count = 0u;
+static uint32_t g_b51_last_rem = 0u;
+static uint32_t g_b51_last_type = 0u;
+static uint32_t g_b51_last_c460 = 0u;
+static uint32_t g_b51_last_c484 = 0u;
+
+
+/*
+ * ============================================================
+ * B52 - trace du renderer FUN_800418C0
+ * ============================================================
+ *
+ * B51 montre que le CD est maintenant propre :
+ *   C460 = 0
+ *   C484 = 0
+ *   finalizer 3/3
+ *
+ * mais FUN_80043CD4 ne revient toujours pas vers 8007E8E8.
+ * Le PC echantillonne se trouve dans FUN_800418C0 (80041Dxx),
+ * appelee depuis le service frame 80012C50.
+ *
+ * On verifie si ce renderer :
+ *   - est entre une seule fois ou se repete ;
+ *   - revient bien vers 80040BE0 ;
+ *   - parcourt un nombre coherent d'elements ;
+ *   - tourne en boucle dans 41BB4/41D38/41F64/41F74.
+ */
+static uint32_t g_b52_418c0_hits = 0u;
+static uint32_t g_b52_418c0_returns = 0u;
+static uint32_t g_b52_41bb4_hits = 0u;
+static uint32_t g_b52_41d38_hits = 0u;
+static uint32_t g_b52_41f64_hits = 0u;
+static uint32_t g_b52_41f74_hits = 0u;
+
+static uint32_t g_b52_ra = 0u;
+static uint32_t g_b52_a0 = 0u;
+static uint32_t g_b52_a1 = 0u;
+static uint32_t g_b52_a2 = 0u;
+
+static uint32_t g_b52_data_ptr = 0u;
+static uint32_t g_b52_data_w0 = 0u;
+static uint32_t g_b52_data_w1 = 0u;
+static uint32_t g_b52_data_w2 = 0u;
+static uint32_t g_b52_obj_flags = 0u;
+static uint32_t g_b52_item_count = 0u;
+static uint32_t g_b52_obj_type = 0u;
+
+static uint32_t g_b52_cd4_a0 = 0u;
+static uint32_t g_b52_last_hot_pc = 0u;
+
+
+/*
+ * ============================================================
+ * B53 - raccourci fidele de FUN_80043CD4
+ * ============================================================
+ *
+ * B52 montre exactement 181 entrees renderer pour a0=0xB4.
+ * C'est coherent avec le delai volontaire de 180 iterations de
+ * FUN_80043CD4. Ce delai ralentit fortement le bring-up sur 3DS,
+ * car chaque FUN_80012C50 est time-slicee sur plusieurs frames host.
+ *
+ * On raccourcit UNIQUEMENT le compteur minimal 0xB4 -> 2.
+ * La condition de sortie CD de la vraie fonction reste intacte :
+ * si C460/C484 sont encore busy, 43CD4 continuera quand meme a
+ * boucler jusqu'a ce que le vrai code PS1 les libere.
+ *
+ * Donc :
+ *   - aucun flag CD n'est forge ;
+ *   - aucun retour de fonction n'est force ;
+ *   - le vrai 80012C50 tourne encore ;
+ *   - on supprime seulement ~178 iterations d'attente visuelle.
+ */
+static uint32_t g_b53_fast43cd4_hits = 0u;
+static uint32_t g_b53_fast43cd4_last_in = 0u;
+static uint32_t g_b53_fast43cd4_last_out = 0u;
 
 /*
  * Trace cible du petit cycle observe dans le dernier build :
@@ -567,18 +1268,6 @@ static uint32_t g_hle_85d98_dst_offset = 0;
 static uint32_t g_hle_85d98_dst_point = 0;
 static uint32_t g_hle_85d98_dst_tag = 0;
 static uint32_t g_hle_85d98_bad_desc = 0;
-static uint32_t g_hle_85d98_splice_ok = 0;
-static uint32_t g_hle_85d98_splice_fail = 0;
-static uint32_t g_hle_85d98_last_otz = 0;
-static uint32_t g_hle_85d98_last_nodes = 0;
-static uint32_t g_hle_85d98_last_tail = 0;
-static uint32_t g_hle_85d98_last_dst_entry = 0;
-static uint32_t g_hle_85d98_last_old_dst_link = 0;
-static uint32_t g_hle_85d98_last_src_head = 0;
-static uint32_t g_hle_85d98_last_tail_before = 0;
-static uint32_t g_hle_85d98_last_tail_after = 0;
-static uint32_t g_hle_85d98_last_dst_before = 0;
-static uint32_t g_hle_85d98_last_dst_after = 0;
 
 /*
  * ============================================================
@@ -958,6 +1647,85 @@ static void fm_trace_dispatch(
 
         case 0x00043CD4u:
             ++g_hit_delay_wait;
+            if (cpu)
+            {
+                g_b52_cd4_a0 = cpu->gpr[4];
+            }
+            break;
+
+        /*
+         * B52 - entree et jalons internes du renderer 800418C0.
+         */
+        case 0x000418C0u:
+            ++g_b52_418c0_hits;
+            if (cpu)
+            {
+                g_b52_ra = cpu->gpr[31];
+                g_b52_a0 = cpu->gpr[4];
+                g_b52_a1 = cpu->gpr[5];
+                g_b52_a2 = cpu->gpr[6];
+
+                if (
+                    g_b52_a0 >= 0x80000000u
+                    && g_b52_a0 < 0x80200000u
+                )
+                {
+                    g_b52_obj_flags =
+                        cpu->read_word(g_b52_a0 + 0x04u);
+
+                    g_b52_obj_type =
+                        cpu->read_byte(g_b52_a0 + 0x22u);
+
+                    g_b52_data_ptr =
+                        cpu->read_word(g_b52_a0 + 0x4Cu);
+
+                    if (
+                        g_b52_data_ptr >= 0x80000000u
+                        && g_b52_data_ptr < 0x80200000u
+                    )
+                    {
+                        g_b52_item_count =
+                            cpu->read_byte(g_b52_data_ptr);
+
+                        g_b52_data_w0 =
+                            cpu->read_word(g_b52_data_ptr + 0u);
+
+                        g_b52_data_w1 =
+                            cpu->read_word(g_b52_data_ptr + 4u);
+
+                        g_b52_data_w2 =
+                            cpu->read_word(g_b52_data_ptr + 8u);
+                    }
+                }
+            }
+            break;
+
+        /*
+         * 80040BE0 est l'instruction qui suit le JAL 800418C0
+         * dans FUN_80040B48 : elle compte donc les retours effectifs.
+         */
+        case 0x00040BE0u:
+            ++g_b52_418c0_returns;
+            break;
+
+        case 0x00041BB4u:
+            ++g_b52_41bb4_hits;
+            g_b52_last_hot_pc = 0x80041BB4u;
+            break;
+
+        case 0x00041D38u:
+            ++g_b52_41d38_hits;
+            g_b52_last_hot_pc = 0x80041D38u;
+            break;
+
+        case 0x00041F64u:
+            ++g_b52_41f64_hits;
+            g_b52_last_hot_pc = 0x80041F64u;
+            break;
+
+        case 0x00041F74u:
+            ++g_b52_41f74_hits;
+            g_b52_last_hot_pc = 0x80041F74u;
             break;
 
         case 0x00043E3Cu:
@@ -970,6 +1738,301 @@ static void fm_trace_dispatch(
                     g_sp_43e3c = cpu->gpr[29];
                 }
             }
+            break;
+
+        /*
+         * B49 - fonctions appelees avant l'overlay.
+         * On conserve RA pour connaitre le callsite exact observe.
+         */
+        case 0x0001569Cu:
+            ++g_b49_fn_1569c;
+            if (cpu) g_b49_ra_1569c = cpu->gpr[31];
+            break;
+
+        case 0x00040350u:
+            ++g_b49_fn_40350;
+            if (cpu) g_b49_ra_40350 = cpu->gpr[31];
+            break;
+
+        case 0x000403D0u:
+            ++g_b49_fn_403d0;
+            if (cpu) g_b49_ra_403d0 = cpu->gpr[31];
+            break;
+
+        case 0x00042BD8u:
+            ++g_b49_fn_42bd8;
+            if (cpu) g_b49_ra_42bd8 = cpu->gpr[31];
+            break;
+
+        case 0x00043A78u:
+            ++g_b49_fn_43a78;
+            if (cpu) g_b49_ra_43a78 = cpu->gpr[31];
+            break;
+
+        case 0x0007E8E8u:
+            ++g_b49_fn_7e8e8;
+            if (cpu) g_b49_ra_7e8e8 = cpu->gpr[31];
+            break;
+
+        /* B47 - 43E3C milestones */
+        case 0x00043EB8u:
+            ++g_b47_m_43eb8;
+            g_b47_last_milestone = 0x43EB8u;
+            break;
+
+
+        /* B49 - retour de 8001569C / appel 80040350 */
+        case 0x00043EC0u:
+            ++g_b49_m_43ec0;
+            g_b47_last_milestone = 0x43EC0u;
+            break;
+
+        /* B49 - appel 800403D0 */
+        case 0x00043ECCu:
+            ++g_b49_m_43ecc;
+            g_b47_last_milestone = 0x43ECCu;
+            break;
+
+        /* B49 - appel 80042BD8 */
+        case 0x00043F08u:
+            ++g_b49_m_43f08;
+            g_b47_last_milestone = 0x43F08u;
+            break;
+
+        /* B49 - appel 80043A78 */
+        case 0x00043F20u:
+            ++g_b49_m_43f20;
+            g_b47_last_milestone = 0x43F20u;
+            break;
+
+        /* B49 - appel 80043CD4 */
+        case 0x00043F2Cu:
+            ++g_b49_m_43f2c;
+            g_b47_last_milestone = 0x43F2Cu;
+            break;
+
+        /* B49 - appel 8007E8E8 */
+        case 0x00043F34u:
+            ++g_b49_m_43f34;
+            g_b47_last_milestone = 0x43F34u;
+            break;
+
+        case 0x00043F3Cu:
+            ++g_b47_m_43f3c;
+            g_b47_last_milestone = 0x43F3Cu;
+            break;
+
+        case 0x00043F44u:
+            ++g_b47_m_43f44;
+            g_b47_last_milestone = 0x43F44u;
+            break;
+
+        case 0x00043F4Cu:
+            ++g_b47_m_43f4c;
+            ++g_b47_68160_return;
+            ++g_b61_at_return;
+            if (cpu)
+            {
+                /*
+                 * B61 : l'utilisateur a appuye sur START alors que
+                 * l'overlay renvoie encore le statut d'attente 2.
+                 * Faire sortir proprement la boucle du caller.
+                 */
+                if (
+                    g_b61_skip_request
+                    &&
+                    g_b61_bridge_count == 0u
+                    &&
+                    cpu->gpr[2] == 2u
+                )
+                {
+                    g_b61_old_v0 = cpu->gpr[2];
+                    cpu->gpr[2] = 0u;
+                    g_b61_skip_request = 0u;
+                    ++g_b61_bridge_count;
+                }
+
+                g_b47_68160_last_v0 = cpu->gpr[2];
+
+                g_b60_ret_v0 = cpu->gpr[2];
+                g_b60_ret_s0 = cpu->gpr[16];
+                g_b60_ret_s1 = cpu->gpr[17];
+                g_b60_ret_s2 = cpu->gpr[18];
+                g_b60_ret_s3 = cpu->gpr[19];
+
+                if (cpu->gpr[2] == 0u)
+                {
+                    ++g_b47_68160_v0_zero;
+                }
+                else
+                {
+                    ++g_b47_68160_v0_nonzero;
+                }
+            }
+            g_b47_last_milestone = 0x43F4Cu;
+            break;
+
+        case 0x00043F54u:
+            ++g_b47_m_43f54;
+            g_b47_last_milestone = 0x43F54u;
+            break;
+
+        case 0x00043FF8u:
+            ++g_b47_m_43ff8;
+            g_b47_last_milestone = 0x43FF8u;
+            break;
+
+        case 0x00044054u:
+            ++g_b47_m_44054;
+            g_b47_last_milestone = 0x44054u;
+            break;
+
+        case 0x00044064u:
+            ++g_b47_m_44064;
+            g_b47_last_milestone = 0x44064u;
+            break;
+
+        case 0x0004406Cu:
+            ++g_b47_m_4406c;
+            g_b47_last_milestone = 0x4406Cu;
+            break;
+
+        case 0x001680F4u:
+            ++g_hit_ov16;
+            ++g_b47_680f4_enter;
+            if (cpu)
+            {
+                g_b47_68160_last_ra = cpu->gpr[31];
+            }
+            break;
+
+        case 0x00168160u:
+            ++g_hit_ov16;
+            ++g_b47_68160_enter;
+            if (cpu)
+            {
+                g_b47_68160_last_ra = cpu->gpr[31];
+
+                g_b60_ent_a0 = cpu->gpr[4];
+                g_b60_ent_a1 = cpu->gpr[5];
+                g_b60_ent_a2 = cpu->gpr[6];
+                g_b60_ent_a3 = cpu->gpr[7];
+
+                g_b60_ent_s0 = cpu->gpr[16];
+                g_b60_ent_s1 = cpu->gpr[17];
+                g_b60_ent_s2 = cpu->gpr[18];
+                g_b60_ent_s3 = cpu->gpr[19];
+
+                g_b60_ent_sp = cpu->gpr[29];
+                g_b60_ent_ra = cpu->gpr[31];
+            }
+            break;
+
+        /*
+         * B69 - chemin FUN_800495C8 -> FUN_80046750.
+         */
+        case 0x000495C8u:
+            ++g_b69_495c8_enter;
+            if (cpu)
+            {
+                g_b69_495c8_ra = cpu->gpr[31];
+            }
+            break;
+
+        case 0x00046750u:
+            ++g_b69_46750_enter;
+            if (cpu)
+            {
+                g_b69_46750_ra = cpu->gpr[31];
+            }
+            break;
+
+        /*
+         * Les JAL de 800495C8 sont a :
+         *   495F8 -> 46750  ; retour 49600
+         *   49600 -> 494A0  ; retour 49608
+         *   49608 -> 78588  ; retour 49610
+         *   4965C -> 47660  ; retour 49664
+         *
+         * Les adresses de retour sont les meilleurs marqueurs pour
+         * prouver que chaque sous-appel a réellement fini.
+         */
+        case 0x00049600u:
+            ++g_b69_after_46750;
+            break;
+
+        case 0x00049608u:
+            ++g_b69_after_494a0;
+            break;
+
+        case 0x00049610u:
+            ++g_b69_after_78588;
+            break;
+
+        case 0x00049664u:
+            ++g_b69_after_47660;
+            break;
+
+        /*
+         * B74 - service frame + callback de rendu du menu.
+         */
+        case 0x00012F70u:
+            ++g_b74_hit_12f70;
+            if (cpu)
+            {
+                g_b74_last_12f70_ra = cpu->gpr[31];
+            }
+            break;
+
+        case 0x00180B4Cu:
+            ++g_b74_hit_menu_draw_cb;
+            if (cpu)
+            {
+                g_b74_last_menu_draw_ra = cpu->gpr[31];
+            }
+            break;
+
+
+        /*
+         * B73 - chemin exact du menu SU.
+         */
+        case 0x0002D75Cu:
+            ++g_b73_hit_state8;
+            break;
+
+        case 0x0006B560u:
+            ++g_b73_hit_load_su;
+            break;
+
+        case 0x0018001Cu:
+            ++g_b73_hit_menu_init;
+            ++g_hit_ov18;
+            break;
+
+        case 0x00180390u:
+            ++g_b73_hit_menu_update;
+            ++g_hit_ov18;
+            break;
+
+        case 0x00180E48u:
+            ++g_b73_hit_menu_destroy;
+            ++g_hit_ov18;
+            break;
+
+
+        /*
+         * B72 - jalons du rendu menu vus dans le runtime PC valide.
+         */
+        case 0x00040B48u:
+            ++g_b72_hit_40b48;
+            if (cpu)
+            {
+                g_b72_last_40b48_ra = cpu->gpr[31];
+            }
+            break;
+
+        case 0x00041C88u:
+            ++g_b72_hit_41c88;
             break;
 
         case 0x00044084u:
@@ -986,17 +2049,6 @@ static void fm_trace_dispatch(
 
         case 0x0006A4D8u:
             ++g_hit_str;
-            break;
-
-        case 0x001680F4u:
-        case 0x00168160u:
-            ++g_hit_ov16;
-            break;
-
-        case 0x0018001Cu:
-        case 0x00180390u:
-        case 0x00180E48u:
-            ++g_hit_ov18;
             break;
 
         case 0x0007FCBCu:
@@ -2740,6 +3792,55 @@ static void fm_cd_hle_reset(void)
     g_b32_last_bytes = 0;
     g_b32_last_remaining = 0;
     g_b32_last_rc = 0;
+
+    g_b56_stream_reads = 0u;
+    g_b56_stream_first_lba = 0u;
+    g_b56_stream_last_lba = 0u;
+
+
+    g_b57_req = 0u;
+    g_b57_base_lba = 0u;
+    g_b57_next_lba = 0u;
+    g_b57_last_remaining = 0u;
+    g_b57_resets = 0u;
+    g_b57_read_index = 0u;
+
+
+    g_b59_pal_patch_count = 0u;
+    g_b59_pal_patch_before = 0u;
+    g_b59_pal_patch_after = 0u;
+
+
+    g_b60_ent_a0 = 0u;
+    g_b60_ent_a1 = 0u;
+    g_b60_ent_a2 = 0u;
+    g_b60_ent_a3 = 0u;
+    g_b60_ent_s0 = 0u;
+    g_b60_ent_s1 = 0u;
+    g_b60_ent_s2 = 0u;
+    g_b60_ent_s3 = 0u;
+    g_b60_ent_sp = 0u;
+    g_b60_ent_ra = 0u;
+
+    g_b60_ret_v0 = 0u;
+    g_b60_ret_s0 = 0u;
+    g_b60_ret_s1 = 0u;
+    g_b60_ret_s2 = 0u;
+    g_b60_ret_s3 = 0u;
+
+
+    g_b61_skip_request = 0u;
+    g_b61_bridge_count = 0u;
+    g_b61_old_v0 = 0u;
+    g_b61_at_return = 0u;
+
+
+    g_b62_hle_nclip = 0u;
+    g_b62_hle_rtp4 = 0u;
+    g_b62_hle_ra3 = 0u;
+    g_b62_hle_ra4 = 0u;
+    g_b62_last_helper = 0u;
+    g_b62_last_otz = 0u;
     g_b32_43e_returned = 0;
     g_b32_43e_return_frame = 0;
     g_b35_finalizer_active = 0;
@@ -2756,6 +3857,94 @@ static void fm_cd_hle_reset(void)
     g_hit_str = 0;
     g_hit_ov16 = 0;
     g_hit_ov18 = 0;
+
+
+    g_b47_m_43eb8 = 0u;
+    g_b47_m_43f3c = 0u;
+    g_b47_m_43f44 = 0u;
+    g_b47_m_43f4c = 0u;
+    g_b47_m_43f54 = 0u;
+    g_b47_m_43ff8 = 0u;
+    g_b47_m_44054 = 0u;
+    g_b47_m_44064 = 0u;
+    g_b47_m_4406c = 0u;
+    g_b47_680f4_enter = 0u;
+    g_b47_68160_enter = 0u;
+    g_b47_68160_return = 0u;
+    g_b47_68160_v0_zero = 0u;
+    g_b47_68160_v0_nonzero = 0u;
+    g_b47_68160_last_v0 = 0u;
+    g_b47_68160_last_ra = 0u;
+    g_b47_last_milestone = 0u;
+    g_b47_last_milestone_frame = 0u;
+
+
+    g_b49_m_43ec0 = 0u;
+    g_b49_m_43ecc = 0u;
+    g_b49_m_43f08 = 0u;
+    g_b49_m_43f20 = 0u;
+    g_b49_m_43f2c = 0u;
+    g_b49_m_43f34 = 0u;
+
+    g_b49_fn_1569c = 0u;
+    g_b49_fn_40350 = 0u;
+    g_b49_fn_403d0 = 0u;
+    g_b49_fn_42bd8 = 0u;
+    g_b49_fn_43a78 = 0u;
+    g_b49_fn_7e8e8 = 0u;
+
+    g_b49_ra_1569c = 0u;
+    g_b49_ra_40350 = 0u;
+    g_b49_ra_403d0 = 0u;
+    g_b49_ra_42bd8 = 0u;
+    g_b49_ra_43a78 = 0u;
+    g_b49_ra_7e8e8 = 0u;
+
+
+    g_b50_cleanup_triggered = 0u;
+    g_b50_cleanup_done = 0u;
+    g_b50_cleanup_active = 0u;
+    g_b50_c460_before = 0u;
+    g_b50_c460_after = 0u;
+    g_b50_c484_before = 0u;
+    g_b50_c484_after = 0u;
+    g_b50_remaining = 0u;
+
+
+    g_b51_rearm_count = 0u;
+    g_b51_last_rem = 0u;
+    g_b51_last_type = 0u;
+    g_b51_last_c460 = 0u;
+    g_b51_last_c484 = 0u;
+
+
+    g_b52_418c0_hits = 0u;
+    g_b52_418c0_returns = 0u;
+    g_b52_41bb4_hits = 0u;
+    g_b52_41d38_hits = 0u;
+    g_b52_41f64_hits = 0u;
+    g_b52_41f74_hits = 0u;
+
+    g_b52_ra = 0u;
+    g_b52_a0 = 0u;
+    g_b52_a1 = 0u;
+    g_b52_a2 = 0u;
+
+    g_b52_data_ptr = 0u;
+    g_b52_data_w0 = 0u;
+    g_b52_data_w1 = 0u;
+    g_b52_data_w2 = 0u;
+    g_b52_obj_flags = 0u;
+    g_b52_item_count = 0u;
+    g_b52_obj_type = 0u;
+
+    g_b52_cd4_a0 = 0u;
+    g_b52_last_hot_pc = 0u;
+
+
+    g_b53_fast43cd4_hits = 0u;
+    g_b53_fast43cd4_last_in = 0u;
+    g_b53_fast43cd4_last_out = 0u;
 
     g_hit_7fcbc = 0;
     g_hit_82158 = 0;
@@ -4815,6 +6004,45 @@ static int fm_b33_schedule_cd_callback(
 
     fm_b33_fill_cd_result(cpu, command);
 
+    /*
+     * B66 - reproduire la partie INTERNE de LibCD que notre HLE B33
+     * court-circuitait.
+     *
+     * FUN_80079728 fait ceci lors d'un interrupt type 2 :
+     *   DAT_80094BEC = 2;
+     *   copie des 8 octets de resultat vers DAT_800F7130.
+     *
+     * Le callback utilisateur est appele seulement APRES cet update.
+     */
+    g_b66_last_cmd = command & 0xFFu;
+    g_b66_last_sync_before =
+        cpu->read_byte(0x80094BECu);
+
+    cpu->write_byte(
+        0x80094BECu,
+        2u
+    );
+
+    cpu->write_byte(
+        0x8009492Du,
+        (uint8_t)(command & 0xFFu)
+    );
+
+    for (unsigned i = 0; i < 8u; ++i)
+    {
+        cpu->write_byte(
+            0x800F7130u + i,
+            cpu->read_byte(
+                g_b33_result_scratch + i
+            )
+        );
+    }
+
+    g_b66_last_sync_after =
+        cpu->read_byte(0x80094BECu);
+
+    ++g_b66_complete_publish;
+
     /* Pas de callback : la commande est simplement acceptee. */
     if (
         callback < 0x80010000u
@@ -4861,6 +6089,570 @@ static int fm_b33_schedule_cd_callback(
 
     return 1;
 }
+
+
+/*
+ * ============================================================
+ * B62 - mini moteur de projection GTE pour wrappers Psy-Q
+ * ============================================================
+ *
+ * Ce n'est pas encore un GTE cycle-exact. Le but est d'émuler les
+ * résultats architecturaux utilisés par les wrappers libgte ci-dessus
+ * afin de poursuivre le bring-up.
+ */
+
+typedef struct FMB62Projected
+{
+    uint32_t sxy;
+    uint16_t sz;
+    uint32_t p;
+    uint32_t flag;
+} FMB62Projected;
+
+
+static int32_t fm_b62_s16_lo(uint32_t v)
+{
+    return (int32_t)(int16_t)(v & 0xFFFFu);
+}
+
+
+static int32_t fm_b62_s16_hi(uint32_t v)
+{
+    return (int32_t)(int16_t)((v >> 16) & 0xFFFFu);
+}
+
+
+static int32_t fm_b62_clamp_sxy(int64_t v)
+{
+    if (v < -1024)
+    {
+        return -1024;
+    }
+
+    if (v > 1023)
+    {
+        return 1023;
+    }
+
+    return (int32_t)v;
+}
+
+
+static uint16_t fm_b62_clamp_sz(int64_t v)
+{
+    if (v < 0)
+    {
+        return 0;
+    }
+
+    if (v > 0xFFFF)
+    {
+        return 0xFFFFu;
+    }
+
+    return (uint16_t)v;
+}
+
+
+static uint32_t fm_b62_clamp_ir0(int64_t v)
+{
+    if (v < 0)
+    {
+        return 0u;
+    }
+
+    if (v > 0x1000)
+    {
+        return 0x1000u;
+    }
+
+    return (uint32_t)v;
+}
+
+
+static FMB62Projected fm_b62_project_vertex(
+    CPUState *cpu,
+    uint32_t vptr
+)
+{
+    FMB62Projected out;
+    out.sxy = 0u;
+    out.sz = 0u;
+    out.p = 0u;
+    out.flag = 0u;
+
+    int32_t vx =
+        (int32_t)(int16_t)cpu->read_half(vptr + 0u);
+
+    int32_t vy =
+        (int32_t)(int16_t)cpu->read_half(vptr + 2u);
+
+    int32_t vz =
+        (int32_t)(int16_t)cpu->read_half(vptr + 4u);
+
+    /*
+     * Matrice de rotation GTE, format 1.3.12.
+     */
+    int32_t r11 = fm_b62_s16_lo(cpu->gte_ctrl[0]);
+    int32_t r12 = fm_b62_s16_hi(cpu->gte_ctrl[0]);
+    int32_t r13 = fm_b62_s16_lo(cpu->gte_ctrl[1]);
+
+    int32_t r21 = fm_b62_s16_hi(cpu->gte_ctrl[1]);
+    int32_t r22 = fm_b62_s16_lo(cpu->gte_ctrl[2]);
+    int32_t r23 = fm_b62_s16_hi(cpu->gte_ctrl[2]);
+
+    int32_t r31 = fm_b62_s16_lo(cpu->gte_ctrl[3]);
+    int32_t r32 = fm_b62_s16_hi(cpu->gte_ctrl[3]);
+    int32_t r33 = fm_b62_s16_lo(cpu->gte_ctrl[4]);
+
+    int64_t mac1 =
+        ((int64_t)(int32_t)cpu->gte_ctrl[5] << 12)
+        + (int64_t)r11 * vx
+        + (int64_t)r12 * vy
+        + (int64_t)r13 * vz;
+
+    int64_t mac2 =
+        ((int64_t)(int32_t)cpu->gte_ctrl[6] << 12)
+        + (int64_t)r21 * vx
+        + (int64_t)r22 * vy
+        + (int64_t)r23 * vz;
+
+    int64_t mac3 =
+        ((int64_t)(int32_t)cpu->gte_ctrl[7] << 12)
+        + (int64_t)r31 * vx
+        + (int64_t)r32 * vy
+        + (int64_t)r33 * vz;
+
+    int32_t ir1 =
+        (int32_t)(mac1 >> 12);
+
+    int32_t ir2 =
+        (int32_t)(mac2 >> 12);
+
+    int64_t z =
+        mac3 >> 12;
+
+    out.sz =
+        fm_b62_clamp_sz(z);
+
+    /*
+     * Division perspective GTE :
+     * quotient ~= H / SZ3 en 16.16, saturé à 0x1FFFF.
+     */
+    uint32_t h =
+        cpu->gte_ctrl[26] & 0xFFFFu;
+
+    uint32_t q;
+
+    if (out.sz == 0u)
+    {
+        q = 0x1FFFFu;
+        out.flag |= 0x00020000u;
+    }
+    else
+    {
+        uint64_t div =
+            ((uint64_t)h << 16) / out.sz;
+
+        if (div > 0x1FFFFu)
+        {
+            q = 0x1FFFFu;
+            out.flag |= 0x00020000u;
+        }
+        else
+        {
+            q = (uint32_t)div;
+        }
+    }
+
+    int64_t sx_fp =
+        (int64_t)(int32_t)cpu->gte_ctrl[24]
+        + (int64_t)ir1 * q;
+
+    int64_t sy_fp =
+        (int64_t)(int32_t)cpu->gte_ctrl[25]
+        + (int64_t)ir2 * q;
+
+    int32_t sx =
+        fm_b62_clamp_sxy(
+            sx_fp >> 16
+        );
+
+    int32_t sy =
+        fm_b62_clamp_sxy(
+            sy_fp >> 16
+        );
+
+    out.sxy =
+        ((uint32_t)(uint16_t)sy << 16)
+        |
+        (uint32_t)(uint16_t)sx;
+
+    /*
+     * Depth cue P / IR0.
+     */
+    int32_t dqa =
+        (int32_t)(int16_t)(
+            cpu->gte_ctrl[27] & 0xFFFFu
+        );
+
+    int64_t ir0 =
+        (
+            (int64_t)(int32_t)cpu->gte_ctrl[28]
+            +
+            (int64_t)dqa * q
+        )
+        >> 12;
+
+    out.p =
+        fm_b62_clamp_ir0(ir0);
+
+    return out;
+}
+
+
+static void fm_b62_commit_fifo4(
+    CPUState *cpu,
+    const FMB62Projected *p0,
+    const FMB62Projected *p1,
+    const FMB62Projected *p2,
+    const FMB62Projected *p3,
+    uint32_t flag
+)
+{
+    /*
+     * Etat final après RTPT(v0,v1,v2) + RTPS(v3).
+     */
+    cpu->gte_data[12] = p1->sxy;
+    cpu->gte_data[13] = p2->sxy;
+    cpu->gte_data[14] = p3->sxy;
+    cpu->gte_data[15] = p3->sxy;
+
+    cpu->gte_data[16] = p0->sz;
+    cpu->gte_data[17] = p1->sz;
+    cpu->gte_data[18] = p2->sz;
+    cpu->gte_data[19] = p3->sz;
+
+    cpu->gte_data[8] = p3->p;
+
+    cpu->gte_ctrl[31] = flag;
+}
+
+
+static uint32_t fm_b62_average_z(
+    CPUState *cpu,
+    uint32_t sum,
+    int count
+)
+{
+    int32_t zsf;
+
+    if (count == 3)
+    {
+        zsf =
+            (int32_t)(int16_t)(
+                cpu->gte_ctrl[29]
+                &
+                0xFFFFu
+            );
+    }
+    else
+    {
+        zsf =
+            (int32_t)(int16_t)(
+                cpu->gte_ctrl[30]
+                &
+                0xFFFFu
+            );
+    }
+
+    int64_t otz =
+        ((int64_t)sum * zsf) >> 12;
+
+    if (otz < 0)
+    {
+        otz = 0;
+    }
+    else if (otz > 0xFFFF)
+    {
+        otz = 0xFFFF;
+    }
+
+    return (uint32_t)otz;
+}
+
+
+static int fm_b62_hle_normal_clip(
+    CPUState *cpu
+)
+{
+    uint32_t a = cpu->gpr[4];
+    uint32_t b = cpu->gpr[5];
+    uint32_t c = cpu->gpr[6];
+
+    int32_t ax = (int16_t)(a & 0xFFFFu);
+    int32_t ay = (int16_t)(a >> 16);
+    int32_t bx = (int16_t)(b & 0xFFFFu);
+    int32_t by = (int16_t)(b >> 16);
+    int32_t cx = (int16_t)(c & 0xFFFFu);
+    int32_t cy = (int16_t)(c >> 16);
+
+    int64_t area =
+        (int64_t)ax * by
+        + (int64_t)bx * cy
+        + (int64_t)cx * ay
+        - (int64_t)ax * cy
+        - (int64_t)bx * ay
+        - (int64_t)cx * by;
+
+    cpu->gte_data[24] = (uint32_t)area;
+    cpu->gpr[2] = (uint32_t)area;
+    cpu->pc = cpu->gpr[31];
+    cpu->gpr[0] = 0u;
+
+    ++g_b62_hle_nclip;
+    g_b62_last_helper = 0x80087928u;
+
+    return 1;
+}
+
+
+static int fm_b62_hle_rot_trans_pers4(
+    CPUState *cpu
+)
+{
+    uint32_t sp = cpu->gpr[29];
+
+    uint32_t v0 = cpu->gpr[4];
+    uint32_t v1 = cpu->gpr[5];
+    uint32_t v2 = cpu->gpr[6];
+    uint32_t v3 = cpu->gpr[7];
+
+    uint32_t sxy0 = cpu->read_word(sp + 16u);
+    uint32_t sxy1 = cpu->read_word(sp + 20u);
+    uint32_t sxy2 = cpu->read_word(sp + 24u);
+    uint32_t sxy3 = cpu->read_word(sp + 28u);
+    uint32_t p_out = cpu->read_word(sp + 32u);
+    uint32_t flag_out = cpu->read_word(sp + 36u);
+
+    FMB62Projected p0 = fm_b62_project_vertex(cpu, v0);
+    FMB62Projected p1 = fm_b62_project_vertex(cpu, v1);
+    FMB62Projected p2 = fm_b62_project_vertex(cpu, v2);
+    FMB62Projected p3 = fm_b62_project_vertex(cpu, v3);
+
+    uint32_t flag =
+        p0.flag
+        |
+        p1.flag
+        |
+        p2.flag
+        |
+        p3.flag;
+
+    cpu->write_word(sxy0, p0.sxy);
+    cpu->write_word(sxy1, p1.sxy);
+    cpu->write_word(sxy2, p2.sxy);
+    cpu->write_word(sxy3, p3.sxy);
+    cpu->write_word(p_out, p3.p);
+    cpu->write_word(flag_out, flag);
+
+    fm_b62_commit_fifo4(
+        cpu,
+        &p0,
+        &p1,
+        &p2,
+        &p3,
+        flag
+    );
+
+    /*
+     * Psy-Q RotTransPers4 retourne SZ3 / 4.
+     */
+    cpu->gpr[2] =
+        ((uint32_t)p3.sz) >> 2;
+
+    g_b62_last_otz = cpu->gpr[2];
+
+    cpu->pc = cpu->gpr[31];
+    cpu->gpr[0] = 0u;
+
+    ++g_b62_hle_rtp4;
+    g_b62_last_helper = 0x80087958u;
+
+    return 1;
+}
+
+
+static int fm_b62_hle_rot_average3(
+    CPUState *cpu
+)
+{
+    uint32_t sp = cpu->gpr[29];
+
+    uint32_t v0 = cpu->gpr[4];
+    uint32_t v1 = cpu->gpr[5];
+    uint32_t v2 = cpu->gpr[6];
+
+    uint32_t sxy0 = cpu->gpr[7];
+    uint32_t sxy1 = cpu->read_word(sp + 16u);
+    uint32_t sxy2 = cpu->read_word(sp + 20u);
+    uint32_t p_out = cpu->read_word(sp + 24u);
+    uint32_t flag_out = cpu->read_word(sp + 28u);
+
+    FMB62Projected p0 = fm_b62_project_vertex(cpu, v0);
+    FMB62Projected p1 = fm_b62_project_vertex(cpu, v1);
+    FMB62Projected p2 = fm_b62_project_vertex(cpu, v2);
+
+    uint32_t flag =
+        p0.flag | p1.flag | p2.flag;
+
+    cpu->write_word(sxy0, p0.sxy);
+    cpu->write_word(sxy1, p1.sxy);
+    cpu->write_word(sxy2, p2.sxy);
+    cpu->write_word(p_out, p2.p);
+    cpu->write_word(flag_out, flag);
+
+    cpu->gte_data[12] = p0.sxy;
+    cpu->gte_data[13] = p1.sxy;
+    cpu->gte_data[14] = p2.sxy;
+    cpu->gte_data[15] = p2.sxy;
+
+    cpu->gte_data[17] = p0.sz;
+    cpu->gte_data[18] = p1.sz;
+    cpu->gte_data[19] = p2.sz;
+    cpu->gte_data[8] = p2.p;
+    cpu->gte_ctrl[31] = flag;
+
+    uint32_t sum =
+        (uint32_t)p0.sz
+        +
+        (uint32_t)p1.sz
+        +
+        (uint32_t)p2.sz;
+
+    cpu->gpr[2] =
+        fm_b62_average_z(
+            cpu,
+            sum,
+            3
+        );
+
+    cpu->gte_data[7] = cpu->gpr[2];
+
+    g_b62_last_otz = cpu->gpr[2];
+
+    cpu->pc = cpu->gpr[31];
+    cpu->gpr[0] = 0u;
+
+    ++g_b62_hle_ra3;
+    g_b62_last_helper = 0x800879D8u;
+
+    return 1;
+}
+
+
+static int fm_b62_hle_rot_average4(
+    CPUState *cpu
+)
+{
+    uint32_t sp = cpu->gpr[29];
+
+    uint32_t v0 = cpu->gpr[4];
+    uint32_t v1 = cpu->gpr[5];
+    uint32_t v2 = cpu->gpr[6];
+    uint32_t v3 = cpu->gpr[7];
+
+    uint32_t sxy0 = cpu->read_word(sp + 16u);
+    uint32_t sxy1 = cpu->read_word(sp + 20u);
+    uint32_t sxy2 = cpu->read_word(sp + 24u);
+    uint32_t sxy3 = cpu->read_word(sp + 28u);
+    uint32_t p_out = cpu->read_word(sp + 32u);
+    uint32_t flag_out = cpu->read_word(sp + 36u);
+
+    FMB62Projected p0 = fm_b62_project_vertex(cpu, v0);
+    FMB62Projected p1 = fm_b62_project_vertex(cpu, v1);
+    FMB62Projected p2 = fm_b62_project_vertex(cpu, v2);
+    FMB62Projected p3 = fm_b62_project_vertex(cpu, v3);
+
+    uint32_t flag =
+        p0.flag
+        |
+        p1.flag
+        |
+        p2.flag
+        |
+        p3.flag;
+
+    cpu->write_word(sxy0, p0.sxy);
+    cpu->write_word(sxy1, p1.sxy);
+    cpu->write_word(sxy2, p2.sxy);
+    cpu->write_word(sxy3, p3.sxy);
+    cpu->write_word(p_out, p3.p);
+    cpu->write_word(flag_out, flag);
+
+    fm_b62_commit_fifo4(
+        cpu,
+        &p0,
+        &p1,
+        &p2,
+        &p3,
+        flag
+    );
+
+    uint32_t sum =
+        (uint32_t)p0.sz
+        +
+        (uint32_t)p1.sz
+        +
+        (uint32_t)p2.sz
+        +
+        (uint32_t)p3.sz;
+
+    cpu->gpr[2] =
+        fm_b62_average_z(
+            cpu,
+            sum,
+            4
+        );
+
+    cpu->gte_data[7] = cpu->gpr[2];
+
+    g_b62_last_otz = cpu->gpr[2];
+
+    cpu->pc = cpu->gpr[31];
+    cpu->gpr[0] = 0u;
+
+    ++g_b62_hle_ra4;
+    g_b62_last_helper = 0x80087A38u;
+
+    return 1;
+}
+
+
+static int fm_b62_try_gte_helper(
+    CPUState *cpu,
+    uint32_t phys
+)
+{
+    switch (phys)
+    {
+        case 0x00087928u:
+            return fm_b62_hle_normal_clip(cpu);
+
+        case 0x00087958u:
+            return fm_b62_hle_rot_trans_pers4(cpu);
+
+        case 0x000879D8u:
+            return fm_b62_hle_rot_average3(cpu);
+
+        case 0x00087A38u:
+            return fm_b62_hle_rot_average4(cpu);
+
+        default:
+            return 0;
+    }
+}
+
 
 int main(void)
 {
@@ -5148,6 +6940,183 @@ int main(void)
 
 
         /*
+         * B58 - Etat manette PS1 correspondant aux boutons 3DS.
+         *
+         * fm_pad_bits() produit le format pad PS1 actif-bas.
+         * Le moteur de Forbidden Memories utilise ensuite, dans
+         * DAT_8009C70C, le masque actif-haut avant de calculer
+         * held / pressed / repeat via FUN_8003CEA4.
+         */
+        uint16_t pad =
+            fm_pad_bits(
+                held
+            );
+
+        uint16_t psx_pressed =
+            (uint16_t)(
+                ~pad
+            );
+
+
+        /*
+         * ====================================================
+         * B72 - START titre identique au probe PC : 10 frames
+         * ====================================================
+         *
+         * Ne pas activer pendant le START de bring-up B61.
+         * Le gate ci-dessous n'est vrai qu'apres :
+         *   - l'intro STR,
+         *   - la file graphique B70,
+         *   - le retour propre de FUN_80046750.
+         */
+        int b72_title_stage =
+            (
+                g_str_intro_last_done != 0u
+                &&
+                g_b70_ready_bridge != 0u
+                &&
+                g_b69_after_46750 != 0u
+            );
+
+        if (
+            (down & KEY_START)
+            &&
+            b72_title_stage
+        )
+        {
+            ++g_b72_start_down_count;
+
+            g_b72_start_hold_frames = 10u;
+            g_b72_start_last_frame = frame;
+            g_b72_start_last_host_held = held;
+            g_b72_start_last_host_down = down;
+
+            if (g_b73_menu_force_count == 0u)
+            {
+                g_b73_menu_force_request = 1u;
+            }
+        }
+
+        if (
+            b72_title_stage
+            &&
+            g_b72_start_hold_frames != 0u
+        )
+        {
+            /*
+             * psx_pressed est actif-haut :
+             * bit 3 = START.
+             */
+            psx_pressed |= 0x0008u;
+
+            g_b72_start_last_psx =
+                psx_pressed;
+
+            --g_b72_start_hold_frames;
+        }
+
+
+        /*
+         * ====================================================
+         * B73 - transition controlee vers l'etat resident 8
+         * ====================================================
+         *
+         * Table 80091F7C :
+         *   index 8 -> FUN_8002D75C
+         *
+         * Ce handler appelle le vrai chargeur SU puis l'overlay
+         * 8018001C/80180390. On ne forge donc ni image, ni menu.
+         */
+        if (
+            b72_title_stage
+            &&
+            g_b73_menu_force_request
+            &&
+            g_b73_menu_force_count == 0u
+            &&
+            g_b72_start_hold_frames == 0u
+            &&
+            frame >= (g_b72_start_last_frame + 10u)
+        )
+        {
+            g_b73_state60a_before =
+                fm_memory_read_byte(
+                    0x8009C60Au
+                );
+
+            g_b73_state60d_before =
+                fm_memory_read_byte(
+                    0x8009C60Du
+                );
+
+            /*
+             * 60E devient l'index initial du menu dans 8018001C.
+             * 0 = premiere entree.
+             *
+             * 60C n'est pas exploite par le pseudo-C de 8018001C,
+             * mais 1 correspond a la convention d'entree normale.
+             */
+            fm_memory_write_byte(
+                0x8009C60Cu,
+                1u
+            );
+
+            fm_memory_write_byte(
+                0x8009C60Eu,
+                0u
+            );
+
+            /*
+             * Conserver la destination "menu" puis selectionner
+             * directement l'etat 8. Le dispatcher 8002DF60 ajoutera
+             * lui-meme ses bits de service 0x80/0x40.
+             */
+            fm_memory_write_byte(
+                0x8009C60Du,
+                8u
+            );
+
+            fm_memory_write_byte(
+                0x8009C60Au,
+                8u
+            );
+
+            g_b73_state60a_after =
+                fm_memory_read_byte(
+                    0x8009C60Au
+                );
+
+            g_b73_state60d_after =
+                fm_memory_read_byte(
+                    0x8009C60Du
+                );
+
+            g_b73_menu_force_frame = frame;
+            g_b73_menu_force_request = 0u;
+            ++g_b73_menu_force_count;
+        }
+
+
+        /*
+         * B61 - START garde son usage normal cote PS1, mais pendant
+         * le verrou de boot 80168160 il demande aussi une sortie
+         * controlee de la boucle asynchrone.
+         */
+        if (
+            (down & KEY_START)
+            &&
+            g_b47_68160_return != 0u
+            &&
+            g_b47_m_43f54 == 0u
+            &&
+            g_b61_bridge_count == 0u
+        )
+        {
+            g_b61_skip_request = 1u;
+        }
+
+
+        /*
          * Exit
          */
         if (
@@ -5178,15 +7147,20 @@ int main(void)
          * ====================================================
          */
 
+        /*
+         * A sert uniquement a DEMARRER le runtime s'il est arrete.
+         * Une fois le jeu lance, A redevient un vrai bouton PS1.
+         *
+         * Le tactile 3DS devient notre pause/reprise de debug.
+         */
         if (
             (down & KEY_A)
+            && !game_running
             && exe_status == 0
             && memory_status == 0
         )
         {
-            game_running =
-                !game_running;
-
+            game_running = 1;
             static_miss = 0;
 
             if (!probe_ran)
@@ -5200,6 +7174,18 @@ int main(void)
             }
         }
 
+        if (
+            (down & KEY_TOUCH)
+            && exe_status == 0
+            && memory_status == 0
+        )
+        {
+            game_running =
+                !game_running;
+
+            static_miss = 0;
+        }
+
 
         /*
          * ====================================================
@@ -5207,8 +7193,40 @@ int main(void)
          * ====================================================
          */
 
-        if (down & KEY_B)
+        /*
+         * RESET debug : SELECT + B.
+         * B seul est maintenant transmis au jeu comme bouton Cross.
+         */
+        if (
+            (
+                held
+                &
+                (
+                    KEY_L
+                    |
+                    KEY_R
+                    |
+                    KEY_SELECT
+                )
+            )
+            ==
+            (
+                KEY_L
+                |
+                KEY_R
+                |
+                KEY_SELECT
+            )
+            &&
+            (down & KEY_B)
+        )
         {
+            ++g_b65_reset_count;
+            g_b65_stop_code = 9u;
+            g_b65_stop_pc = cpu ? cpu->pc : 0u;
+            g_b65_stop_ra = cpu ? cpu->gpr[31] : 0u;
+            g_b65_stop_detail = 0u;
+
             game_running = 0;
             static_miss = 0;
             last_dispatch_address = 0;
@@ -5258,6 +7276,345 @@ int main(void)
 
             probe_ran = 0;
             interp_ran = 0;
+        }
+
+
+        /*
+         * ====================================================
+         * B58 - INJECTION PAD VERS LE JEU
+         * ====================================================
+         *
+         * DAT_8009C70C est l'entree brute 32 bits consommee par
+         * FUN_8003CEA4. Lower 16 bits = pad joueur 1.
+         *
+         * Cela laisse le vrai code du jeu fabriquer :
+         *   8009C710 = boutons maintenus
+         *   8009C72C = nouveaux appuis
+         *   8009C728 = repetitions
+         */
+        if (
+            game_running
+            &&
+            memory_status == 0
+        )
+        {
+            fm_memory_write_word(
+                0x8009C70Cu,
+                (uint32_t)psx_pressed
+            );
+        }
+
+
+        /*
+         * ====================================================
+         * B59 - BIOS PAL region bridge
+         * ====================================================
+         *
+         * Appliquer une seule fois, seulement quand le vrai overlay
+         * attendu est present en RAM.
+         */
+        if (
+            memory_status == 0
+            &&
+            g_b59_pal_patch_count == 0u
+        )
+        {
+            uint32_t ov0 =
+                fm_memory_read_word(
+                    0x801680F4u
+                );
+
+            uint32_t ov1 =
+                fm_memory_read_word(
+                    0x801680F8u
+                );
+
+            uint32_t ov2 =
+                fm_memory_read_word(
+                    0x801680FCu
+                );
+
+            uint32_t ov3 =
+                fm_memory_read_word(
+                    0x80168100u
+                );
+
+            if (
+                ov0 == 0x3C03BFC8u
+                &&
+                ov1 == 0x9063FF52u
+                &&
+                ov2 == 0x24020045u
+                &&
+                ov3 == 0x1062001Au
+            )
+            {
+                g_b59_pal_patch_before =
+                    ov1;
+
+                /*
+                 * addiu v1,zero,0x45
+                 */
+                fm_memory_write_word(
+                    0x801680F8u,
+                    0x24030045u
+                );
+
+                g_b59_pal_patch_after =
+                    fm_memory_read_word(
+                        0x801680F8u
+                    );
+
+                ++g_b59_pal_patch_count;
+            }
+        }
+
+
+        /*
+         * ====================================================
+         * B70 - GPU queue type-0x20 completion bridge
+         * ====================================================
+         */
+        if (
+            game_running
+            &&
+            cpu
+            &&
+            cpu->pc >= 0x80046750u
+            &&
+            cpu->pc < 0x800469ACu
+        )
+        {
+            uint32_t gfx_ctx =
+                fm_memory_read_word(
+                    0x8009C7E0u
+                );
+
+            if (
+                gfx_ctx >= 0x80000000u
+                &&
+                gfx_ctx < 0x80200000u
+            )
+            {
+                uint32_t count =
+                    fm_memory_read_half(
+                        gfx_ctx + 0x4Cu
+                    );
+
+                uint32_t type0 =
+                    fm_memory_read_byte(
+                        gfx_ctx + 0x80u
+                    );
+
+                uint32_t marker0 =
+                    fm_memory_read_word(
+                        gfx_ctx + 0x90u
+                    );
+
+                g_b70_last_ctx = gfx_ctx;
+                g_b70_last_count = count;
+                g_b70_last_type = type0;
+                g_b70_last_marker_before = marker0;
+
+                if (count > 1u)
+                {
+                    g_b70_entry1_type =
+                        fm_memory_read_byte(
+                            gfx_ctx + 0xB0u
+                        );
+
+                    g_b70_entry1_marker =
+                        fm_memory_read_word(
+                            gfx_ctx + 0xC0u
+                        );
+                }
+                else
+                {
+                    g_b70_entry1_type = 0u;
+                    g_b70_entry1_marker = 0u;
+                }
+
+                if (
+                    count != 0u
+                    &&
+                    type0 == 0x20u
+                    &&
+                    marker0 != 0x20u
+                )
+                {
+                    /*
+                     * Publier uniquement la completion manquante.
+                     */
+                    fm_memory_write_word(
+                        gfx_ctx + 0x90u,
+                        0x20u
+                    );
+
+                    ++g_b70_ready_bridge;
+                }
+
+                g_b70_last_marker_after =
+                    fm_memory_read_word(
+                        gfx_ctx + 0x90u
+                    );
+            }
+        }
+
+
+        /*
+         * ====================================================
+         * B75 - settle de l'animation d'entree du menu
+         * ====================================================
+         */
+        if (
+            game_running
+            &&
+            g_b73_hit_menu_init != 0u
+            &&
+            g_b73_hit_menu_update > 24u
+            &&
+            g_b75_menu_entrance_bridge == 0u
+            &&
+            fm_memory_read_word(0x8009C898u) == 0x80180B4Cu
+        )
+        {
+            uint32_t p0 =
+                fm_memory_read_word(0x80184794u);
+
+            uint32_t c0 =
+                fm_memory_read_byte(0x801847C0u);
+
+            uint32_t c5 =
+                fm_memory_read_byte(0x801847C5u);
+
+            /*
+             * Signature exacte vue en B74 :
+             * objet 0 hors ecran + timer d'entree encore a 16.
+             */
+            if (
+                p0 >= 0x80000000u
+                &&
+                p0 < 0x80200000u
+                &&
+                fm_memory_read_half(p0 + 0x60u) == 0x0010u
+                &&
+                (int16_t)fm_memory_read_half(p0 + 0x30u)
+                    ==
+                    (int16_t)fm_memory_read_half(p0 + 0x36u)
+            )
+            {
+                uint32_t settled = 0u;
+
+                g_b75_last_c0 = c0;
+                g_b75_last_c5_before = c5;
+
+                for (unsigned i = 0; i < 11u; ++i)
+                {
+                    uint32_t obj =
+                        fm_memory_read_word(
+                            0x80184794u
+                            +
+                            i * 4u
+                        );
+
+                    if (
+                        obj < 0x80000000u
+                        ||
+                        obj >= 0x80200000u
+                    )
+                    {
+                        continue;
+                    }
+
+                    uint16_t flags =
+                        fm_memory_read_half(
+                            obj + 0x08u
+                        );
+
+                    int visible_group;
+
+                    if (c0 < 5u)
+                    {
+                        visible_group =
+                            i < 5u;
+                    }
+                    else
+                    {
+                        visible_group =
+                            i >= 5u;
+                    }
+
+                    if (visible_group)
+                    {
+                        flags |= 0x0040u;
+                    }
+                    else
+                    {
+                        flags &= (uint16_t)~0x0040u;
+                    }
+
+                    /*
+                     * Little-endian halfword writes using the byte
+                     * primitive already used throughout main.c.
+                     */
+                    fm_memory_write_byte(
+                        obj + 0x08u,
+                        (uint8_t)(flags & 0xFFu)
+                    );
+                    fm_memory_write_byte(
+                        obj + 0x09u,
+                        (uint8_t)(flags >> 8)
+                    );
+
+                    uint16_t target =
+                        fm_memory_read_half(
+                            obj + 0x38u
+                        );
+
+                    fm_memory_write_byte(
+                        obj + 0x30u,
+                        (uint8_t)(target & 0xFFu)
+                    );
+                    fm_memory_write_byte(
+                        obj + 0x31u,
+                        (uint8_t)(target >> 8)
+                    );
+
+                    fm_memory_write_byte(
+                        obj + 0x60u,
+                        0u
+                    );
+                    fm_memory_write_byte(
+                        obj + 0x61u,
+                        0u
+                    );
+
+                    ++settled;
+                }
+
+                /*
+                 * L'animation est maintenant terminee.
+                 * Le vrai 80180390 peut reprendre directement sa
+                 * branche interactive (navigation / validation).
+                 */
+                fm_memory_write_byte(
+                    0x801847C5u,
+                    0u
+                );
+
+                g_b75_last_c5_after =
+                    fm_memory_read_byte(
+                        0x801847C5u
+                    );
+
+                g_b75_objects_settled =
+                    settled;
+
+                g_b75_menu_entrance_frame =
+                    frame;
+
+                ++g_b75_menu_entrance_bridge;
+            }
         }
 
 
@@ -5385,6 +7742,42 @@ int main(void)
                     {
                         g_b37_last_chcr_after = chcr;
                     }
+
+                    /*
+                     * B71 - si START/BUSY est bien retombe, la condition
+                     * du do/while PS1 est satisfaite. Sortir explicitement
+                     * du basic-block de polling et laisser le vrai code
+                     * enchainer sur l'attente GPUSTAT.
+                     */
+                    if (
+                        (
+                            g_b37_last_chcr_after
+                            &
+                            0x01000000u
+                        )
+                        ==
+                        0u
+                    )
+                    {
+                        g_b71_last_escape_from =
+                            dispatch_address;
+
+                        cpu->pc =
+                            0x80081AC0u;
+
+                        dispatch_address =
+                            cpu->pc;
+
+                        phys =
+                            dispatch_address
+                            &
+                            0x1FFFFFFFu;
+
+                        g_b71_last_escape_to =
+                            dispatch_address;
+
+                        ++g_b71_dma_loop_escape;
+                    }
                 }
 
                 if (
@@ -5438,7 +7831,25 @@ int main(void)
                     }
                     ++g_b33_ctx_restored;
 
-                    cpu->gpr[2] = 1u;
+                    if (g_b68_return_req_id != 0u)
+                    {
+                        /*
+                         * Retour d'un vrai 8007B78C HLE.
+                         * L'ID est associe au callback qui vient de finir,
+                         * donc il ne peut plus etre ecrase par une requete
+                         * plus recente.
+                         */
+                        cpu->gpr[2] = g_b68_return_req_id;
+                        g_b68_return_req_id = 0u;
+                    }
+                    else
+                    {
+                        /*
+                         * Appel raw 8007BA00 : API booleenne classique.
+                         */
+                        cpu->gpr[2] = 1u;
+                    }
+
                     cpu->pc = resume_pc;
                     cpu->gpr[0] = 0u;
 
@@ -5473,6 +7884,17 @@ int main(void)
                     g_b35_finalizer_active = 0u;
                     ++g_b35_finalizer_done;
                     g_b35_c460_after = cpu->read_word(0x8009C460u);
+
+
+                    if (g_b50_cleanup_active)
+                    {
+                        g_b50_cleanup_active = 0u;
+                        ++g_b50_cleanup_done;
+                        g_b50_c460_after =
+                            cpu->read_word(0x8009C460u);
+                        g_b50_c484_after =
+                            cpu->read_word(0x8009C484u);
+                    }
 
                     /* B36: ne surtout pas remplacer RA par PC.
                      * Sur B35 cela pouvait transformer VSync en boucle
@@ -5563,6 +7985,71 @@ int main(void)
                 }
 
                 /*
+                 * =================================================
+                 * B51 - queue de secteur partielle dans 43CD4
+                 * =================================================
+                 *
+                 * Ne rien inventer dans la structure CD. Si 43CD4 est
+                 * deja entre, que des secteurs ont ete livres et qu'il
+                 * reste entre 1 et 0x800 octets sans evenement DataReady
+                 * arme, rearmer exactement le callback B34.
+                 */
+                if (
+                    g_hit_delay_wait != 0u
+                    &&
+                    g_b47_m_43f3c == 0u
+                    &&
+                    g_b32_getsec_ok != 0u
+                    &&
+                    !g_b34_ready_pending
+                    &&
+                    !g_b34_ready_active
+                    &&
+                    !g_b33_cb_active
+                    &&
+                    !g_b35_finalizer_active
+                )
+                {
+                    const uint32_t req =
+                        0x800EB1B8u;
+
+                    uint32_t remaining =
+                        cpu->read_word(req + 0x10u);
+
+                    uint32_t type =
+                        cpu->read_byte(req + 0x46u);
+
+                    uint32_t c460 =
+                        cpu->read_word(0x8009C460u);
+
+                    uint32_t c484 =
+                        cpu->read_word(0x8009C484u);
+
+                    g_b51_last_rem = remaining;
+                    g_b51_last_type = type;
+                    g_b51_last_c460 = c460;
+                    g_b51_last_c484 = c484;
+
+                    if (
+                        remaining > 0u
+                        &&
+                        remaining <= 0x800u
+                        &&
+                        (
+                            (c460 & 0x02000030u) != 0u
+                            ||
+                            c484 != 0u
+                        )
+                    )
+                    {
+                        g_b34_ready_pending = 1u;
+                        g_b34_ready_arm_frame = frame + 1u;
+                        ++g_b51_rearm_count;
+                    }
+                }
+
+
+                /*
                  * B34 : livraison d'un vrai CdlDataReady au callback
                  * moteur 80013B44. Ce callback appelle ensuite
                  * FUN_8007E968, qui est deja ponte par B32 vers disc.bin.
@@ -5622,6 +8109,159 @@ int main(void)
                 }
 
 
+                /*
+                 * ============================================
+                 * B50 - debloque l'attente 43CD4 avec le VRAI
+                 * cleanup guest 800143D4.
+                 * ============================================
+                 *
+                 * On ne le fait qu'une seule fois, uniquement si :
+                 *   - on entre reellement dans FUN_80043CD4 ;
+                 *   - au moins un secteur CD a ete livre ;
+                 *   - la requete courante n'a plus d'octets ;
+                 *   - C460/C484 portent encore un etat "busy".
+                 *
+                 * Aucun flag n'est modifie a la main : 800143D4 fait
+                 * exactement le nettoyage du code PS1 original.
+                 */
+                if (
+                    phys == 0x00043CD4u
+                    &&
+                    !g_b50_cleanup_triggered
+                    &&
+                    !g_b35_finalizer_active
+                    &&
+                    g_b32_getsec_ok != 0u
+                )
+                {
+                    const uint32_t req =
+                        0x800EB1B8u;
+
+                    uint32_t remaining =
+                        cpu->read_word(req + 0x10u);
+
+                    uint32_t c460 =
+                        cpu->read_word(0x8009C460u);
+
+                    uint32_t c484 =
+                        cpu->read_word(0x8009C484u);
+
+                    g_b50_remaining =
+                        remaining;
+
+                    g_b50_c460_before =
+                        c460;
+
+                    g_b50_c484_before =
+                        c484;
+
+                    if (
+                        (int32_t)remaining <= 0
+                        &&
+                        (
+                            (c460 & 0x02000030u) != 0u
+                            ||
+                            c484 != 0u
+                        )
+                    )
+                    {
+                        ++g_b50_cleanup_triggered;
+                        g_b50_cleanup_active = 1u;
+
+                        /*
+                         * Reutiliser le mecanisme B35/B36 deja valide :
+                         * sauvegarder le contexte courant, executer le
+                         * vrai cleanup, puis reprendre exactement 43CD4.
+                         */
+                        g_b35_finalizer_resume =
+                            dispatch_address;
+
+                        g_b35_saved_pc =
+                            dispatch_address;
+
+                        g_b35_saved_ra =
+                            cpu->gpr[31];
+
+                        for (unsigned i = 0; i < 32u; ++i)
+                        {
+                            g_b35_saved_gpr[i] =
+                                cpu->gpr[i];
+                        }
+
+                        ++g_b35_ctx_saved;
+
+                        g_b35_c460_before =
+                            c460;
+
+                        g_b35_finalizer_active =
+                            1u;
+
+                        ++g_b35_finalizer_started;
+
+                        cpu->pc =
+                            g_b35_finalizer_addr;
+
+                        cpu->gpr[31] =
+                            g_b35_finalizer_sentinel;
+
+                        cpu->gpr[0] =
+                            0u;
+
+                        static_miss =
+                            0;
+
+                        continue;
+                    }
+                }
+
+
+                /*
+                 * ============================================
+                 * B53 - FAST 43CD4
+                 * ============================================
+                 *
+                 * 43CD4(0xB4) garde sa vraie condition de sortie
+                 * C460/C484. On ne reduit que son compteur de delai.
+                 */
+                if (
+                    phys == 0x00043CD4u
+                    &&
+                    cpu->gpr[4] == 0x000000B4u
+                )
+                {
+                    g_b53_fast43cd4_last_in =
+                        cpu->gpr[4];
+
+                    cpu->gpr[4] =
+                        2u;
+
+                    g_b53_fast43cd4_last_out =
+                        cpu->gpr[4];
+
+                    ++g_b53_fast43cd4_hits;
+                }
+
+
+                /*
+                 * ============================================
+                 * B62 - wrappers libgte HLE
+                 * ============================================
+                 *
+                 * Intercepter avant le code recompilé : sinon
+                 * gte_execute() stoppe encore le runtime.
+                 */
+                if (
+                    fm_b62_try_gte_helper(
+                        cpu,
+                        phys
+                    )
+                )
+                {
+                    static_miss = 0;
+                    continue;
+                }
+
+
                 fm_trace_dispatch(
                     cpu,
                     dispatch_address,
@@ -5673,6 +8313,11 @@ int main(void)
 
                     last_dispatch_address =
                         dispatch_address;
+
+                    g_b65_stop_code = 1u;
+                    g_b65_stop_pc = dispatch_address;
+                    g_b65_stop_ra = cpu->gpr[31];
+                    g_b65_stop_detail = low_jump_opcode;
 
                     static_miss = 0;
                     game_running = 0;
@@ -6181,9 +8826,90 @@ int main(void)
                         continue;
                     }
 
+                    g_b65_stop_code = 2u;
+                    g_b65_stop_pc = dispatch_address;
+                    g_b65_stop_ra = cpu->gpr[31];
+                    g_b65_stop_detail =
+                        (
+                            (g_bios_debug_addr & 0xFFFFu)
+                            << 8
+                        )
+                        |
+                        (
+                            g_bios_debug_fn & 0xFFu
+                        );
+
                     static_miss = 1;
                     game_running = 0;
                     break;
+                }
+
+
+                /*
+                 * ============================================
+                 * B68 - FUN_8007BDD4(request_id, result)
+                 * ============================================
+                 *
+                 * Le vrai code cherche l'ID dans un historique
+                 * circulaire. Notre HLE fait maintenant pareil.
+                 */
+                if (phys == 0x0007BDD4u)
+                {
+                    uint32_t req_id = cpu->gpr[4];
+                    uint32_t out = cpu->gpr[5];
+                    uint32_t slot =
+                        req_id
+                        &
+                        (B68_REQ_SLOTS - 1u);
+
+                    ++g_b67_poll_calls;
+                    g_b67_last_poll_id = req_id;
+                    g_b67_last_out = out;
+                    g_b68_last_slot = slot;
+                    g_b68_last_poll_status = 0u;
+
+                    if (g_b68_ids[slot] == req_id)
+                    {
+                        uint32_t status =
+                            g_b68_status[slot];
+
+                        g_b68_last_poll_status =
+                            status;
+
+                        if (status != 0u)
+                        {
+                            if (out != 0u)
+                            {
+                                for (unsigned i = 0; i < 8u; ++i)
+                                {
+                                    cpu->write_byte(
+                                        out + i,
+                                        g_b68_result[slot][i]
+                                    );
+                                }
+                            }
+
+                            cpu->gpr[2] = status;
+                            ++g_b67_poll_complete;
+                        }
+                        else
+                        {
+                            cpu->gpr[2] = 0u;
+                            ++g_b68_poll_wait;
+                        }
+
+                        cpu->pc = cpu->gpr[31];
+                        cpu->gpr[0] = 0u;
+
+                        static_miss = 0;
+                        continue;
+                    }
+
+                    /*
+                     * Ce n'est pas une requete creee par notre HLE :
+                     * laisser le vrai guest verifier sa propre file.
+                     */
+                    ++g_b67_poll_miss;
                 }
 
 
@@ -6207,6 +8933,55 @@ int main(void)
                     uint32_t callback = cpu->gpr[6];
                     uint32_t context = cpu->gpr[7];
                     uint32_t resume_pc = cpu->gpr[31];
+
+                    /*
+                     * B68 : request id + slot historique.
+                     */
+                    ++g_b67_req_seq;
+                    if (g_b67_req_seq == 0u)
+                    {
+                        ++g_b67_req_seq;
+                    }
+
+                    g_b67_req_id = g_b67_req_seq;
+
+                    uint32_t b68_slot =
+                        g_b67_req_id
+                        &
+                        (B68_REQ_SLOTS - 1u);
+
+                    g_b68_ids[b68_slot] =
+                        g_b67_req_id;
+
+                    g_b68_status[b68_slot] =
+                        0u;
+
+                    for (unsigned i = 0; i < 8u; ++i)
+                    {
+                        g_b68_result[b68_slot][i] = 0u;
+                    }
+
+                    ++g_b68_alloc_count;
+
+                    /*
+                     * Le callback prend-il vraiment le CPU ?
+                     * Si oui, la sentinelle devra rendre l'ID au caller.
+                     * Si non, on rendra l'ID directement apres schedule.
+                     */
+                    int b68_callback_will_run =
+                        (
+                            !g_b33_cb_active
+                            &&
+                            callback >= 0x80010000u
+                            &&
+                            callback < 0x801E0000u
+                        );
+
+                    if (b68_callback_will_run)
+                    {
+                        g_b68_return_req_id =
+                            g_b67_req_id;
+                    }
 
                     ++g_b33_async_calls;
                     g_cd_last_cmd = command;
@@ -6240,6 +9015,36 @@ int main(void)
                         params,
                         context
                     );
+
+                    /*
+                     * Le backend host a deja termine la commande et B66
+                     * a publie CdlComplete. Le caller ne pourra observer
+                     * ce slot qu'apres le retour du callback guest.
+                     */
+                    for (unsigned i = 0; i < 8u; ++i)
+                    {
+                        g_b68_result[b68_slot][i] =
+                            cpu->read_byte(
+                                g_b33_result_scratch + i
+                            );
+                    }
+
+                    g_b68_status[b68_slot] = 2u;
+
+                    g_b67_req_pending = 0u;
+                    g_b67_req_ready = 1u;
+                    g_b67_req_status = 2u;
+
+                    /*
+                     * Callback absent ou deja occupe : schedule a rendu
+                     * directement la main au caller. Lui rendre alors
+                     * l'ID haut niveau au lieu du bool raw.
+                     */
+                    if (!b68_callback_will_run)
+                    {
+                        cpu->gpr[2] =
+                            g_b67_req_id;
+                    }
 
                     static_miss = 0;
                     continue;
@@ -6348,13 +9153,53 @@ int main(void)
                         req = 0x800EB1B8u;
                     }
 
-                    uint32_t lba =
-                        cpu->read_word(req + 0x24u);
-
+                    /*
+                     * B57 IMPORTANT:
+                     *
+                     * req+0x24 = LBA logique de DEPART de la requete.
+                     * Il reste fixe pendant que la tete CD avance.
+                     */
                     uint32_t remaining =
                         cpu->read_word(req + 0x10u);
 
+                    uint32_t base_lba =
+                        cpu->read_word(req + 0x24u);
+
+                    int new_request =
+                        (
+                            g_b57_req != req
+                            ||
+                            g_b57_base_lba != base_lba
+                            ||
+                            (
+                                g_b57_last_remaining != 0u
+                                &&
+                                remaining > g_b57_last_remaining
+                            )
+                        );
+
+                    if (new_request)
+                    {
+                        g_b57_req = req;
+                        g_b57_base_lba = base_lba;
+                        g_b57_next_lba = base_lba;
+                        g_b57_read_index = 0u;
+                        ++g_b57_resets;
+                    }
+
+                    uint32_t lba =
+                        g_b57_next_lba;
+
                     ++g_b32_getsec_calls;
+                    ++g_b56_stream_reads;
+
+                    if (g_b56_stream_reads == 1u)
+                    {
+                        g_b56_stream_first_lba = lba;
+                    }
+
+                    g_b56_stream_last_lba = lba;
+
                     g_b32_last_req = req;
                     g_b32_last_lba = lba;
                     g_b32_last_dst = destination;
@@ -6415,6 +9260,19 @@ int main(void)
                         g_cd_error = 0;
 
                         /*
+                         * Une CdlDataReady consomme exactement le secteur
+                         * courant. Avancer le curseur de CETTE requete.
+                         */
+                        ++g_b57_next_lba;
+                        ++g_b57_read_index;
+
+                        /*
+                         * Garder g_cd_lba coherent pour CdlGetlocL et les
+                         * autres HLE qui consultent la tete CD courante.
+                         */
+                        g_cd_lba = g_b57_next_lba;
+
+                        /*
                          * FUN_8007E968 renvoie 1 lorsque le transfert DMA
                          * s'est termine correctement.
                          */
@@ -6427,6 +9285,9 @@ int main(void)
 
                         cpu->gpr[2] = 0u;
                     }
+
+                    g_b57_last_remaining =
+                        remaining;
 
                     cpu->pc = cpu->gpr[31];
                     cpu->gpr[0] = 0u;
@@ -7228,6 +10089,11 @@ int main(void)
 
                         if (cpu->pc == 0)
                         {
+                            g_b65_stop_code = 3u;
+                            g_b65_stop_pc = 0u;
+                            g_b65_stop_ra = cpu->gpr[31];
+                            g_b65_stop_detail = probe.pc;
+
                             game_running = 0;
                             static_miss = 0;
                             break;
@@ -7274,6 +10140,11 @@ int main(void)
                     /*
                      * Instruction actuellement non supportée.
                      */
+                    g_b65_stop_code = 4u;
+                    g_b65_stop_pc = interp.pc;
+                    g_b65_stop_ra = cpu->gpr[31];
+                    g_b65_stop_detail = interp.instruction;
+
                     static_miss = 0;
                     game_running = 0;
                     break;
@@ -7283,6 +10154,11 @@ int main(void)
                 /*
                  * Native runtime stop.
                  */
+                g_b65_stop_code = 5u;
+                g_b65_stop_pc = probe.pc;
+                g_b65_stop_ra = cpu ? cpu->gpr[31] : 0u;
+                g_b65_stop_detail = (uint32_t)probe.reason;
+
                 game_running = 0;
                 break;
             }
@@ -7576,10 +10452,9 @@ int main(void)
          * ====================================================
          */
 
-        uint16_t pad =
-            fm_pad_bits(
-                held
-            );
+        /*
+         * B58.2 : pad est deja calcule au debut de la frame.
+         */
 
 
         /*
@@ -7621,7 +10496,147 @@ int main(void)
             FMGpuDebugStats gpu_debug;
             fm_gpu_debug_stats(&gpu_debug);
 
-            printf("BUILD B46-GPU-SPRITE-PROVENANCE\n");
+            /*
+             * =================================================
+             * B55 - affichage COMPACT
+             * =================================================
+             *
+             * B54 contenait les bonnes informations, mais elles
+             * etaient poussees hors de l'ecran par les anciennes
+             * lignes de diagnostic. On affiche ici uniquement les
+             * donnees necessaires pour identifier l'opcode qui
+             * bloque 801680F4.
+             */
+            printf("BUILD B75-MENU-ENTRANCE-BRIDGE\n");
+
+            printf(
+                "RUN:%c CPU:%08lX RA:%08lX F:%lu I:%s\n",
+                game_running ? 'Y' : 'N',
+                cpu ? (unsigned long)cpu->pc : 0ul,
+                cpu ? (unsigned long)cpu->gpr[31] : 0ul,
+                (unsigned long)frame,
+                interp_ran
+                    ? fm_interp_stop_name(interp.reason)
+                    : "NONE"
+            );
+
+            printf(
+                "MENU I/U/D:%lu/%lu/%lu CB:%08lX draw:%lu\n",
+                (unsigned long)g_b73_hit_menu_init,
+                (unsigned long)g_b73_hit_menu_update,
+                (unsigned long)g_b73_hit_menu_destroy,
+                (unsigned long)fm_memory_read_word(0x8009C898u),
+                (unsigned long)g_b74_hit_menu_draw_cb
+            );
+
+            printf(
+                "ENT bridge:%lu frame:%lu objs:%lu C0:%lu C5:%lu>%lu\n",
+                (unsigned long)g_b75_menu_entrance_bridge,
+                (unsigned long)g_b75_menu_entrance_frame,
+                (unsigned long)g_b75_objects_settled,
+                (unsigned long)g_b75_last_c0,
+                (unsigned long)g_b75_last_c5_before,
+                (unsigned long)g_b75_last_c5_after
+            );
+
+            {
+                uint32_t p0 =
+                    fm_memory_read_word(0x80184794u);
+
+                uint32_t p4 =
+                    fm_memory_read_word(0x801847A4u);
+
+                uint32_t p5 =
+                    fm_memory_read_word(0x801847A8u);
+
+                if (
+                    p0 >= 0x80000000u
+                    &&
+                    p0 < 0x80200000u
+                )
+                {
+                    printf(
+                        "O0 %08lX fl:%04lX x:%ld to:%ld t:%ld\n",
+                        (unsigned long)p0,
+                        (unsigned long)fm_memory_read_half(p0 + 0x08u),
+                        (long)(int16_t)fm_memory_read_half(p0 + 0x30u),
+                        (long)(int16_t)fm_memory_read_half(p0 + 0x38u),
+                        (long)(int16_t)fm_memory_read_half(p0 + 0x60u)
+                    );
+                }
+
+                if (
+                    p4 >= 0x80000000u
+                    &&
+                    p4 < 0x80200000u
+                )
+                {
+                    printf(
+                        "O4 %08lX fl:%04lX x:%ld t:%ld  ",
+                        (unsigned long)p4,
+                        (unsigned long)fm_memory_read_half(p4 + 0x08u),
+                        (long)(int16_t)fm_memory_read_half(p4 + 0x30u),
+                        (long)(int16_t)fm_memory_read_half(p4 + 0x60u)
+                    );
+                }
+
+                if (
+                    p5 >= 0x80000000u
+                    &&
+                    p5 < 0x80200000u
+                )
+                {
+                    printf(
+                        "O5 fl:%04lX x:%ld t:%ld\n",
+                        (unsigned long)fm_memory_read_half(p5 + 0x08u),
+                        (long)(int16_t)fm_memory_read_half(p5 + 0x30u),
+                        (long)(int16_t)fm_memory_read_half(p5 + 0x60u)
+                    );
+                }
+                else
+                {
+                    printf("\n");
+                }
+            }
+
+            printf(
+                "SEL:%lu C1..C9:%02lX/%02lX/%02lX/%02lX/%02lX/%02lX/%02lX/%02lX/%02lX\n",
+                (unsigned long)fm_memory_read_byte(0x801847C0u),
+                (unsigned long)fm_memory_read_byte(0x801847C1u),
+                (unsigned long)fm_memory_read_byte(0x801847C2u),
+                (unsigned long)fm_memory_read_byte(0x801847C3u),
+                (unsigned long)fm_memory_read_byte(0x801847C4u),
+                (unsigned long)fm_memory_read_byte(0x801847C5u),
+                (unsigned long)fm_memory_read_byte(0x801847C6u),
+                (unsigned long)fm_memory_read_byte(0x801847C7u),
+                (unsigned long)fm_memory_read_byte(0x801847C8u),
+                (unsigned long)fm_memory_read_byte(0x801847C9u)
+            );
+
+            printf(
+                "PAD H/E/R:%04lX/%04lX/%04lX START:%lu\n",
+                (unsigned long)(fm_memory_read_word(0x8009C710u) & 0xFFFFu),
+                (unsigned long)(fm_memory_read_word(0x8009C72Cu) & 0xFFFFu),
+                (unsigned long)(fm_memory_read_word(0x8009C728u) & 0xFFFFu),
+                (unsigned long)g_b72_start_down_count
+            );
+
+            printf(
+                "GPU gp0:%llu disp:%lu,%lu view:%lu,%lu nz:%lu\n",
+                (unsigned long long)gpu_debug.gp0_words,
+                (unsigned long)fm_gpu_display_x(),
+                (unsigned long)fm_gpu_display_y(),
+                (unsigned long)g_vram_view_x,
+                (unsigned long)g_vram_view_y,
+                (unsigned long)g_vram_view_nonzero
+            );
+
+            /*
+             * Les anciens diagnostics restent dans le fichier pour
+             * pouvoir les reactiver, mais sont masques dans B75.
+             */
+            if (0)
+            {
 
             printf(
                 "BG:%s err:%d layout:PAL idx:%03lX\n",
@@ -8359,6 +11374,37 @@ int main(void)
             }
 
             printf(
+                "43PATH EB8/F3C/F54/FF8:%lu/%lu/%lu/%lu\n",
+                (unsigned long)g_b47_m_43eb8,
+                (unsigned long)g_b47_m_43f3c,
+                (unsigned long)g_b47_m_43f54,
+                (unsigned long)g_b47_m_43ff8
+            );
+
+            printf(
+                "43PATH 4054/4064/406C:%lu/%lu/%lu last:%05lX\n",
+                (unsigned long)g_b47_m_44054,
+                (unsigned long)g_b47_m_44064,
+                (unsigned long)g_b47_m_4406c,
+                (unsigned long)g_b47_last_milestone
+            );
+
+            printf(
+                "OV16 F4/160/R:%lu/%lu/%lu V0:%08lX\n",
+                (unsigned long)g_b47_680f4_enter,
+                (unsigned long)g_b47_68160_enter,
+                (unsigned long)g_b47_68160_return,
+                (unsigned long)g_b47_68160_last_v0
+            );
+
+            printf(
+                "OV160 zero/nonzero:%lu/%lu RA:%08lX\n",
+                (unsigned long)g_b47_68160_v0_zero,
+                (unsigned long)g_b47_68160_v0_nonzero,
+                (unsigned long)g_b47_68160_last_ra
+            );
+
+            printf(
                 "B38 STAT:%08lX ring:%lu/%lu PC:%08lX\n",
                 (unsigned long)g_b37_last_gpustat,
                 (unsigned long)g_b37_ring_write,
@@ -8468,6 +11514,91 @@ int main(void)
             );
 
             /*
+             * =================================================
+             * B48 - diagnostic du verrou 80042ADC / GTE
+             * =================================================
+             *
+             * La capture B47 termine autour de 80042ADC, juste
+             * apres l'appel de FUN_800891E8. Cette chaine appelle
+             * les helpers GTE (notamment 80087B48).
+             *
+             * On affiche volontairement ces lignes EN DERNIER afin
+             * qu'elles restent visibles même lorsque la console
+             * inférieure défile.
+             */
+            printf(
+                "B54 P:%s CPU:%08lX I:%s frame:%lu\n",
+                probe_ran
+                    ? fm_runtime_stop_name(probe.reason)
+                    : "NONE",
+                cpu ? (unsigned long)cpu->pc : 0ul,
+                interp_ran
+                    ? fm_interp_stop_name(interp.reason)
+                    : "NONE",
+                (unsigned long)frame
+            );
+
+            printf(
+                "B54 IP:%08lX INS:%08lX op:%02lX fn:%02lX\n",
+                interp_ran
+                    ? (unsigned long)interp.pc
+                    : 0ul,
+                interp_ran
+                    ? (unsigned long)interp.instruction
+                    : 0ul,
+                interp_ran
+                    ? (unsigned long)(interp.instruction >> 26)
+                    : 0ul,
+                interp_ran
+                    ? (unsigned long)(interp.instruction & 0x3Fu)
+                    : 0ul
+            );
+
+            printf(
+                "B54 F4:%08lX %08lX %08lX %08lX\n",
+                (unsigned long)fm_memory_read_word(0x801680F4u),
+                (unsigned long)fm_memory_read_word(0x801680F8u),
+                (unsigned long)fm_memory_read_word(0x801680FCu),
+                (unsigned long)fm_memory_read_word(0x80168100u)
+            );
+
+            printf(
+                "B54 160:%08lX %08lX %08lX %08lX\n",
+                (unsigned long)fm_memory_read_word(0x80168160u),
+                (unsigned long)fm_memory_read_word(0x80168164u),
+                (unsigned long)fm_memory_read_word(0x80168168u),
+                (unsigned long)fm_memory_read_word(0x8016816Cu)
+            );
+
+            printf(
+                "B54 FAST43:%lu a0:%lu>%lu CD:%08lX/%08lX\n",
+                (unsigned long)g_b53_fast43cd4_hits,
+                (unsigned long)g_b53_fast43cd4_last_in,
+                (unsigned long)g_b53_fast43cd4_last_out,
+                (unsigned long)fm_memory_read_word(0x8009C460u),
+                (unsigned long)fm_memory_read_word(0x8009C484u)
+            );
+
+            printf(
+                "B54 PATH 7E8/F3C/F54/FF8:%lu/%lu/%lu/%lu\n",
+                (unsigned long)g_b49_fn_7e8e8,
+                (unsigned long)g_b47_m_43f3c,
+                (unsigned long)g_b47_m_43f54,
+                (unsigned long)g_b47_m_43ff8
+            );
+
+            printf(
+                "B54 OV F4/160/R ZN:%lu/%lu/%lu %lu/%lu\n",
+                (unsigned long)g_b47_680f4_enter,
+                (unsigned long)g_b47_68160_enter,
+                (unsigned long)g_b47_68160_return,
+                (unsigned long)g_b47_68160_v0_zero,
+                (unsigned long)g_b47_68160_v0_nonzero
+            );
+
+            }
+
+            /*
              * Reset des compteurs de mesure de rendu sans
              * consommer une ligne supplémentaire à l'écran.
              */
@@ -8526,6 +11657,56 @@ int main(void)
                     cpu,
                     frame
                 );
+
+                /*
+                 * B72 - conserver le dernier etat input guest non nul.
+                 * FUN_8003CEA4, executee par le callback VBlank,
+                 * transforme 70C en held/edge/repeat.
+                 */
+                {
+                    uint32_t b72_raw =
+                        fm_memory_read_word(0x8009C70Cu)
+                        &
+                        0xFFFFu;
+
+                    uint32_t b72_held =
+                        fm_memory_read_word(0x8009C710u)
+                        &
+                        0xFFFFu;
+
+                    uint32_t b72_edge =
+                        fm_memory_read_word(0x8009C72Cu)
+                        &
+                        0xFFFFu;
+
+                    uint32_t b72_rep =
+                        fm_memory_read_word(0x8009C728u)
+                        &
+                        0xFFFFu;
+
+                    if (
+                        b72_raw != 0u
+                        ||
+                        b72_held != 0u
+                        ||
+                        b72_edge != 0u
+                        ||
+                        b72_rep != 0u
+                    )
+                    {
+                        g_b72_guest_raw_latched = b72_raw;
+                        g_b72_guest_held_latched = b72_held;
+                        g_b72_guest_edge_latched = b72_edge;
+                        g_b72_guest_rep_latched = b72_rep;
+                        g_b72_guest_nonzero_frame = frame;
+                    }
+
+                    if ((b72_edge & 0x0008u) != 0u)
+                    {
+                        ++g_b72_edge8_hits;
+                        g_b72_edge8_last_frame = frame;
+                    }
+                }
 
                 /*
                  * =====================================================
