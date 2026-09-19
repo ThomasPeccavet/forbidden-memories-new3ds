@@ -60,6 +60,122 @@ static uint64_t g_packet_other = 0;
 
 static uint64_t g_upload_data_words = 0;
 
+/* B28: diagnostic/preservation des clears framebuffer. */
+static uint64_t g_fill_suppressed = 0;
+
+/*
+ * B42 - mode video natif.
+ *
+ * Les anciens builds supprimaient volontairement les gros clears noirs
+ * pour conserver le background WA_MRG injecte a la main. Maintenant que
+ * le runtime CD/GPU avance reellement, le mode normal doit laisser le jeu
+ * effacer ses propres framebuffers.
+ */
+static int g_preserve_background_clears = 0;
+static int g_last_fill_x = 0;
+static int g_last_fill_y = 0;
+static int g_last_fill_w = 0;
+static int g_last_fill_h = 0;
+static uint16_t g_last_fill_color = 0;
+
+/*
+ * B29 - trace des trois dernieres primitives GP0 DRAW.
+ * Base propre reconstruite depuis B28.
+ */
+typedef struct FMB29DrawTrace
+{
+    uint8_t opcode;
+    uint8_t words;
+    uint16_t texpage;
+    int16_t off_x;
+    int16_t off_y;
+    uint16_t area_x1;
+    uint16_t area_y1;
+    uint16_t area_x2;
+    uint16_t area_y2;
+    uint32_t cmd[8];
+} FMB29DrawTrace;
+
+static FMB29DrawTrace g_b29_draw_trace[3];
+static unsigned g_b29_draw_trace_head = 0u;
+static unsigned g_b29_draw_trace_count = 0u;
+
+/*
+ * B38 - trace ciblee des gros rectangles/sprites.
+ * Aucun changement de rendu : diagnostic uniquement.
+ */
+static uint32_t g_b38_bigrect_count = 0u;
+static uint8_t  g_b38_bigrect_opcode = 0u;
+static uint8_t  g_b38_bigrect_textured = 0u;
+static uint8_t  g_b38_bigrect_raw = 0u;
+static int      g_b38_bigrect_x = 0;
+static int      g_b38_bigrect_y = 0;
+static int      g_b38_bigrect_w = 0;
+static int      g_b38_bigrect_h = 0;
+static int      g_b38_bigrect_u = 0;
+static int      g_b38_bigrect_v = 0;
+static int      g_b38_bigrect_clut_x = 0;
+static int      g_b38_bigrect_clut_y = 0;
+static uint16_t g_b38_bigrect_texpage = 0u;
+static uint32_t g_b38_bigrect_texwindow = 0u;
+static uint32_t g_b38_bigrect_cmd[4] = {0,0,0,0};
+
+/*
+ * ============================================================
+ * B44 - qui ecrit dans la zone texture du sprite 72x72 ?
+ * ============================================================
+ *
+ * B43 a prouve qu'aucun LoadImage HLE ne couvre cette zone.
+ * On observe maintenant TOUS les paquets GP0 susceptibles d'ecrire
+ * dedans : fill, draw, copy et upload.
+ *
+ * Zone issue du sprite observe :
+ *   TP=0x204, U/V=136/64, 4 bpp, 72x72
+ *   -> VRAM words x=290..307, y=64..135
+ */
+#define B44_WX 290
+#define B44_WY 64
+#define B44_WW 18
+#define B44_WH 72
+
+static uint32_t g_b44_serial = 0u;
+static uint32_t g_b44_hits_fill = 0u;
+static uint32_t g_b44_hits_draw = 0u;
+static uint32_t g_b44_hits_copy = 0u;
+static uint32_t g_b44_hits_upload = 0u;
+
+static uint32_t g_b44_last_serial = 0u;
+static uint8_t  g_b44_last_type = 0u; /* F,D,C,U */
+static uint8_t  g_b44_last_opcode = 0u;
+static int      g_b44_last_x = 0;
+static int      g_b44_last_y = 0;
+static int      g_b44_last_w = 0;
+static int      g_b44_last_h = 0;
+static uint32_t g_b44_last_cmd[4] = {0,0,0,0};
+
+/*
+ * ============================================================
+ * B46 - provenance GPU native du sprite 72x72
+ * ============================================================
+ *
+ * B45 n'a pas vu le sprite dans fm_submit_ot_safe(). On trace donc
+ * directement execute_command(), point commun de tous les paquets GP0.
+ */
+static uint32_t g_b46_cmd_serial = 0u;
+static uint32_t g_b46_last_e1_serial = 0u;
+static uint16_t g_b46_last_e1_value = 0u;
+static uint32_t g_b46_last_fill_serial = 0u;
+
+static uint32_t g_b46_sprite_hits = 0u;
+static uint32_t g_b46_sprite_serial = 0u;
+static uint32_t g_b46_sprite_e1_age = 0xFFFFFFFFu;
+static uint32_t g_b46_sprite_fill_age = 0xFFFFFFFFu;
+static uint16_t g_b46_sprite_e1 = 0u;
+static uint16_t g_b46_sprite_texpage = 0u;
+static int g_b46_sprite_off_x = 0;
+static int g_b46_sprite_off_y = 0;
+static uint32_t g_b46_sprite_cmd[4] = {0,0,0,0};
+
 static int g_has_frame = 0;
 
 
@@ -70,6 +186,7 @@ static int g_has_frame = 0;
  */
 
 static uint16_t g_texpage = 0;
+static uint32_t g_texture_window = 0;
 
 static int g_draw_x1 = 0;
 static int g_draw_y1 = 0;
@@ -619,6 +736,282 @@ static unsigned command_words(
 
 
 /*
+ * B29 - capture une primitive DRAW juste avant son execution.
+ */
+static void fm_gpu_b29_capture_draw(uint8_t opcode)
+{
+    if (opcode < 0x20u || opcode > 0x7Fu)
+    {
+        return;
+    }
+
+    FMB29DrawTrace *trace =
+        &g_b29_draw_trace[g_b29_draw_trace_head];
+
+    memset(trace, 0, sizeof(*trace));
+
+    trace->opcode = opcode;
+    trace->words = (uint8_t)g_cmd_need;
+    trace->texpage = g_texpage;
+    trace->off_x = (int16_t)g_offset_x;
+    trace->off_y = (int16_t)g_offset_y;
+    trace->area_x1 = (uint16_t)g_draw_x1;
+    trace->area_y1 = (uint16_t)g_draw_y1;
+    trace->area_x2 = (uint16_t)g_draw_x2;
+    trace->area_y2 = (uint16_t)g_draw_y2;
+
+    unsigned copy_words = g_cmd_need;
+    if (copy_words > 8u)
+    {
+        copy_words = 8u;
+    }
+
+    for (unsigned i = 0; i < copy_words; ++i)
+    {
+        trace->cmd[i] = g_cmd[i];
+    }
+
+    g_b29_draw_trace_head =
+        (g_b29_draw_trace_head + 1u) % 3u;
+
+    if (g_b29_draw_trace_count < 3u)
+    {
+        ++g_b29_draw_trace_count;
+    }
+}
+
+/*
+ * ============================================================
+ * B44 writer helpers
+ * ============================================================
+ */
+static int b44_overlap_rect(int x, int y, int w, int h)
+{
+    if (w <= 0 || h <= 0)
+    {
+        return 0;
+    }
+
+    int ax0 = x;
+    int ay0 = y;
+    int ax1 = x + w;
+    int ay1 = y + h;
+
+    int bx0 = B44_WX;
+    int by0 = B44_WY;
+    int bx1 = B44_WX + B44_WW;
+    int by1 = B44_WY + B44_WH;
+
+    return ax0 < bx1 && bx0 < ax1 && ay0 < by1 && by0 < ay1;
+}
+
+static void b44_note(
+    uint8_t type,
+    uint8_t opcode,
+    int x,
+    int y,
+    int w,
+    int h
+)
+{
+    ++g_b44_serial;
+
+    if (!b44_overlap_rect(x, y, w, h))
+    {
+        return;
+    }
+
+    if (type == 'F') ++g_b44_hits_fill;
+    else if (type == 'D') ++g_b44_hits_draw;
+    else if (type == 'C') ++g_b44_hits_copy;
+    else if (type == 'U') ++g_b44_hits_upload;
+
+    g_b44_last_serial = g_b44_serial;
+    g_b44_last_type = type;
+    g_b44_last_opcode = opcode;
+    g_b44_last_x = x;
+    g_b44_last_y = y;
+    g_b44_last_w = w;
+    g_b44_last_h = h;
+
+    for (unsigned i = 0; i < 4u; ++i)
+    {
+        g_b44_last_cmd[i] = i < g_cmd_need ? g_cmd[i] : 0u;
+    }
+}
+
+static void b44_bounds_from_points(
+    const int *xs,
+    const int *ys,
+    unsigned n,
+    int *x,
+    int *y,
+    int *w,
+    int *h
+)
+{
+    int minx = xs[0], maxx = xs[0];
+    int miny = ys[0], maxy = ys[0];
+
+    for (unsigned i = 1; i < n; ++i)
+    {
+        if (xs[i] < minx) minx = xs[i];
+        if (xs[i] > maxx) maxx = xs[i];
+        if (ys[i] < miny) miny = ys[i];
+        if (ys[i] > maxy) maxy = ys[i];
+    }
+
+    *x = minx;
+    *y = miny;
+    *w = maxx - minx + 1;
+    *h = maxy - miny + 1;
+}
+
+static void b44_trace_current_packet(uint8_t opcode)
+{
+    /* Fill */
+    if (opcode == 0x02u)
+    {
+        int x = (int)(g_cmd[1] & 0x3FFu);
+        int y = (int)((g_cmd[1] >> 16) & 0x1FFu);
+        int w = (int)(g_cmd[2] & 0x3FFu);
+        int h = (int)((g_cmd[2] >> 16) & 0x1FFu);
+        b44_note('F', opcode, x, y, w, h);
+        return;
+    }
+
+    /* Polygons */
+    if (opcode >= 0x20u && opcode <= 0x3Fu)
+    {
+        int gouraud = (opcode & 0x10u) != 0;
+        int quad = (opcode & 0x08u) != 0;
+        int textured = (opcode & 0x04u) != 0;
+
+        unsigned ci[4] = {0,0,0,0};
+        unsigned n = quad ? 4u : 3u;
+
+        if (!gouraud && !textured)
+        {
+            ci[0]=1; ci[1]=2; ci[2]=3; ci[3]=4;
+        }
+        else if (!gouraud && textured)
+        {
+            ci[0]=1; ci[1]=3; ci[2]=5; ci[3]=7;
+        }
+        else if (gouraud && !textured)
+        {
+            ci[0]=1; ci[1]=3; ci[2]=5; ci[3]=7;
+        }
+        else
+        {
+            ci[0]=1; ci[1]=4; ci[2]=7; ci[3]=10;
+        }
+
+        int xs[4], ys[4];
+        for (unsigned i = 0; i < n; ++i)
+        {
+            xs[i] = coord_x(g_cmd[ci[i]]) + g_offset_x;
+            ys[i] = coord_y(g_cmd[ci[i]]) + g_offset_y;
+        }
+
+        int x,y,w,h;
+        b44_bounds_from_points(xs, ys, n, &x, &y, &w, &h);
+        b44_note('D', opcode, x, y, w, h);
+        return;
+    }
+
+    /* Lines - first segment is sufficient for our watch. */
+    if (opcode >= 0x40u && opcode <= 0x4Fu)
+    {
+        int xs[2] = {
+            coord_x(g_cmd[1]) + g_offset_x,
+            coord_x(g_cmd[2]) + g_offset_x
+        };
+        int ys[2] = {
+            coord_y(g_cmd[1]) + g_offset_y,
+            coord_y(g_cmd[2]) + g_offset_y
+        };
+        int x,y,w,h;
+        b44_bounds_from_points(xs, ys, 2u, &x, &y, &w, &h);
+        b44_note('D', opcode, x, y, w, h);
+        return;
+    }
+
+    if (opcode >= 0x50u && opcode <= 0x5Fu)
+    {
+        int xs[2] = {
+            coord_x(g_cmd[1]) + g_offset_x,
+            coord_x(g_cmd[3]) + g_offset_x
+        };
+        int ys[2] = {
+            coord_y(g_cmd[1]) + g_offset_y,
+            coord_y(g_cmd[3]) + g_offset_y
+        };
+        int x,y,w,h;
+        b44_bounds_from_points(xs, ys, 2u, &x, &y, &w, &h);
+        b44_note('D', opcode, x, y, w, h);
+        return;
+    }
+
+    /* Rectangles / sprites. */
+    if (opcode >= 0x60u && opcode <= 0x7Fu)
+    {
+        int textured = (opcode & 0x04u) != 0;
+        unsigned size_type = (opcode >> 3) & 3u;
+
+        int x = coord_x(g_cmd[1]) + g_offset_x;
+        int y = coord_y(g_cmd[1]) + g_offset_y;
+        int w = 0, h = 0;
+
+        if (size_type == 0u)
+        {
+            uint32_t sw = textured ? g_cmd[3] : g_cmd[2];
+            w = (int)(sw & 0xFFFFu);
+            h = (int)((sw >> 16) & 0xFFFFu);
+        }
+        else if (size_type == 1u)
+        {
+            w = 1; h = 1;
+        }
+        else if (size_type == 2u)
+        {
+            w = 8; h = 8;
+        }
+        else
+        {
+            w = 16; h = 16;
+        }
+
+        b44_note('D', opcode, x, y, w, h);
+        return;
+    }
+
+    /* VRAM -> VRAM copy, watch destination. */
+    if (opcode >= 0x80u && opcode <= 0x9Fu)
+    {
+        int x = (int)(g_cmd[2] & 0x3FFu);
+        int y = (int)((g_cmd[2] >> 16) & 0x1FFu);
+        int w = (int)(g_cmd[3] & 0x3FFu);
+        int h = (int)((g_cmd[3] >> 16) & 0x1FFu);
+        b44_note('C', opcode, x, y, w, h);
+        return;
+    }
+
+    /* CPU -> VRAM upload header. */
+    if (opcode >= 0xA0u && opcode <= 0xBFu)
+    {
+        int x = (int)(g_cmd[1] & 0x3FFu);
+        int y = (int)((g_cmd[1] >> 16) & 0x1FFu);
+        int w = (int)(g_cmd[2] & 0xFFFFu);
+        int h = (int)((g_cmd[2] >> 16) & 0xFFFFu);
+        if (w == 0) w = 0x10000;
+        if (h == 0) h = 0x10000;
+        b44_note('U', opcode, x, y, w, h);
+        return;
+    }
+}
+
+/*
  * ============================================================
  * Exécution primitive
  * ============================================================
@@ -634,6 +1027,67 @@ static void execute_command(void)
         )
         &
         0xFFu;
+
+    ++g_b46_cmd_serial;
+
+    if (opcode == 0xE1u)
+    {
+        g_b46_last_e1_serial = g_b46_cmd_serial;
+        g_b46_last_e1_value = (uint16_t)(g_cmd[0] & 0x07FFu);
+    }
+
+    if (opcode == 0x02u && g_cmd_need >= 3u)
+    {
+        int fx = (int)(g_cmd[1] & 0x3FFu);
+        int fy = (int)((g_cmd[1] >> 16) & 0x1FFu);
+        int fw = (int)(g_cmd[2] & 0x3FFu);
+        int fh = (int)((g_cmd[2] >> 16) & 0x1FFu);
+
+        if (fx == 0 && fy == 0 && fw == 320 && fh == 256)
+        {
+            g_b46_last_fill_serial = g_b46_cmd_serial;
+        }
+    }
+
+    if (opcode == 0x64u && g_cmd_need >= 4u)
+    {
+        int sx = coord_x(g_cmd[1]) + g_offset_x;
+        int sy = coord_y(g_cmd[1]) + g_offset_y;
+        int su = (int)(g_cmd[2] & 0xFFu);
+        int sv = (int)((g_cmd[2] >> 8) & 0xFFu);
+        int sw = (int)(g_cmd[3] & 0xFFFFu);
+        int sh = (int)((g_cmd[3] >> 16) & 0xFFFFu);
+
+        if (sx == 17 && sy == 17 && su == 136 && sv == 64 && sw == 72 && sh == 72)
+        {
+            ++g_b46_sprite_hits;
+            g_b46_sprite_serial = g_b46_cmd_serial;
+            g_b46_sprite_e1 = g_b46_last_e1_value;
+            g_b46_sprite_texpage = g_texpage;
+            g_b46_sprite_off_x = g_offset_x;
+            g_b46_sprite_off_y = g_offset_y;
+
+            g_b46_sprite_e1_age =
+                g_b46_last_e1_serial != 0u
+                    ? g_b46_cmd_serial - g_b46_last_e1_serial
+                    : 0xFFFFFFFFu;
+
+            g_b46_sprite_fill_age =
+                g_b46_last_fill_serial != 0u
+                    ? g_b46_cmd_serial - g_b46_last_fill_serial
+                    : 0xFFFFFFFFu;
+
+            for (unsigned i = 0; i < 4u; ++i)
+            {
+                g_b46_sprite_cmd[i] = g_cmd[i];
+            }
+        }
+    }
+
+
+    fm_gpu_b29_capture_draw(opcode);
+
+    b44_trace_current_packet(opcode);
 
 
     /*
@@ -755,14 +1209,49 @@ static void execute_command(void)
             0x1FFu;
 
 
+        uint16_t fill_color =
+            rgb24_to_555(
+                g_cmd[0]
+            );
+
+        g_last_fill_x = x;
+        g_last_fill_y = y;
+        g_last_fill_w = w;
+        g_last_fill_h = h;
+        g_last_fill_color = fill_color;
+
+        /*
+         * B28 - PRESERVE BACKGROUND CLEAR
+         *
+         * B27 montre que les deux uploads A0h sont bien executes,
+         * puis la VRAM retombe a zero pendant RUN. Les 13 paquets
+         * Fill sont donc le suspect principal.
+         *
+         * Pendant le bring-up uniquement, on ignore les grands clears
+         * noirs des pages framebuffer. Les primitives suivantes restent
+         * executees et peuvent ainsi se dessiner au-dessus du vrai decor
+         * WA_MRG deja place en VRAM.
+         */
+        if (
+            g_preserve_background_clears
+            && fill_color == 0u
+            && w >= 256
+            && h >= 160
+            && y < 256
+            && x < 640
+        )
+        {
+            ++g_fill_suppressed;
+            g_has_frame = 1;
+            return;
+        }
+
         sw_fill_rect(
             x,
             y,
             w,
             h,
-            rgb24_to_555(
-                g_cmd[0]
-            )
+            fill_color
         );
 
 
@@ -1566,6 +2055,45 @@ static void execute_command(void)
         }
 
 
+        /*
+         * B38 : conserver le dernier rectangle/sprite suffisamment gros
+         * pour expliquer un bloc visuel important a l'ecran.
+         */
+        if (w >= 24 && h >= 24)
+        {
+            ++g_b38_bigrect_count;
+            g_b38_bigrect_opcode = opcode;
+            g_b38_bigrect_textured = textured ? 1u : 0u;
+            g_b38_bigrect_raw = raw ? 1u : 0u;
+            g_b38_bigrect_x = x;
+            g_b38_bigrect_y = y;
+            g_b38_bigrect_w = w;
+            g_b38_bigrect_h = h;
+            g_b38_bigrect_texpage = g_texpage;
+            g_b38_bigrect_texwindow = g_texture_window;
+
+            g_b38_bigrect_cmd[0] = g_cmd[0];
+            g_b38_bigrect_cmd[1] = g_cmd[1];
+            g_b38_bigrect_cmd[2] = g_cmd[2];
+            g_b38_bigrect_cmd[3] = g_cmd[3];
+
+            if (textured)
+            {
+                uint16_t b38_clut = packet_clut(g_cmd[2]);
+                g_b38_bigrect_u = tex_u(g_cmd[2]);
+                g_b38_bigrect_v = tex_v(g_cmd[2]);
+                g_b38_bigrect_clut_x = clut_x(b38_clut);
+                g_b38_bigrect_clut_y = clut_y(b38_clut);
+            }
+            else
+            {
+                g_b38_bigrect_u = 0;
+                g_b38_bigrect_v = 0;
+                g_b38_bigrect_clut_x = 0;
+                g_b38_bigrect_clut_y = 0;
+            }
+        }
+
         set_primitive_state(
             opcode
         );
@@ -1803,6 +2331,11 @@ static void execute_command(void)
 
     if (opcode == 0xE2)
     {
+        g_texture_window =
+            g_cmd[0]
+            &
+            0x000FFFFFu;
+
         sw_set_texture_window(
             g_cmd[0]
         );
@@ -1991,12 +2524,74 @@ void fm_gpu_init(
     g_upload_data_words =
         0;
 
+    g_fill_suppressed = 0;
+    g_last_fill_x = 0;
+    g_last_fill_y = 0;
+    g_last_fill_w = 0;
+    g_last_fill_h = 0;
+    g_last_fill_color = 0;
+
+    memset(
+        g_b29_draw_trace,
+        0,
+        sizeof(g_b29_draw_trace)
+    );
+    g_b29_draw_trace_head = 0u;
+    g_b29_draw_trace_count = 0u;
+
+    g_b38_bigrect_count = 0u;
+    g_b38_bigrect_opcode = 0u;
+    g_b38_bigrect_textured = 0u;
+    g_b38_bigrect_raw = 0u;
+    g_b38_bigrect_x = 0;
+    g_b38_bigrect_y = 0;
+    g_b38_bigrect_w = 0;
+    g_b38_bigrect_h = 0;
+    g_b38_bigrect_u = 0;
+    g_b38_bigrect_v = 0;
+    g_b38_bigrect_clut_x = 0;
+    g_b38_bigrect_clut_y = 0;
+    g_b38_bigrect_texpage = 0u;
+    g_b38_bigrect_texwindow = 0u;
+    memset(g_b38_bigrect_cmd, 0, sizeof(g_b38_bigrect_cmd));
+
+    g_b44_serial = 0u;
+    g_b44_hits_fill = 0u;
+    g_b44_hits_draw = 0u;
+    g_b44_hits_copy = 0u;
+    g_b44_hits_upload = 0u;
+    g_b44_last_serial = 0u;
+    g_b44_last_type = 0u;
+    g_b44_last_opcode = 0u;
+    g_b44_last_x = 0;
+    g_b44_last_y = 0;
+    g_b44_last_w = 0;
+    g_b44_last_h = 0;
+    memset(g_b44_last_cmd, 0, sizeof(g_b44_last_cmd));
+
+    g_b46_cmd_serial = 0u;
+    g_b46_last_e1_serial = 0u;
+    g_b46_last_e1_value = 0u;
+    g_b46_last_fill_serial = 0u;
+    g_b46_sprite_hits = 0u;
+    g_b46_sprite_serial = 0u;
+    g_b46_sprite_e1_age = 0xFFFFFFFFu;
+    g_b46_sprite_fill_age = 0xFFFFFFFFu;
+    g_b46_sprite_e1 = 0u;
+    g_b46_sprite_texpage = 0u;
+    g_b46_sprite_off_x = 0;
+    g_b46_sprite_off_y = 0;
+    memset(g_b46_sprite_cmd, 0, sizeof(g_b46_sprite_cmd));
+
 
     g_has_frame =
         0;
 
 
     g_texpage =
+        0;
+
+    g_texture_window =
         0;
 
 
@@ -2130,23 +2725,50 @@ void fm_gpu_gp0_write(
                 g_upload_w;
 
 
-            sw_vram_write(
+            unsigned vx =
                 (
                     g_upload_x
                     +
                     px
                 )
                 &
-                1023u,
+                1023u;
 
+
+            unsigned vy =
                 (
                     g_upload_y
                     +
                     py
                 )
                 &
-                511u,
+                511u;
 
+
+            /*
+             * B27: garder la VRAM possedee par fm_gpu.c comme
+             * source de verite. B26 prouvait que le parser A0h
+             * recevait bien les 51200 mots mais que le buffer
+             * inspecte par fm_gpu_debug_stats restait a zero.
+             *
+             * On ecrit donc explicitement dans g_vram, puis on
+             * appelle aussi le renderer pour conserver son suivi
+             * interne/dirty-state.
+             */
+            if (g_vram)
+            {
+                g_vram[
+                    vy * 1024u
+                    +
+                    vx
+                ] =
+                    pixel;
+            }
+
+
+            sw_vram_write(
+                vx,
+                vy,
                 pixel
             );
 
@@ -3113,4 +3735,387 @@ int fm_gpu_bios_call(
             return 0;
         }
     }
+}
+
+/* ============================================================
+ * B28 debug helpers (declared locally by main.c)
+ * ============================================================ */
+uint64_t fm_gpu_fill_suppressed_count(void)
+{
+    return g_fill_suppressed;
+}
+
+void fm_gpu_last_fill_info(
+    int *x, int *y, int *w, int *h, uint16_t *color
+)
+{
+    if (x) *x = g_last_fill_x;
+    if (y) *y = g_last_fill_y;
+    if (w) *w = g_last_fill_w;
+    if (h) *h = g_last_fill_h;
+    if (color) *color = g_last_fill_color;
+}
+
+/*
+ * ============================================================
+ * B29 public draw trace API
+ * ============================================================
+ */
+unsigned fm_gpu_b29_draw_trace_count(void)
+{
+    return g_b29_draw_trace_count;
+}
+
+int fm_gpu_b29_draw_trace_get(
+    unsigned back,
+    uint8_t *opcode,
+    unsigned *words,
+    uint16_t *texpage,
+    int *off_x,
+    int *off_y,
+    int *area_x1,
+    int *area_y1,
+    int *area_x2,
+    int *area_y2,
+    uint32_t out_cmd[8]
+)
+{
+    if (back >= g_b29_draw_trace_count)
+    {
+        return 0;
+    }
+
+    unsigned index =
+        (g_b29_draw_trace_head + 3u - 1u - back) % 3u;
+
+    const FMB29DrawTrace *trace =
+        &g_b29_draw_trace[index];
+
+    if (opcode) *opcode = trace->opcode;
+    if (words) *words = trace->words;
+    if (texpage) *texpage = trace->texpage;
+    if (off_x) *off_x = trace->off_x;
+    if (off_y) *off_y = trace->off_y;
+    if (area_x1) *area_x1 = trace->area_x1;
+    if (area_y1) *area_y1 = trace->area_y1;
+    if (area_x2) *area_x2 = trace->area_x2;
+    if (area_y2) *area_y2 = trace->area_y2;
+
+    if (out_cmd)
+    {
+        for (unsigned i = 0; i < 8u; ++i)
+        {
+            out_cmd[i] = trace->cmd[i];
+        }
+    }
+
+    return 1;
+}
+
+
+/*
+ * ============================================================
+ * B38 public big-rectangle trace API
+ * ============================================================
+ */
+int fm_gpu_b38_bigrect_get(
+    uint32_t *count,
+    uint8_t *opcode,
+    int *textured,
+    int *raw,
+    int *x, int *y, int *w, int *h,
+    int *u, int *v,
+    int *clut_x_out, int *clut_y_out,
+    uint16_t *texpage,
+    uint32_t out_cmd[4]
+)
+{
+    if (g_b38_bigrect_count == 0u)
+    {
+        return 0;
+    }
+
+    if (count) *count = g_b38_bigrect_count;
+    if (opcode) *opcode = g_b38_bigrect_opcode;
+    if (textured) *textured = g_b38_bigrect_textured;
+    if (raw) *raw = g_b38_bigrect_raw;
+    if (x) *x = g_b38_bigrect_x;
+    if (y) *y = g_b38_bigrect_y;
+    if (w) *w = g_b38_bigrect_w;
+    if (h) *h = g_b38_bigrect_h;
+    if (u) *u = g_b38_bigrect_u;
+    if (v) *v = g_b38_bigrect_v;
+    if (clut_x_out) *clut_x_out = g_b38_bigrect_clut_x;
+    if (clut_y_out) *clut_y_out = g_b38_bigrect_clut_y;
+    if (texpage) *texpage = g_b38_bigrect_texpage;
+
+    if (out_cmd)
+    {
+        for (unsigned i = 0; i < 4u; ++i)
+        {
+            out_cmd[i] = g_b38_bigrect_cmd[i];
+        }
+    }
+
+    return 1;
+}
+
+/*
+ * ============================================================
+ * B39 texture/CLUT probe
+ * ============================================================
+ *
+ * Sonde la VRAM possedee par fm_gpu.c avec exactement les infos du
+ * dernier gros sprite B38. Le but est de separer deux cas:
+ *
+ *   - texture/CLUT deja mauvaises dans la VRAM -> probleme upload/data
+ *   - texture/CLUT variees mais sprite uni -> probleme sampler renderer
+ */
+static unsigned fm_b39_apply_texwin_u(unsigned u, uint32_t tw)
+{
+    unsigned mask = (tw >> 0) & 0x1Fu;
+    unsigned off  = (tw >> 10) & 0x1Fu;
+
+    unsigned mask8 = mask << 3;
+    unsigned off8  = (off & mask) << 3;
+
+    return ((u & 0xFFu) & ~mask8) | off8;
+}
+
+static unsigned fm_b39_apply_texwin_v(unsigned v, uint32_t tw)
+{
+    unsigned mask = (tw >> 5) & 0x1Fu;
+    unsigned off  = (tw >> 15) & 0x1Fu;
+
+    unsigned mask8 = mask << 3;
+    unsigned off8  = (off & mask) << 3;
+
+    return ((v & 0xFFu) & ~mask8) | off8;
+}
+
+int fm_gpu_b39_texture_probe_get(
+    uint32_t *texwindow,
+    int *depth,
+    int *base_x,
+    int *base_y,
+    uint32_t *texel_count,
+    uint32_t *index_nonzero,
+    uint32_t *color_nonzero,
+    uint32_t *unique_indices,
+    uint16_t clut16[16],
+    uint8_t sample_idx[8],
+    uint16_t sample_col[8]
+)
+{
+    if (
+        !g_vram
+        ||
+        g_b38_bigrect_count == 0u
+        ||
+        !g_b38_bigrect_textured
+    )
+    {
+        return 0;
+    }
+
+    uint16_t tp = g_b38_bigrect_texpage;
+    unsigned dep = (tp >> 7) & 3u;
+    unsigned bx = (tp & 0x0Fu) * 64u;
+    unsigned by = (tp & 0x10u) ? 256u : 0u;
+    uint32_t tw = g_b38_bigrect_texwindow;
+
+    if (dep > 2u)
+    {
+        dep = 2u;
+    }
+
+    if (texwindow) *texwindow = tw;
+    if (depth) *depth = (int)dep;
+    if (base_x) *base_x = (int)bx;
+    if (base_y) *base_y = (int)by;
+
+    uint8_t seen[256];
+    memset(seen, 0, sizeof(seen));
+
+    uint32_t total = 0u;
+    uint32_t idx_nz = 0u;
+    uint32_t col_nz = 0u;
+    uint32_t uniq = 0u;
+
+    /* Palette 4bpp visible pour le diagnostic. */
+    for (unsigned i = 0; i < 16u; ++i)
+    {
+        unsigned px = ((unsigned)g_b38_bigrect_clut_x + i) & 1023u;
+        unsigned py = (unsigned)g_b38_bigrect_clut_y & 511u;
+        if (clut16)
+        {
+            clut16[i] = g_vram[py * 1024u + px];
+        }
+    }
+
+    for (int yy = 0; yy < g_b38_bigrect_h; ++yy)
+    {
+        for (int xx = 0; xx < g_b38_bigrect_w; ++xx)
+        {
+            unsigned u = fm_b39_apply_texwin_u(
+                (unsigned)(g_b38_bigrect_u + xx),
+                tw
+            ) & 0xFFu;
+
+            unsigned v = fm_b39_apply_texwin_v(
+                (unsigned)(g_b38_bigrect_v + yy),
+                tw
+            ) & 0xFFu;
+
+            uint8_t idx = 0u;
+            uint16_t col = 0u;
+
+            if (dep == 0u)
+            {
+                unsigned vx = (bx + (u >> 2)) & 1023u;
+                unsigned vy = (by + v) & 511u;
+                uint16_t word = g_vram[vy * 1024u + vx];
+                idx = (uint8_t)((word >> ((u & 3u) * 4u)) & 0x0Fu);
+
+                unsigned cx = ((unsigned)g_b38_bigrect_clut_x + idx) & 1023u;
+                unsigned cy = (unsigned)g_b38_bigrect_clut_y & 511u;
+                col = g_vram[cy * 1024u + cx];
+            }
+            else if (dep == 1u)
+            {
+                unsigned vx = (bx + (u >> 1)) & 1023u;
+                unsigned vy = (by + v) & 511u;
+                uint16_t word = g_vram[vy * 1024u + vx];
+                idx = (uint8_t)((word >> ((u & 1u) * 8u)) & 0xFFu);
+
+                unsigned cx = ((unsigned)g_b38_bigrect_clut_x + idx) & 1023u;
+                unsigned cy = (unsigned)g_b38_bigrect_clut_y & 511u;
+                col = g_vram[cy * 1024u + cx];
+            }
+            else
+            {
+                unsigned vx = (bx + u) & 1023u;
+                unsigned vy = (by + v) & 511u;
+                col = g_vram[vy * 1024u + vx];
+                idx = (uint8_t)(col & 0xFFu);
+            }
+
+            if (!seen[idx])
+            {
+                seen[idx] = 1u;
+                ++uniq;
+            }
+
+            if (idx != 0u) ++idx_nz;
+            if ((col & 0x7FFFu) != 0u) ++col_nz;
+
+            if (yy == 0 && xx < 8)
+            {
+                if (sample_idx) sample_idx[xx] = idx;
+                if (sample_col) sample_col[xx] = col;
+            }
+
+            ++total;
+        }
+    }
+
+    if (texel_count) *texel_count = total;
+    if (index_nonzero) *index_nonzero = idx_nz;
+    if (color_nonzero) *color_nonzero = col_nz;
+    if (unique_indices) *unique_indices = uniq;
+
+    return 1;
+}
+
+
+/*
+ * ============================================================
+ * B42 public video bring-up control
+ * ============================================================
+ */
+void fm_gpu_b42_set_preserve_background_clears(int enabled)
+{
+    g_preserve_background_clears = enabled ? 1 : 0;
+}
+
+int fm_gpu_b42_get_preserve_background_clears(void)
+{
+    return g_preserve_background_clears;
+}
+
+
+/*
+ * ============================================================
+ * B44 public writer-watch API
+ * ============================================================
+ */
+void fm_gpu_b44_watch_get(
+    uint32_t *fill_hits,
+    uint32_t *draw_hits,
+    uint32_t *copy_hits,
+    uint32_t *upload_hits,
+    uint32_t *last_serial,
+    uint8_t *last_type,
+    uint8_t *last_opcode,
+    int *x, int *y, int *w, int *h,
+    uint32_t cmd[4]
+)
+{
+    if (fill_hits) *fill_hits = g_b44_hits_fill;
+    if (draw_hits) *draw_hits = g_b44_hits_draw;
+    if (copy_hits) *copy_hits = g_b44_hits_copy;
+    if (upload_hits) *upload_hits = g_b44_hits_upload;
+    if (last_serial) *last_serial = g_b44_last_serial;
+    if (last_type) *last_type = g_b44_last_type;
+    if (last_opcode) *last_opcode = g_b44_last_opcode;
+    if (x) *x = g_b44_last_x;
+    if (y) *y = g_b44_last_y;
+    if (w) *w = g_b44_last_w;
+    if (h) *h = g_b44_last_h;
+
+    if (cmd)
+    {
+        for (unsigned i = 0; i < 4u; ++i)
+        {
+            cmd[i] = g_b44_last_cmd[i];
+        }
+    }
+}
+
+
+int fm_gpu_b46_sprite_provenance_get(
+    uint32_t *hits,
+    uint32_t *serial,
+    uint16_t *last_e1,
+    uint32_t *e1_age,
+    uint32_t *fill_age,
+    uint16_t *texpage,
+    int *off_x,
+    int *off_y,
+    uint32_t cmd[4]
+)
+{
+    if (g_b46_sprite_hits == 0u)
+    {
+        return 0;
+    }
+
+    if (hits) *hits = g_b46_sprite_hits;
+    if (serial) *serial = g_b46_sprite_serial;
+    if (last_e1) *last_e1 = g_b46_sprite_e1;
+    if (e1_age) *e1_age = g_b46_sprite_e1_age;
+    if (fill_age) *fill_age = g_b46_sprite_fill_age;
+    if (texpage) *texpage = g_b46_sprite_texpage;
+    if (off_x) *off_x = g_b46_sprite_off_x;
+    if (off_y) *off_y = g_b46_sprite_off_y;
+
+    if (cmd)
+    {
+        for (unsigned i = 0; i < 4u; ++i)
+        {
+            cmd[i] = g_b46_sprite_cmd[i];
+        }
+    }
+
+    return 1;
 }

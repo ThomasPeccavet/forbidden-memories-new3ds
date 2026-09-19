@@ -15,6 +15,89 @@
 
 #include "gpu_sw_renderer.h"
 
+/* B28 helpers exported by source/fm_gpu.c. */
+extern uint64_t fm_gpu_fill_suppressed_count(void);
+extern void fm_gpu_last_fill_info(
+    int *x, int *y, int *w, int *h, uint16_t *color
+);
+
+
+/* B42 - active/desactive le vieux hack de preservation du background. */
+extern void fm_gpu_b42_set_preserve_background_clears(int enabled);
+extern int fm_gpu_b42_get_preserve_background_clears(void);
+
+
+/* B29 - API de trace ajoutee proprement au GPU B28. */
+extern unsigned fm_gpu_b29_draw_trace_count(void);
+extern int fm_gpu_b29_draw_trace_get(
+    unsigned back,
+    uint8_t *opcode,
+    unsigned *words,
+    uint16_t *texpage,
+    int *off_x,
+    int *off_y,
+    int *area_x1,
+    int *area_y1,
+    int *area_x2,
+    int *area_y2,
+    uint32_t out_cmd[8]
+);
+
+
+/* B38 - dernier gros rectangle/sprite GP0. */
+extern int fm_gpu_b38_bigrect_get(
+    uint32_t *count,
+    uint8_t *opcode,
+    int *textured,
+    int *raw,
+    int *x, int *y, int *w, int *h,
+    int *u, int *v,
+    int *clut_x_out, int *clut_y_out,
+    uint16_t *texpage,
+    uint32_t out_cmd[4]
+);
+
+
+extern int fm_gpu_b39_texture_probe_get(
+    uint32_t *texwindow,
+    int *depth,
+    int *base_x,
+    int *base_y,
+    uint32_t *texel_count,
+    uint32_t *index_nonzero,
+    uint32_t *color_nonzero,
+    uint32_t *unique_indices,
+    uint16_t clut16[16],
+    uint8_t sample_idx[8],
+    uint16_t sample_col[8]
+);
+
+
+extern void fm_gpu_b44_watch_get(
+    uint32_t *fill_hits,
+    uint32_t *draw_hits,
+    uint32_t *copy_hits,
+    uint32_t *upload_hits,
+    uint32_t *last_serial,
+    uint8_t *last_type,
+    uint8_t *last_opcode,
+    int *x, int *y, int *w, int *h,
+    uint32_t cmd[4]
+);
+
+
+extern int fm_gpu_b46_sprite_provenance_get(
+    uint32_t *hits,
+    uint32_t *serial,
+    uint16_t *last_e1,
+    uint32_t *e1_age,
+    uint32_t *fill_age,
+    uint16_t *texpage,
+    int *off_x,
+    int *off_y,
+    uint32_t cmd[4]
+);
+
 
 int g_ws_bd_stretch_on = 0;
 int g_ws_bd_stretch_pct = 100;
@@ -102,6 +185,11 @@ static int32_t g_vsync_wait_mode = 0;
 static uint32_t g_vsync_hle_calls = 0;
 static uint32_t g_vsync_hle_wait_calls = 0;
 static uint32_t g_vsync_hle_query_calls = 0;
+static uint32_t g_vsync_hle_mode1_calls = 0;
+static uint32_t g_vsync_hle_mode1_nonzero = 0;
+static uint32_t g_vsync_hle_mode1_last = 0;
+static uint32_t g_vsync_hle_mode1_max = 0;
+static uint64_t g_vsync_host_epoch_ms = 0;
 static int32_t g_vsync_hle_last_mode = 0;
 
 
@@ -152,6 +240,1855 @@ static int32_t g_main_frame_done = 0;
 static uint32_t g_main_flags_6a0 = 0;
 static uint32_t g_main_flags_710 = 0;
 static uint32_t g_main_flags_72c = 0;
+
+
+/*
+ * ============================================================
+ * Startup / dispatcher trace
+ * ============================================================
+ *
+ * Le boot est encore avant la machine d'etat principale
+ * (DAT_8009C60A reste a 0). Ces compteurs permettent de voir
+ * quelles fonctions importantes repassent par le dispatcher et
+ * quelles images dynamiques sont deja presentes en RAM.
+ */
+static uint32_t g_trace_pc[6];
+static uint32_t g_trace_count = 0;
+static uint32_t g_trace_last_phys = 0xFFFFFFFFu;
+
+static uint32_t g_hit_startup = 0;
+static uint32_t g_hit_service = 0;
+static uint32_t g_hit_load_wait = 0;
+
+/* B31: snapshot exact de la requete asynchrone au premier passage dans 80013700. */
+static uint32_t g_b31_req_snap = 0;
+static uint32_t g_b31_req_10 = 0;
+static uint32_t g_b31_req_18 = 0;
+static uint32_t g_b31_req_1c = 0;
+static uint32_t g_b31_req_20 = 0;
+static uint32_t g_b31_req_24 = 0;
+static uint32_t g_b31_req_2c = 0;
+static uint32_t g_b31_req_34 = 0;
+static uint32_t g_b31_req_40 = 0;
+static uint16_t g_b31_req_44 = 0;
+static uint8_t  g_b31_req_46 = 0;
+static uint8_t  g_b31_req_47 = 0;
+static uint32_t g_b31_r137_ra = 0;
+static uint32_t g_b31_r137_gp = 0;
+static uint32_t g_b31_r137_a0 = 0;
+static uint32_t g_b31_r137_a1 = 0;
+static uint32_t g_b31_r137_a2 = 0;
+static uint32_t g_b31_r137_a3 = 0;
+static uint32_t g_b31_c460 = 0;
+static uint32_t g_b31_c484 = 0;
+static uint32_t g_b31_tbl0 = 0;
+
+/*
+ * B32 - pont CdGetSector (FUN_8007E968).
+ *
+ * B31 montre une requete active dans DAT_800EB1B8 avec un secteur
+ * restant, alors que notre backend host n'a lu aucun secteur. Le code
+ * original appelle FUN_8007E968(dest, 512) lorsqu'un secteur CD est
+ * pret. Cette fonction pilote directement le DMA3 PS1, materiel que
+ * notre bring-up ne reproduit pas encore completement.
+ *
+ * B32 intercepte donc uniquement ce point de copie : le LBA courant
+ * vient de la requete du jeu (+0x24), le secteur est lu depuis disc.bin
+ * puis copie dans le buffer guest demande. Toute la logique au-dessus
+ * (decompte, callbacks, chainage, flags de fin) reste le vrai code PS1.
+ */
+static uint32_t g_b32_getsec_calls = 0;
+static uint32_t g_b32_getsec_ok = 0;
+static uint32_t g_b32_getsec_fail = 0;
+static uint32_t g_b32_last_req = 0;
+static uint32_t g_b32_last_lba = 0;
+static uint32_t g_b32_last_dst = 0;
+static uint32_t g_b32_last_bytes = 0;
+static uint32_t g_b32_last_remaining = 0;
+static uint32_t g_b32_last_rc = 0;
+
+static uint32_t g_b32_43e_returned = 0;
+static uint32_t g_b32_43e_return_frame = 0;
+
+/*
+ * B33 - pont des callbacks asynchrones LibCD.
+ *
+ * B32 a confirme que FUN_8007E968 n'est jamais atteinte. Le chemin
+ * reel passe d'abord par FUN_8007B78C / FUN_8007BA00 qui mettent une
+ * commande CD en file et attendent un callback. Notre backend host ne
+ * livre pas encore cet evenement. On execute donc le vrai callback
+ * guest avec l'evenement CdlComplete (2), puis on reprend exactement
+ * au RA du caller de la fonction d'enqueue.
+ */
+static const uint32_t g_b33_cb_sentinel = 0x8000FFC0u;
+static const uint32_t g_b33_result_scratch = 0x8009C4B4u;
+static uint32_t g_b33_cb_active = 0;
+static uint32_t g_b33_cb_resume = 0;
+static uint32_t g_b33_cb_addr = 0;
+static uint32_t g_b33_cb_cmd = 0;
+static uint32_t g_b33_async_calls = 0;
+static uint32_t g_b33_raw_calls = 0;
+static uint32_t g_b33_cb_started = 0;
+static uint32_t g_b33_cb_done = 0;
+static uint32_t g_b33_cb_skipped = 0;
+static uint32_t g_b33_last_params = 0;
+static uint32_t g_b33_last_ctx = 0;
+
+/* B36: les callbacks LibCD sont asynchrones sur PS1. Leur execution ne
+ * doit donc pas detruire le contexte CPU interrompu. */
+static uint32_t g_b33_saved_gpr[32];
+static uint32_t g_b33_ctx_saved = 0;
+static uint32_t g_b33_ctx_restored = 0;
+
+/*
+ * B34 - correction de la signature de FUN_8007BA00 et livraison
+ * du vrai evenement CdlDataReady au callback 80013B44.
+ *
+ * L'analyse du SLES PAL montre l'appel exact :
+ *   a0 = 0xA0 (mode/flags)
+ *   a1 = params
+ *   a2 = commande CD (0x06 = ReadN)
+ *   a3 = callback de completion (80013FBC)
+ *
+ * B33 prenait a0 pour la commande, d'ou cmd=A0 et aucun ReadN host.
+ */
+static const uint32_t g_b34_ready_cb = 0x80013B44u;
+static const uint32_t g_b34_ready_sentinel = 0x8000FFB0u;
+static uint32_t g_b34_last_mode = 0;
+static uint32_t g_b34_last_command = 0;
+static uint32_t g_b34_ready_pending = 0;
+static uint32_t g_b34_ready_active = 0;
+static uint32_t g_b34_ready_resume = 0;
+static uint32_t g_b34_ready_started = 0;
+static uint32_t g_b34_ready_done = 0;
+static uint32_t g_b34_ready_arm_frame = 0;
+static uint32_t g_b34_ready_req = 0;
+static uint32_t g_b34_ready_before = 0;
+static uint32_t g_b34_ready_after = 0;
+
+/* B36: contexte exact interrompu par CdlDataReady. */
+static uint32_t g_b34_ready_saved_gpr[32];
+static uint32_t g_b34_ready_saved_pc = 0;
+static uint32_t g_b34_ready_saved_ra = 0;
+static uint32_t g_b34_ready_ctx_saved = 0;
+static uint32_t g_b34_ready_ctx_restored = 0;
+
+/*
+ * B35 - finalisation CD via le vrai cleanup guest FUN_800143D4.
+ *
+ * B34 livre correctement CdlDataReady, FUN_8007E968 lit le dernier
+ * secteur depuis disc.bin et la requete passe de 0x800 a 0 octet.
+ * Pourtant 80013700 reste bloque parce que C460 conserve le bit 0x10.
+ * Sur le SLES PAL, FUN_800143D4 est le cleanup du service CD qui
+ * conserve seulement les bits 0x20/0x40 de C460. On execute donc
+ * cette VRAIE routine guest apres le dernier DataReady, au lieu de
+ * modifier C460 a la main.
+ */
+static const uint32_t g_b35_finalizer_addr = 0x800143D4u;
+static const uint32_t g_b35_finalizer_sentinel = 0x8000FFA0u;
+static uint32_t g_b35_finalizer_active = 0;
+static uint32_t g_b35_finalizer_resume = 0;
+static uint32_t g_b35_finalizer_started = 0;
+static uint32_t g_b35_finalizer_done = 0;
+static uint32_t g_b35_c460_before = 0;
+static uint32_t g_b35_c460_after = 0;
+
+/* B36: le cleanup guest est appele comme une pseudo-interruption.
+ * Conserver/restaurer tout le contexte afin de reprendre exactement
+ * l'instruction qui tournait avant CdlDataReady. */
+static uint32_t g_b35_saved_gpr[32];
+static uint32_t g_b35_saved_pc = 0;
+static uint32_t g_b35_saved_ra = 0;
+static uint32_t g_b35_ctx_saved = 0;
+static uint32_t g_b35_ctx_restored = 0;
+
+/*
+ * B37 - GPU DMA2 sync bridge.
+ *
+ * Le host traite DMA2 de facon synchrone. Si le guest arrive dans
+ * FUN_800819E0 et voit encore CHCR.START/BUSY (bit 24), ce bit est
+ * stale pour notre modele : le transfert GP0 a deja ete consomme.
+ * On le relache donc comme le ferait le hardware en fin de DMA.
+ *
+ * 80081A90 lit 0x1F8010A8 (DMA2 CHCR) et attend bit24 == 0.
+ * 80081AC0 attend ensuite GPUSTAT bit26 == 1.
+ */
+static uint32_t g_b37_dma_wait_hits = 0;
+static uint32_t g_b37_dma_forced_clear = 0;
+static uint32_t g_b37_last_chcr_before = 0;
+static uint32_t g_b37_last_chcr_after = 0;
+static uint32_t g_b37_last_gpustat = 0;
+static uint32_t g_b37_ring_write = 0;
+static uint32_t g_b37_ring_read = 0;
+static uint32_t g_hit_delay_wait = 0;
+static uint32_t g_hit_intro_init = 0;
+static uint32_t g_hit_boot_loop = 0;
+static uint32_t g_hit_fade_wait = 0;
+static uint32_t g_hit_main_loop = 0;
+static uint32_t g_hit_str = 0;
+static uint32_t g_hit_ov16 = 0;
+static uint32_t g_hit_ov18 = 0;
+
+/*
+ * Trace cible du petit cycle observe dans le dernier build :
+ *
+ *   80082158 -> 8007FCBC -> 80012CD4 -> VSync
+ *
+ * On conserve le nombre de passages et le RA vu lors de ces
+ * handoffs. Cela permet de remonter le vrai appelant sans
+ * modifier le comportement du jeu.
+ */
+static uint32_t g_hit_7fcbc = 0;
+static uint32_t g_hit_82158 = 0;
+static uint32_t g_hit_12cd4 = 0;
+
+static uint32_t g_ra_7fcbc = 0;
+static uint32_t g_ra_82158 = 0;
+static uint32_t g_ra_12cd4 = 0;
+
+/*
+ * Trace cible du verrou actuel.
+ *
+ * La pile observee au VSync remonte jusqu'a 80012B48, qui est
+ * le retour du JAL de startup_candidate_fr vers FUN_800401A4.
+ *
+ * On verifie donc explicitement :
+ *   startup -> 800401A4 -> ... -> service frame -> VSync
+ * ainsi que l'enregistrement / execution du callback VBlank
+ * LAB_80012BD8.
+ */
+static uint32_t g_hit_401a4 = 0;
+static uint32_t g_hit_74968 = 0;
+static uint32_t g_hit_vblank_cb = 0;
+
+static uint32_t g_ra_401a4 = 0;
+static uint32_t g_sp_401a4 = 0;
+static uint32_t g_ra_74968 = 0;
+static uint32_t g_ra_vblank_cb = 0;
+
+/*
+ * B13 FASTBOOT : FUN_800401A4 effectue correctement son setup,
+ * puis reste dans une boucle de service qui n'est pas necessaire
+ * pour atteindre le prochain jalon graphique sur notre bring-up.
+ * On memorise le contexte d'entree et on sort proprement de cette
+ * fonction apres quelques vrais VBlank callbacks executes avec succes.
+ */
+static uint32_t g_fast401_forced = 0;
+static uint32_t g_fast401_frame = 0;
+
+/*
+ * B14 FASTBOOT : apres avoir quitte 401A4, le boot entre bien dans
+ * FUN_80043E3C mais reste dans son attente de chargement asynchrone.
+ * Notre couche CD bas niveau trouve l'ISO, mais la machine Psy-Q
+ * asynchrone n'alimente toujours aucun secteur. Pour atteindre le
+ * prochain jalon graphique rapidement, on laisse 43E3C effectuer son
+ * setup initial, puis on la fait retourner proprement depuis son
+ * contexte d'entree si elle tombe dans l'attente 80013700.
+ */
+static uint32_t g_ra_43e3c = 0;
+static uint32_t g_sp_43e3c = 0;
+static uint32_t g_fast43e_forced = 0;
+static uint32_t g_fast43e_frame = 0;
+
+/*
+ * B15 DIRECT-2DF : au lieu d'attendre que le startup atteigne
+ * naturellement FUN_8002DF60, on pilote directement la vraie
+ * machine d'etat une fois par frame hote apres les deux fastboot.
+ *
+ * Le code de 8002DF60 reste le vrai code du jeu : on ne fabrique
+ * pas d'image. On lui donne seulement un RA sentinelle afin de
+ * reprendre la main quand une iteration est terminee.
+ */
+static uint32_t g_direct2df_active = 0;
+static uint32_t g_direct2df_start_frame = 0;
+static uint32_t g_direct2df_calls = 0;
+static uint32_t g_direct2df_returns = 0;
+static uint32_t g_direct2df_last_pc = 0;
+static const uint32_t g_direct2df_sentinel = 0x8000FFE0u;
+
+/*
+ * B16 - time slicing + trace cible 80085DDC.
+ *
+ * B15 a prouve que le direct-2DF entre bien dans la machine d'etat,
+ * mais une seule tranche a 250000 operations fait chuter Azahar a ~4 FPS.
+ * On limite maintenant agressivement le travail guest par frame hote et
+ * on capture le nouveau point chaud 80085DDC sans modifier son etat.
+ */
+static uint32_t g_b16_slice_yields = 0;
+static uint32_t g_b16_slice_last_ms = 0;
+static uint32_t g_b16_slice_max_ms = 0;
+static uint32_t g_b16_last_handoffs = 0;
+
+static uint32_t g_hit_85ddc = 0;
+static uint32_t g_hit_85_range = 0;
+static uint32_t g_85_last_phys = 0;
+static uint32_t g_85_ra = 0;
+static uint32_t g_85_sp = 0;
+static uint32_t g_85_a0 = 0;
+static uint32_t g_85_a1 = 0;
+static uint32_t g_85_a2 = 0;
+static uint32_t g_85_a3 = 0;
+static uint32_t g_85_v0 = 0;
+static uint32_t g_85_t0 = 0;
+static uint32_t g_85_t1 = 0;
+static uint32_t g_85_s0 = 0;
+static uint32_t g_85_s1 = 0;
+static uint32_t g_85_ops[12] = {0};
+static uint32_t g_12e_ops[6] = {0};
+
+
+/*
+ * ============================================================
+ * B18 - HLE fidele de FUN_80085D98 (GsSortOt)
+ * ============================================================
+ *
+ * Le trace B16 a identifie la boucle de FUN_80085D98 comme le parcours
+ * d'une ordering table PS1. B17 a confirme l'hypothese : le bypass
+ * supprime la boucle et fait passer STATE a C0, mais il jette aussi
+ * les primitives de l'OT source, donc aucun Draw n'arrive au GPU.
+ *
+ * B18 implemente le vrai principe de GsSortOt :
+ *   OTZ = src->point - dst->offset
+ * puis splice de la chaine source dans l'entree OTZ de destination.
+ * Le parcours est borne et detecte le marqueur 00FFFFFF pour eviter
+ * toute nouvelle boucle infinie.
+ */
+static uint32_t g_hle_85d98_calls = 0;
+static uint32_t g_hle_85d98_last_src = 0;
+static uint32_t g_hle_85d98_last_dst = 0;
+static uint32_t g_hle_85d98_src_length = 0;
+static uint32_t g_hle_85d98_src_org = 0;
+static uint32_t g_hle_85d98_src_offset = 0;
+static uint32_t g_hle_85d98_src_point = 0;
+static uint32_t g_hle_85d98_src_tag = 0;
+static uint32_t g_hle_85d98_dst_length = 0;
+static uint32_t g_hle_85d98_dst_org = 0;
+static uint32_t g_hle_85d98_dst_offset = 0;
+static uint32_t g_hle_85d98_dst_point = 0;
+static uint32_t g_hle_85d98_dst_tag = 0;
+static uint32_t g_hle_85d98_bad_desc = 0;
+static uint32_t g_hle_85d98_splice_ok = 0;
+static uint32_t g_hle_85d98_splice_fail = 0;
+static uint32_t g_hle_85d98_last_otz = 0;
+static uint32_t g_hle_85d98_last_nodes = 0;
+static uint32_t g_hle_85d98_last_tail = 0;
+static uint32_t g_hle_85d98_last_dst_entry = 0;
+static uint32_t g_hle_85d98_last_old_dst_link = 0;
+static uint32_t g_hle_85d98_last_src_head = 0;
+static uint32_t g_hle_85d98_last_tail_before = 0;
+static uint32_t g_hle_85d98_last_tail_after = 0;
+static uint32_t g_hle_85d98_last_dst_before = 0;
+static uint32_t g_hle_85d98_last_dst_after = 0;
+
+/*
+ * ============================================================
+ * B19 - GsSortOt natif borne + soumission directe de l'OT source
+ * ============================================================
+ *
+ * B18 a prouve que notre splice manuel n'etait pas assez fidele :
+ * certaines chaines sont cycliques et finissent par alimenter le GPU
+ * avec des centaines de milliers de faux mots.
+ *
+ * B19 ne reecrit plus GsSortOt a la main. Il essaie d'abord d'executer
+ * le VRAI FUN_80085D98 dans un CPU temporaire, avec un budget strict.
+ * Si l'appel ne revient pas, le jeu continue comme dans B17, mais on
+ * parcourt l'OT source de maniere BORNEE et on envoie directement les
+ * paquets GP0 valides au GPU. Cela permet de viser une premiere image
+ * sans corrompre l'OT destination.
+ */
+static uint32_t g_sort_native_calls = 0;
+static uint32_t g_sort_native_ok = 0;
+static uint32_t g_sort_native_fail = 0;
+static uint32_t g_sort_native_last_pc = 0;
+static int32_t  g_sort_native_last_code = 0;
+static uint32_t g_sort_native_last_handoffs = 0;
+
+static uint32_t g_ot_direct_calls = 0;
+static uint32_t g_ot_direct_ok = 0;
+static uint32_t g_ot_direct_bad = 0;
+static uint32_t g_ot_direct_cycles = 0;
+static uint32_t g_ot_direct_last_nodes = 0;
+static uint32_t g_ot_direct_last_packets = 0;
+static uint32_t g_ot_direct_last_words = 0;
+static uint32_t g_ot_direct_last_start = 0;
+static uint32_t g_ot_direct_last_stop = 0;
+static uint32_t g_ot_direct_last_first_word = 0;
+static uint32_t g_ot_direct_last_draw_packets = 0;
+static uint32_t g_ot_direct_last_env_packets = 0;
+static uint32_t g_ot_direct_last_other_packets = 0;
+
+
+/*
+ * ============================================================
+ * B45 - provenance OT du sprite 72x72
+ * ============================================================
+ *
+ * B44 a montre que la zone texture VRAM (290,64 18x72) n'est
+ * touchee que par des clears 320x256. On capture maintenant le
+ * paquet OT exact du sprite 0x64 et l'environnement E1/clear qui
+ * le precede, afin de verifier si TP=0x204 est reellement demande
+ * par le jeu ou s'il s'agit d'un etat GPU stale.
+ */
+static uint32_t g_b45_sprite_hits = 0u;
+static uint32_t g_b45_last_ot = 0u;
+static uint32_t g_b45_last_node = 0u;
+static uint32_t g_b45_last_header = 0u;
+static uint32_t g_b45_last_next24 = 0u;
+static uint32_t g_b45_last_packet_index = 0u;
+
+static uint32_t g_b45_last_e1 = 0xFFFFFFFFu;
+static uint32_t g_b45_last_e1_node = 0u;
+static uint32_t g_b45_last_e1_age = 0xFFFFFFFFu;
+
+static uint32_t g_b45_clear_before_age = 0xFFFFFFFFu;
+static uint32_t g_b45_clear_after_age = 0xFFFFFFFFu;
+
+static uint32_t g_b45_prev1_node = 0u;
+static uint32_t g_b45_prev1_word = 0u;
+static uint32_t g_b45_prev2_node = 0u;
+static uint32_t g_b45_prev2_word = 0u;
+
+/*
+ * B20 - correction minimale des OTs effacees par DMA6/OTC.
+ * Une OT Psy-Q de longueur N utilise org[0] comme fin de chaine :
+ * son lien 24 bits doit etre 00FFFFFF. Les traces B19 montraient
+ * au contraire une chaine qui continuait sous org pendant des milliers
+ * de mots. On repare UNIQUEMENT cette sentinelle, sans toucher aux
+ * autres buckets ni aux primitives inserees par le jeu.
+ */
+static uint32_t g_ot_fix_calls = 0;
+static uint32_t g_ot_fix_ok = 0;
+static uint32_t g_ot_fix_changed = 0;
+static uint32_t g_ot_fix_bad = 0;
+static uint32_t g_ot_fix_last_ot = 0;
+static uint32_t g_ot_fix_last_org = 0;
+static uint32_t g_ot_fix_last_tag = 0;
+static uint32_t g_ot_fix_last_before = 0;
+static uint32_t g_ot_fix_last_after = 0;
+
+/*
+ * Vue VRAM automatique pour le bring-up graphique.
+ * Si le DISPLAY PS1 reste pointe vers une zone vide mais que le jeu
+ * ecrit ailleurs dans la VRAM (framebuffer double-buffer ou textures),
+ * on choisit temporairement la fenetre 320x240 la plus peuplee afin
+ * d'afficher la premiere image utile le plus vite possible.
+ */
+static uint32_t g_vram_view_x = 0;
+static uint32_t g_vram_view_y = 0;
+static uint32_t g_vram_view_nonzero = 0;
+
+/*
+ * Callback VBlank enregistre par FUN_80074968.
+ *
+ * Le build precedent a prouve :
+ *   - FUN_80074968 est bien appelee une fois ;
+ *   - LAB_80012BD8 contient du vrai code MIPS ;
+ *   - le callback n'est jamais execute par notre chaine IRQ/HLE.
+ *
+ * On conserve donc le pointeur et le GP observes lors de
+ * l'enregistrement afin de pouvoir reproduire, de facon minimale,
+ * le premier effet certain du callback.
+ */
+static uint32_t g_vblank_registered_cb = 0;
+static uint32_t g_vblank_registered_gp = 0;
+
+static uint32_t g_vblank_bridge_ticks = 0;
+static uint32_t g_vblank_bridge_target = 0;
+static uint32_t g_vblank_bridge_target_41c = 0;
+static uint32_t g_vblank_bridge_target_428 = 0;
+static uint32_t g_vblank_bridge_before = 0;
+static uint32_t g_vblank_bridge_after = 0;
+static uint32_t g_vblank_bridge_41c_before = 0;
+static uint32_t g_vblank_bridge_41c_after = 0;
+static uint32_t g_vblank_bridge_428_before = 0;
+static uint32_t g_vblank_bridge_428_after = 0;
+static uint32_t g_vblank_bridge_sig_ok = 0;
+static uint32_t g_vblank_sig_words[4] = {0, 0, 0, 0};
+
+/*
+ * ============================================================
+ * B12 - execution REELLE du callback VBlank guest
+ * ============================================================
+ *
+ * Plutot que de continuer a recopier a la main les effets de
+ * LAB_80012BD8, B12 execute le vrai code MIPS du callback dans
+ * une copie du CPUState. Les ecritures RAM/MMIO restent globales,
+ * mais les registres du thread principal sont preserves.
+ */
+static uint32_t g_irq_exec_calls = 0;
+static uint32_t g_irq_exec_ok = 0;
+static uint32_t g_irq_exec_fail = 0;
+static uint32_t g_irq_exec_last_pc = 0;
+static uint32_t g_irq_exec_last_phys = 0;
+static uint32_t g_irq_exec_last_handoffs = 0;
+static uint32_t g_irq_exec_hit_3ce34 = 0;
+static uint32_t g_irq_exec_hit_vsync = 0;
+static int32_t g_irq_exec_last_code = 0;
+static int32_t g_irq_exec_last_probe_reason = 0;
+static int32_t g_irq_exec_last_interp_reason = 0;
+
+
+/*
+ * ============================================================
+ * Nouveau verrou apres deblocage VBlank : 80082168
+ * ============================================================
+ *
+ * Le bridge VBlank fonctionne maintenant et le PC a quitte
+ * l'ancienne boucle autour de 800746B8. Le nouveau point chaud
+ * observe est :
+ *
+ *   8008111C -> 80082168
+ *
+ * On ne force rien ici. On capture le contexte d'entree, les
+ * premiers mots MIPS de 80082168 et les registres DMA6 afin de
+ * savoir si cette routine attend une fin OTC/DMA.
+ */
+static uint32_t g_hit_8111c = 0;
+static uint32_t g_hit_82168 = 0;
+static uint32_t g_hit_8219c = 0;
+
+static uint32_t g_ra_8111c = 0;
+static uint32_t g_ra_82168 = 0;
+static uint32_t g_ra_8219c = 0;
+
+static uint32_t g_82168_a0 = 0;
+static uint32_t g_82168_a1 = 0;
+static uint32_t g_82168_a2 = 0;
+static uint32_t g_82168_a3 = 0;
+static uint32_t g_82168_v0 = 0;
+static uint32_t g_82168_t0 = 0;
+static uint32_t g_82168_t1 = 0;
+static uint32_t g_82168_sp = 0;
+static uint32_t g_82168_ops[8] = {0,0,0,0,0,0,0,0};
+
+
+/*
+ * Decode uniquement J/JAL MIPS pour les diagnostics.
+ * Retourne 0 pour une autre instruction.
+ */
+static uint32_t fm_mips_jump_target(
+    uint32_t pc,
+    uint32_t instruction
+)
+{
+    uint32_t opcode =
+        instruction
+        >>
+        26;
+
+    if (
+        opcode != 2u
+        &&
+        opcode != 3u
+    )
+    {
+        return 0;
+    }
+
+    return
+        (
+            (pc + 4u)
+            &
+            0xF0000000u
+        )
+        |
+        (
+            (
+                instruction
+                &
+                0x03FFFFFFu
+            )
+            <<
+            2
+        );
+}
+
+
+/*
+ * Snapshot de pile pris a l'entree de VSync.
+ * On ne garde que les mots qui ressemblent a des adresses de
+ * retour dans le code resident du SLES.
+ */
+static uint32_t g_vsync_stack_sp = 0;
+static uint32_t g_vsync_stack_ra[4];
+static uint32_t g_vsync_stack_count = 0;
+static uint32_t g_vsync_s0 = 0;
+static uint32_t g_vsync_s1 = 0;
+
+
+static void fm_capture_vsync_stack(
+    CPUState *cpu
+)
+{
+    if (!cpu)
+    {
+        return;
+    }
+
+    uint32_t sp =
+        cpu->gpr[29];
+
+    g_vsync_stack_sp =
+        sp;
+
+    g_vsync_s0 =
+        cpu->gpr[16];
+
+    g_vsync_s1 =
+        cpu->gpr[17];
+
+    memset(
+        g_vsync_stack_ra,
+        0,
+        sizeof(g_vsync_stack_ra)
+    );
+
+    g_vsync_stack_count = 0;
+
+    /*
+     * 0x100 octets suffisent pour voir les RA des quelques
+     * niveaux qui entourent FUN_80012C50 / VSync.
+     */
+    for (uint32_t off = 0; off < 0x100u; off += 4u)
+    {
+        uint32_t value =
+            cpu->read_word(
+                sp + off
+            );
+
+        if (
+            value >= 0x80010000u
+            && value < 0x800A0000u
+            && (value & 3u) == 0u
+        )
+        {
+            int duplicate = 0;
+
+            for (uint32_t i = 0; i < g_vsync_stack_count; ++i)
+            {
+                if (g_vsync_stack_ra[i] == value)
+                {
+                    duplicate = 1;
+                    break;
+                }
+            }
+
+            if (!duplicate)
+            {
+                g_vsync_stack_ra[g_vsync_stack_count] =
+                    value;
+
+                ++g_vsync_stack_count;
+
+                if (g_vsync_stack_count >= 4u)
+                {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+
+static void fm_trace_dispatch(
+    CPUState *cpu,
+    uint32_t dispatch_address,
+    uint32_t phys
+)
+{
+    if (phys != g_trace_last_phys)
+    {
+        g_trace_last_phys =
+            phys;
+
+        g_trace_pc[
+            g_trace_count % 6u
+        ] =
+            dispatch_address;
+
+        ++g_trace_count;
+    }
+
+    switch (phys)
+    {
+        case 0x00012A44u:
+            ++g_hit_startup;
+            break;
+
+        case 0x00012C50u:
+            ++g_hit_service;
+            break;
+
+        case 0x00013700u:
+            ++g_hit_load_wait;
+
+            if (!g_b31_req_snap)
+            {
+                const uint32_t req = 0x800EB1B8u;
+
+                g_b31_req_10 = fm_memory_read_word(req + 0x10u);
+                g_b31_req_18 = fm_memory_read_word(req + 0x18u);
+                g_b31_req_1c = fm_memory_read_word(req + 0x1Cu);
+                g_b31_req_20 = fm_memory_read_word(req + 0x20u);
+                g_b31_req_24 = fm_memory_read_word(req + 0x24u);
+                g_b31_req_2c = fm_memory_read_word(req + 0x2Cu);
+                g_b31_req_34 = fm_memory_read_word(req + 0x34u);
+                g_b31_req_40 = fm_memory_read_word(req + 0x40u);
+                g_b31_req_44 = fm_memory_read_half(req + 0x44u);
+                g_b31_req_46 = fm_memory_read_byte(req + 0x46u);
+                g_b31_req_47 = fm_memory_read_byte(req + 0x47u);
+
+                g_b31_c460 = fm_memory_read_word(0x8009C460u);
+                g_b31_c484 = fm_memory_read_word(0x8009C484u);
+                g_b31_tbl0 = fm_memory_read_word(0x800FB198u);
+
+                if (cpu)
+                {
+                    g_b31_r137_ra = cpu->gpr[31];
+                    g_b31_r137_gp = cpu->gpr[28];
+                    g_b31_r137_a0 = cpu->gpr[4];
+                    g_b31_r137_a1 = cpu->gpr[5];
+                    g_b31_r137_a2 = cpu->gpr[6];
+                    g_b31_r137_a3 = cpu->gpr[7];
+                }
+
+                g_b31_req_snap = 1u;
+            }
+            break;
+
+        case 0x00043CD4u:
+            ++g_hit_delay_wait;
+            break;
+
+        case 0x00043E3Cu:
+            ++g_hit_intro_init;
+            if (cpu)
+            {
+                if (g_ra_43e3c == 0u)
+                {
+                    g_ra_43e3c = cpu->gpr[31];
+                    g_sp_43e3c = cpu->gpr[29];
+                }
+            }
+            break;
+
+        case 0x00044084u:
+            ++g_hit_boot_loop;
+            break;
+
+        case 0x000158B4u:
+            ++g_hit_fade_wait;
+            break;
+
+        case 0x0002DF60u:
+            ++g_hit_main_loop;
+            break;
+
+        case 0x0006A4D8u:
+            ++g_hit_str;
+            break;
+
+        case 0x001680F4u:
+        case 0x00168160u:
+            ++g_hit_ov16;
+            break;
+
+        case 0x0018001Cu:
+        case 0x00180390u:
+        case 0x00180E48u:
+            ++g_hit_ov18;
+            break;
+
+        case 0x0007FCBCu:
+            ++g_hit_7fcbc;
+            if (cpu)
+            {
+                g_ra_7fcbc = cpu->gpr[31];
+            }
+            break;
+
+        case 0x00082158u:
+            ++g_hit_82158;
+            if (cpu)
+            {
+                g_ra_82158 = cpu->gpr[31];
+            }
+            break;
+
+        case 0x00012CD4u:
+            ++g_hit_12cd4;
+            if (cpu)
+            {
+                g_ra_12cd4 = cpu->gpr[31];
+            }
+            break;
+
+        case 0x0008111Cu:
+            ++g_hit_8111c;
+            if (cpu)
+            {
+                g_ra_8111c = cpu->gpr[31];
+            }
+            break;
+
+        case 0x00082168u:
+            ++g_hit_82168;
+            if (cpu)
+            {
+                g_ra_82168 = cpu->gpr[31];
+                g_82168_a0 = cpu->gpr[4];
+                g_82168_a1 = cpu->gpr[5];
+                g_82168_a2 = cpu->gpr[6];
+                g_82168_a3 = cpu->gpr[7];
+                g_82168_v0 = cpu->gpr[2];
+                g_82168_t0 = cpu->gpr[8];
+                g_82168_t1 = cpu->gpr[9];
+                g_82168_sp = cpu->gpr[29];
+
+                for (unsigned i = 0; i < 8u; ++i)
+                {
+                    g_82168_ops[i] =
+                        cpu->read_word(0x80082168u + i * 4u);
+                }
+            }
+            break;
+
+        case 0x0008219Cu:
+            ++g_hit_8219c;
+            if (cpu)
+            {
+                g_ra_8219c = cpu->gpr[31];
+            }
+            break;
+
+        case 0x00085DDCu:
+            ++g_hit_85ddc;
+            /* fall through vers la capture de la fenetre 85Dxx */
+        default:
+            if (
+                phys >= 0x00085D80u
+                && phys < 0x00085E80u
+            )
+            {
+                ++g_hit_85_range;
+                g_85_last_phys = phys;
+
+                if (cpu)
+                {
+                    g_85_ra = cpu->gpr[31];
+                    g_85_sp = cpu->gpr[29];
+                    g_85_a0 = cpu->gpr[4];
+                    g_85_a1 = cpu->gpr[5];
+                    g_85_a2 = cpu->gpr[6];
+                    g_85_a3 = cpu->gpr[7];
+                    g_85_v0 = cpu->gpr[2];
+                    g_85_t0 = cpu->gpr[8];
+                    g_85_t1 = cpu->gpr[9];
+                    g_85_s0 = cpu->gpr[16];
+                    g_85_s1 = cpu->gpr[17];
+
+                    /* 4 instructions avant + 8 a partir de 85DDC. */
+                    for (unsigned i = 0; i < 12u; ++i)
+                    {
+                        g_85_ops[i] =
+                            cpu->read_word(0x80085DCCu + i * 4u);
+                    }
+
+                    /* Appelant autour de RA=80012E70 observe en B15. */
+                    for (unsigned i = 0; i < 6u; ++i)
+                    {
+                        g_12e_ops[i] =
+                            cpu->read_word(0x80012E5Cu + i * 4u);
+                    }
+                }
+
+                break;
+            }
+            break;
+
+        case 0x000401A4u:
+            ++g_hit_401a4;
+            if (cpu)
+            {
+                g_ra_401a4 = cpu->gpr[31];
+                g_sp_401a4 = cpu->gpr[29];
+            }
+            break;
+
+        case 0x00074968u:
+            ++g_hit_74968;
+            if (cpu)
+            {
+                g_ra_74968 = cpu->gpr[31];
+
+                /*
+                 * FUN_80074968(callback) : conserver le dernier
+                 * callback demande. Un appel ulterieur avec NULL
+                 * desactivera naturellement le bridge.
+                 */
+                g_vblank_registered_cb =
+                    cpu->gpr[4];
+
+                g_vblank_registered_gp =
+                    cpu->gpr[28];
+
+                /*
+                 * Valider le callback avec le meme chemin de lecture
+                 * que celui utilise par le CPU guest. Le build precedent
+                 * montrait une signature correcte via cpu->read_word(),
+                 * alors que le bridge restait a zero : on fige donc ici
+                 * le resultat de cette validation au moment exact de
+                 * l'enregistrement.
+                 */
+                /*
+                 * Valider depuis la RAM PS1 brute. Le build precedent
+                 * a montre que cpu->read_word() au moment exact de
+                 * l'enregistrement pouvait laisser SIG=0 alors que
+                 * les quatre mots visibles en RAM etaient corrects.
+                 */
+                g_vblank_bridge_sig_ok =
+                    (
+                        g_vblank_registered_cb == 0x80012BD8u
+                        && fm_memory_read_word(0x80012BD8u) == 0x8F8201ACu
+                        && fm_memory_read_word(0x80012BDCu) == 0x00000000u
+                        && fm_memory_read_word(0x80012BE0u) == 0x24420001u
+                        && fm_memory_read_word(0x80012BE4u) == 0xAF8201ACu
+                    )
+                    ? 1u
+                    : 0u;
+
+                g_vblank_bridge_target =
+                    g_vblank_registered_gp
+                    +
+                    0x1ACu;
+
+                g_vblank_bridge_target_41c =
+                    g_vblank_registered_gp
+                    +
+                    0x184u;
+
+                g_vblank_bridge_target_428 =
+                    g_vblank_registered_gp
+                    +
+                    0x190u;
+            }
+            break;
+
+        case 0x00012BD8u:
+            ++g_hit_vblank_cb;
+            if (cpu)
+            {
+                g_ra_vblank_cb = cpu->gpr[31];
+            }
+            break;
+
+    }
+}
+
+
+/*
+ * Ecriture little-endian 32 bits via l'API byte publique.
+ * Cela evite de dependre d'un helper write_word qui n'est pas
+ * necessairement expose par fm_memory.h.
+ */
+static void fm_memory_write_word_le(
+    uint32_t address,
+    uint32_t value
+)
+{
+    fm_memory_write_byte(
+        address + 0u,
+        (uint8_t)(value >> 0)
+    );
+
+    fm_memory_write_byte(
+        address + 1u,
+        (uint8_t)(value >> 8)
+    );
+
+    fm_memory_write_byte(
+        address + 2u,
+        (uint8_t)(value >> 16)
+    );
+
+    fm_memory_write_byte(
+        address + 3u,
+        (uint8_t)(value >> 24)
+    );
+}
+
+
+/*
+ * ============================================================
+ * VBlank callback bridge - effets confirmes du callback
+ * ============================================================
+ *
+ * Le dump B10 a maintenant confirme les 15 premiers mots utiles
+ * de LAB_80012BD8 :
+ *
+ *   lw    v0, 0x1AC(gp)
+ *   addiu v0, v0, 1
+ *   sw    v0, 0x1AC(gp)      -> 8009C444++
+ *
+ *   lw    v0, 0x184(gp)
+ *   addiu v0, v0, 1
+ *   sw    v0, 0x184(gp)      -> 8009C41C++
+ *
+ *   lw    v0, 0x190(gp)
+ *   ...
+ *   addiu v0, v0, 1
+ *   sw    v0, 0x190(gp)      -> 8009C428++
+ *
+ * Le callback appelle ensuite 8003CE34. On NE simule PAS encore
+ * cet appel : B11 reproduit uniquement les trois increments dont
+ * les instructions ont ete directement observees. Cela permet de
+ * tester si le verrou du scheduler vient simplement des compteurs
+ * temporels absents sans inventer le reste de l'IRQ.
+ */
+static void fm_service_vblank_callback_bridge(
+    CPUState *cpu
+)
+{
+    if (!cpu)
+    {
+        g_vblank_bridge_sig_ok = 0u;
+        return;
+    }
+
+    g_vblank_sig_words[0] =
+        cpu->read_word(0x80012BD8u);
+
+    g_vblank_sig_words[1] =
+        cpu->read_word(0x80012BDCu);
+
+    g_vblank_sig_words[2] =
+        cpu->read_word(0x80012BE0u);
+
+    g_vblank_sig_words[3] =
+        cpu->read_word(0x80012BE4u);
+
+    g_vblank_bridge_sig_ok =
+        (
+            g_vblank_registered_cb == 0x80012BD8u
+            && g_vblank_sig_words[0] == 0x8F8201ACu
+            && g_vblank_sig_words[1] == 0x00000000u
+            && g_vblank_sig_words[2] == 0x24420001u
+            && g_vblank_sig_words[3] == 0xAF8201ACu
+        )
+        ? 1u
+        : 0u;
+
+    if (
+        g_vblank_registered_cb != 0x80012BD8u
+        || g_vblank_registered_gp == 0u
+        || g_hit_vblank_cb != 0u
+        || g_vblank_bridge_sig_ok == 0u
+    )
+    {
+        return;
+    }
+
+    uint32_t target444 =
+        g_vblank_bridge_target;
+
+    uint32_t target41c =
+        g_vblank_bridge_target_41c;
+
+    uint32_t target428 =
+        g_vblank_bridge_target_428;
+
+    if (
+        target444 < 0x80000000u
+        || target444 >= 0x80200000u
+        || target41c < 0x80000000u
+        || target41c >= 0x80200000u
+        || target428 < 0x80000000u
+        || target428 >= 0x80200000u
+    )
+    {
+        return;
+    }
+
+    uint32_t before444 =
+        fm_memory_read_word(target444);
+
+    uint32_t before41c =
+        fm_memory_read_word(target41c);
+
+    uint32_t before428 =
+        fm_memory_read_word(target428);
+
+    uint32_t after444 =
+        before444 + 1u;
+
+    uint32_t after41c =
+        before41c + 1u;
+
+    uint32_t after428 =
+        before428 + 1u;
+
+    fm_memory_write_word_le(
+        target444,
+        after444
+    );
+
+    fm_memory_write_word_le(
+        target41c,
+        after41c
+    );
+
+    fm_memory_write_word_le(
+        target428,
+        after428
+    );
+
+    g_vblank_bridge_before =
+        before444;
+
+    g_vblank_bridge_after =
+        after444;
+
+    g_vblank_bridge_41c_before =
+        before41c;
+
+    g_vblank_bridge_41c_after =
+        after41c;
+
+    g_vblank_bridge_428_before =
+        before428;
+
+    g_vblank_bridge_428_after =
+        after428;
+
+    ++g_vblank_bridge_ticks;
+}
+
+
+/*
+ * Execute un appel guest isole jusqu'a son retour.
+ *
+ * Sentinel RA : une adresse residentielle volontairement non
+ * utilisee. On s'arrete AVANT de tenter de l'executer.
+ */
+static int fm_execute_guest_vblank_callback(
+    CPUState *cpu,
+    uint32_t frame
+)
+{
+    const uint32_t sentinel = 0x8000FFF0u;
+
+    if (!cpu)
+    {
+        return 0;
+    }
+
+    g_vblank_sig_words[0] = cpu->read_word(0x80012BD8u);
+    g_vblank_sig_words[1] = cpu->read_word(0x80012BDCu);
+    g_vblank_sig_words[2] = cpu->read_word(0x80012BE0u);
+    g_vblank_sig_words[3] = cpu->read_word(0x80012BE4u);
+
+    g_vblank_bridge_sig_ok =
+        (
+            g_vblank_registered_cb == 0x80012BD8u
+            && g_vblank_registered_gp != 0u
+            && g_vblank_sig_words[0] == 0x8F8201ACu
+            && g_vblank_sig_words[1] == 0x00000000u
+            && g_vblank_sig_words[2] == 0x24420001u
+            && g_vblank_sig_words[3] == 0xAF8201ACu
+        )
+        ? 1u
+        : 0u;
+
+    if (!g_vblank_bridge_sig_ok)
+    {
+        return 0;
+    }
+
+    /*
+     * Si la vraie chaine IRQ commence un jour a livrer elle-meme
+     * le callback, ne surtout pas le doubler.
+     */
+    if (g_hit_vblank_cb != 0u)
+    {
+        return 0;
+    }
+
+    CPUState irq_cpu = *cpu;
+
+    irq_cpu.pc = g_vblank_registered_cb;
+    irq_cpu.gpr[28] = g_vblank_registered_gp;
+
+    /*
+     * Pile IRQ separee, dans le haut de la RAM PS1. Le thread
+     * principal tourne deja autour de 801FFFxx : 801FF000 laisse
+     * suffisamment de marge aux appels imbriques du callback.
+     */
+    irq_cpu.gpr[29] = 0x801FF000u;
+    irq_cpu.gpr[31] = sentinel;
+    irq_cpu.gpr[0] = 0u;
+
+    ++g_irq_exec_calls;
+    g_irq_exec_last_code = 0;
+    g_irq_exec_last_probe_reason = 0;
+    g_irq_exec_last_interp_reason = 0;
+    g_irq_exec_last_handoffs = 0;
+
+    for (uint32_t handoff = 0; handoff < 128u; ++handoff)
+    {
+        g_irq_exec_last_handoffs = handoff + 1u;
+        g_irq_exec_last_pc = irq_cpu.pc;
+        g_irq_exec_last_phys = irq_cpu.pc & 0x1FFFFFFFu;
+
+        if (irq_cpu.pc == sentinel)
+        {
+            ++g_irq_exec_ok;
+            g_irq_exec_last_code = 1;
+            return 1;
+        }
+
+        if (irq_cpu.pc == 0u && irq_cpu.gpr[31] == sentinel)
+        {
+            ++g_irq_exec_ok;
+            g_irq_exec_last_code = 1;
+            return 1;
+        }
+
+        uint32_t phys = irq_cpu.pc & 0x1FFFFFFFu;
+
+        if (phys == 0x0003CE34u)
+        {
+            ++g_irq_exec_hit_3ce34;
+        }
+
+        /*
+         * Si une sous-routine du callback interroge VSync, ne pas
+         * lancer une attente hote depuis l'IRQ : on renvoie l'horloge
+         * VBlank courante, ce qui est le comportement utile ici.
+         */
+        if (phys == 0x000746B8u)
+        {
+            ++g_irq_exec_hit_vsync;
+
+            int32_t mode = (int32_t)irq_cpu.gpr[4];
+
+            if (mode < 0)
+            {
+                irq_cpu.gpr[2] = frame;
+            }
+            else
+            {
+                irq_cpu.gpr[2] = 0u;
+            }
+
+            irq_cpu.pc = irq_cpu.gpr[31];
+            irq_cpu.gpr[0] = 0u;
+            continue;
+        }
+
+        /* BIOS appele depuis une sous-routine du callback. */
+        if (
+            phys == 0x000000A0u
+            || phys == 0x000000B0u
+            || phys == 0x000000C0u
+            || phys == 0x00000884u
+            || phys == 0x00000894u
+        )
+        {
+            if (fm_bios_try_hle(&irq_cpu, irq_cpu.pc))
+            {
+                continue;
+            }
+
+            ++g_irq_exec_fail;
+            g_irq_exec_last_code = -10;
+            return 0;
+        }
+
+        /* Console debug guest : aucun effet gameplay. */
+        if (phys == 0x00090CF8u)
+        {
+            irq_cpu.pc = irq_cpu.gpr[31];
+            irq_cpu.gpr[0] = 0u;
+            continue;
+        }
+
+        FMRuntimeProbeResult local_probe =
+            fm_runtime_probe(
+                &irq_cpu,
+                irq_cpu.pc,
+                100000
+            );
+
+        g_irq_exec_last_probe_reason =
+            (int32_t)local_probe.reason;
+
+        if (local_probe.reason == FM_STOP_BUDGET)
+        {
+            continue;
+        }
+
+        if (local_probe.reason != FM_STOP_RETURNED)
+        {
+            ++g_irq_exec_fail;
+            g_irq_exec_last_code = -20;
+            return 0;
+        }
+
+        if (local_probe.dispatch_result == 1)
+        {
+            if (irq_cpu.pc == 0u && irq_cpu.gpr[31] != 0u)
+            {
+                irq_cpu.pc = irq_cpu.gpr[31];
+            }
+
+            continue;
+        }
+
+        FMInterpResult local_interp =
+            fm_interp_run_block(
+                &irq_cpu,
+                2048
+            );
+
+        g_irq_exec_last_interp_reason =
+            (int32_t)local_interp.reason;
+
+        if (
+            local_interp.reason == FM_INTERP_BLOCK_DONE
+            || local_interp.reason == FM_INTERP_BUDGET
+        )
+        {
+            continue;
+        }
+
+        ++g_irq_exec_fail;
+        g_irq_exec_last_code = -30;
+        g_irq_exec_last_pc = local_interp.pc;
+        g_irq_exec_last_phys = local_interp.pc & 0x1FFFFFFFu;
+        return 0;
+    }
+
+    ++g_irq_exec_fail;
+    g_irq_exec_last_code = -40;
+    return 0;
+}
+
+
+
+/*
+ * Execute le vrai GsSortOt dans un CPU temporaire.
+ *
+ * La pile est separee afin de ne pas polluer le thread principal.
+ * Les ecritures dans les structures OT restent, elles, dans la vraie
+ * RAM guest : si la fonction retourne, on a exactement le comportement
+ * du code original.
+ */
+static int fm_try_native_gssortot(
+    CPUState *cpu,
+    uint32_t src_ot,
+    uint32_t dst_ot,
+    uint32_t *result_v0
+)
+{
+    const uint32_t sentinel = 0x8000FFE0u;
+
+    if (!cpu || src_ot == 0u || dst_ot == 0u)
+    {
+        return 0;
+    }
+
+    CPUState ot_cpu = *cpu;
+
+    ot_cpu.pc = 0x80085D98u;
+    ot_cpu.gpr[4] = src_ot;
+    ot_cpu.gpr[5] = dst_ot;
+    ot_cpu.gpr[29] = 0x801FD000u;
+    ot_cpu.gpr[31] = sentinel;
+    ot_cpu.gpr[0] = 0u;
+
+    ++g_sort_native_calls;
+    g_sort_native_last_code = 0;
+    g_sort_native_last_handoffs = 0;
+
+    for (uint32_t handoff = 0u; handoff < 8u; ++handoff)
+    {
+        g_sort_native_last_handoffs = handoff + 1u;
+        g_sort_native_last_pc = ot_cpu.pc;
+
+        if (ot_cpu.pc == sentinel)
+        {
+            if (result_v0)
+            {
+                *result_v0 = ot_cpu.gpr[2];
+            }
+
+            ++g_sort_native_ok;
+            g_sort_native_last_code = 1;
+            return 1;
+        }
+
+        FMRuntimeProbeResult local_probe =
+            fm_runtime_probe(
+                &ot_cpu,
+                ot_cpu.pc,
+                4096u
+            );
+
+        if (local_probe.reason == FM_STOP_BUDGET)
+        {
+            /*
+             * Un GsSortOt sain est tres court. Deux tranches consecutives
+             * dans sa boucle de chainage signifient pratiquement toujours
+             * que l'OT est cyclique dans notre bring-up.
+             */
+            if (handoff >= 1u)
+            {
+                ++g_sort_native_fail;
+                g_sort_native_last_code = -1;
+                return 0;
+            }
+
+            continue;
+        }
+
+        if (local_probe.reason != FM_STOP_RETURNED)
+        {
+            ++g_sort_native_fail;
+            g_sort_native_last_code = -2;
+            return 0;
+        }
+
+        if (local_probe.dispatch_result == 1)
+        {
+            if (ot_cpu.pc == 0u && ot_cpu.gpr[31] != 0u)
+            {
+                ot_cpu.pc = ot_cpu.gpr[31];
+            }
+
+            continue;
+        }
+
+        FMInterpResult local_interp =
+            fm_interp_run_block(
+                &ot_cpu,
+                512u
+            );
+
+        if (
+            local_interp.reason == FM_INTERP_BLOCK_DONE
+            || local_interp.reason == FM_INTERP_BUDGET
+        )
+        {
+            continue;
+        }
+
+        ++g_sort_native_fail;
+        g_sort_native_last_code = -3;
+        g_sort_native_last_pc = local_interp.pc;
+        return 0;
+    }
+
+    ++g_sort_native_fail;
+    g_sort_native_last_code = -4;
+    return 0;
+}
+
+
+/*
+ * Repare uniquement la sentinelle du premier bucket d'une GsOT.
+ *
+ * GsOT :
+ *   +0  length (log2 du nombre de buckets)
+ *   +4  org    (premier bucket)
+ *   +16 tag    (bucket de tete)
+ *
+ * Pour une OT vide/valide, tag == org + ((1<<length)-1)*4 et
+ * org[0] termine la linked-list avec 00FFFFFF. Si ce dernier lien
+ * pointe encore vers org-4, le DMA2/GsSortOt peut parcourir la RAM
+ * indefiniment. On ne modifie rien d'autre.
+ */
+static int fm_repair_ot_sentinel(
+    CPUState *cpu,
+    uint32_t ot
+)
+{
+    ++g_ot_fix_calls;
+    g_ot_fix_last_ot = ot;
+
+    if (!cpu || ot == 0u)
+    {
+        ++g_ot_fix_bad;
+        return 0;
+    }
+
+    uint32_t length = cpu->read_word(ot + 0u);
+    uint32_t org = cpu->read_word(ot + 4u);
+    uint32_t tag = cpu->read_word(ot + 16u);
+
+    g_ot_fix_last_org = org;
+    g_ot_fix_last_tag = tag;
+
+    if (length > 15u || org == 0u || tag == 0u)
+    {
+        ++g_ot_fix_bad;
+        return 0;
+    }
+
+    uint32_t count = 1u << length;
+    uint32_t org_phys = org & 0x1FFFFFFFu;
+    uint32_t tag_phys = tag & 0x1FFFFFFFu;
+    uint32_t expected_tag_phys = org_phys + (count - 1u) * 4u;
+
+    if (
+        org_phys >= 0x00200000u
+        || expected_tag_phys >= 0x00200000u
+        || (org_phys & 3u) != 0u
+        || tag_phys != expected_tag_phys
+    )
+    {
+        ++g_ot_fix_bad;
+        return 0;
+    }
+
+    uint32_t before = cpu->read_word(org);
+    uint32_t after = before;
+
+    g_ot_fix_last_before = before;
+
+    /*
+     * Un bucket OT pur ne contient aucun mot GP0 : top byte = 0.
+     * On garde cette convention et fixe uniquement son lien 24 bits.
+     */
+    if (before != 0x00FFFFFFu)
+    {
+        after = 0x00FFFFFFu;
+        cpu->write_word(org, after);
+        ++g_ot_fix_changed;
+    }
+
+    g_ot_fix_last_after = after;
+    ++g_ot_fix_ok;
+    return 1;
+}
+
+/*
+ * Soumet directement une OT au parser GP0 sans passer par DMA2.
+ *
+ * Le format est exactement celui d'une linked-list GPU :
+ *   bits 31..24 = nombre de mots GP0 dans le noeud
+ *   bits 23..0  = adresse du noeud suivant, FFFFFF = fin
+ *
+ * Le parcours est volontairement borne et surveille les cycles.
+ * On ne modifie AUCUN lien de l'OT guest.
+ */
+static int fm_submit_ot_safe(
+    CPUState *cpu,
+    uint32_t start_tag
+)
+{
+    enum
+    {
+        OT_MAX_NODES = 4096,
+        OT_MAX_WORDS = 65536,
+        OT_RECENT = 256
+    };
+
+    uint32_t recent[OT_RECENT];
+    uint32_t recent_count = 0u;
+    uint32_t node = start_tag;
+    uint32_t nodes = 0u;
+    uint32_t packets = 0u;
+    uint32_t words = 0u;
+    int ended = 0;
+
+
+    /* B45 local state for this OT traversal. */
+    uint32_t b45_e1 = 0xFFFFFFFFu;
+    uint32_t b45_e1_node = 0u;
+    uint32_t b45_e1_packet = 0u;
+    uint32_t b45_last_clear_packet = 0xFFFFFFFFu;
+    uint32_t b45_target_packet = 0xFFFFFFFFu;
+    int b45_target_seen = 0;
+
+    uint32_t b45_prev1_node = 0u;
+    uint32_t b45_prev1_word = 0u;
+    uint32_t b45_prev2_node = 0u;
+    uint32_t b45_prev2_word = 0u;
+
+    ++g_ot_direct_calls;
+    g_ot_direct_last_nodes = 0u;
+    g_ot_direct_last_packets = 0u;
+    g_ot_direct_last_words = 0u;
+    g_ot_direct_last_start = start_tag;
+    g_ot_direct_last_stop = start_tag;
+    g_ot_direct_last_first_word = 0u;
+    g_ot_direct_last_draw_packets = 0u;
+    g_ot_direct_last_env_packets = 0u;
+    g_ot_direct_last_other_packets = 0u;
+
+    if (!cpu || start_tag == 0u)
+    {
+        ++g_ot_direct_bad;
+        return 0;
+    }
+
+    for (nodes = 0u; nodes < OT_MAX_NODES; ++nodes)
+    {
+        uint32_t phys = node & 0x1FFFFFFFu;
+
+        if (phys >= 0x00200000u || (phys & 3u) != 0u)
+        {
+            ++g_ot_direct_bad;
+            break;
+        }
+
+        /* Cycle court : largement suffisant pour les OTs observees. */
+        uint32_t check_count =
+            recent_count < OT_RECENT
+                ? recent_count
+                : OT_RECENT;
+
+        for (uint32_t i = 0u; i < check_count; ++i)
+        {
+            uint32_t index =
+                (recent_count - 1u - i)
+                & (OT_RECENT - 1u);
+
+            if (recent[index] == phys)
+            {
+                ++g_ot_direct_cycles;
+                g_ot_direct_last_stop = node;
+                goto ot_done;
+            }
+        }
+
+        recent[recent_count & (OT_RECENT - 1u)] = phys;
+        ++recent_count;
+
+        uint32_t guest_node = 0x80000000u | phys;
+        uint32_t header = cpu->read_word(guest_node);
+        uint32_t count = header >> 24;
+        uint32_t next24 = header & 0x00FFFFFFu;
+
+        if (count != 0u)
+        {
+            uint32_t end_phys =
+                phys
+                + 4u
+                + count * 4u;
+
+            if (end_phys > 0x00200000u)
+            {
+                ++g_ot_direct_bad;
+                g_ot_direct_last_stop = node;
+                break;
+            }
+
+            if (words + count > OT_MAX_WORDS)
+            {
+                ++g_ot_direct_bad;
+                g_ot_direct_last_stop = node;
+                break;
+            }
+
+            uint32_t first_word =
+                cpu->read_word(guest_node + 4u);
+
+            if (packets == 0u)
+            {
+                g_ot_direct_last_first_word = first_word;
+            }
+
+            uint32_t opcode = first_word >> 24;
+
+            /*
+             * B45 - suivre les commandes E1 et les clears dans l'ordre
+             * exact de la linked-list GP0.
+             */
+            if (opcode == 0xE1u)
+            {
+                b45_e1 = first_word & 0x7FFu;
+                b45_e1_node = guest_node;
+                b45_e1_packet = packets;
+            }
+
+            if (
+                opcode == 0x02u
+                && count >= 3u
+            )
+            {
+                uint32_t pos =
+                    cpu->read_word(guest_node + 8u);
+
+                uint32_t size =
+                    cpu->read_word(guest_node + 12u);
+
+                uint32_t fx = pos & 0x3FFu;
+                uint32_t fy = (pos >> 16) & 0x1FFu;
+                uint32_t fw = size & 0x3FFu;
+                uint32_t fh = (size >> 16) & 0x1FFu;
+
+                if (
+                    fx == 0u
+                    && fy == 0u
+                    && fw == 320u
+                    && fh == 256u
+                )
+                {
+                    if (!b45_target_seen)
+                    {
+                        b45_last_clear_packet = packets;
+                    }
+                    else if (
+                        g_b45_clear_after_age == 0xFFFFFFFFu
+                        && packets >= b45_target_packet
+                    )
+                    {
+                        g_b45_clear_after_age =
+                            packets - b45_target_packet;
+                    }
+                }
+            }
+
+            /*
+             * Le sprite observe depuis B38:
+             *   64808080
+             *   00110011       xy = 17,17
+             *   38694088       uv = 136,64 / CLUT = 656,225
+             *   00480048       72x72
+             */
+            if (
+                opcode == 0x64u
+                && count >= 4u
+            )
+            {
+                uint32_t c1 =
+                    cpu->read_word(guest_node + 8u);
+
+                uint32_t c2 =
+                    cpu->read_word(guest_node + 12u);
+
+                uint32_t c3 =
+                    cpu->read_word(guest_node + 16u);
+
+                if (
+                    (c1 & 0xFFFFFFFFu) == 0x00110011u
+                    && (c2 & 0x0000FFFFu) == 0x00004088u
+                    && c3 == 0x00480048u
+                )
+                {
+                    ++g_b45_sprite_hits;
+
+                    g_b45_last_ot = start_tag;
+                    g_b45_last_node = guest_node;
+                    g_b45_last_header = header;
+                    g_b45_last_next24 = next24;
+                    g_b45_last_packet_index = packets;
+
+                    g_b45_last_e1 = b45_e1;
+                    g_b45_last_e1_node = b45_e1_node;
+
+                    if (
+                        b45_e1 != 0xFFFFFFFFu
+                        && packets >= b45_e1_packet
+                    )
+                    {
+                        g_b45_last_e1_age =
+                            packets - b45_e1_packet;
+                    }
+                    else
+                    {
+                        g_b45_last_e1_age =
+                            0xFFFFFFFFu;
+                    }
+
+                    if (
+                        b45_last_clear_packet != 0xFFFFFFFFu
+                        && packets >= b45_last_clear_packet
+                    )
+                    {
+                        g_b45_clear_before_age =
+                            packets - b45_last_clear_packet;
+                    }
+                    else
+                    {
+                        g_b45_clear_before_age =
+                            0xFFFFFFFFu;
+                    }
+
+                    /* Reinitialise le "clear apres" pour ce sprite. */
+                    g_b45_clear_after_age = 0xFFFFFFFFu;
+
+                    g_b45_prev1_node = b45_prev1_node;
+                    g_b45_prev1_word = b45_prev1_word;
+                    g_b45_prev2_node = b45_prev2_node;
+                    g_b45_prev2_word = b45_prev2_word;
+
+                    b45_target_seen = 1;
+                    b45_target_packet = packets;
+                }
+            }
+
+            if (opcode >= 0x20u && opcode <= 0x7Fu)
+            {
+                ++g_ot_direct_last_draw_packets;
+            }
+            else if (opcode >= 0xE1u && opcode <= 0xE6u)
+            {
+                ++g_ot_direct_last_env_packets;
+            }
+            else
+            {
+                ++g_ot_direct_last_other_packets;
+            }
+
+            for (uint32_t i = 0u; i < count; ++i)
+            {
+                fm_gpu_gp0_write(
+                    cpu->read_word(guest_node + 4u + i * 4u)
+                );
+            }
+
+            b45_prev2_node = b45_prev1_node;
+            b45_prev2_word = b45_prev1_word;
+            b45_prev1_node = guest_node;
+            b45_prev1_word = first_word;
+
+            ++packets;
+            words += count;
+        }
+
+        g_ot_direct_last_stop = guest_node;
+
+        if (next24 == 0x00FFFFFFu)
+        {
+            ended = 1;
+            ++nodes;
+            break;
+        }
+
+        if (next24 >= 0x00200000u || (next24 & 3u) != 0u)
+        {
+            ++g_ot_direct_bad;
+            break;
+        }
+
+        node = 0x80000000u | next24;
+    }
+
+ot_done:
+    g_ot_direct_last_nodes = nodes;
+    g_ot_direct_last_packets = packets;
+    g_ot_direct_last_words = words;
+
+    if (ended || packets != 0u)
+    {
+        ++g_ot_direct_ok;
+        return 1;
+    }
+
+    return 0;
+}
 
 
 /*
@@ -744,6 +2681,11 @@ static void fm_cd_hle_reset(void)
     g_vsync_hle_calls = 0;
     g_vsync_hle_wait_calls = 0;
     g_vsync_hle_query_calls = 0;
+    g_vsync_hle_mode1_calls = 0;
+    g_vsync_hle_mode1_nonzero = 0;
+    g_vsync_hle_mode1_last = 0;
+    g_vsync_hle_mode1_max = 0;
+    g_vsync_host_epoch_ms = osGetTime();
     g_vsync_hle_last_mode = 0;
 
     g_str_intro_skip_pending = 1;
@@ -769,6 +2711,186 @@ static void fm_cd_hle_reset(void)
     g_main_flags_710 = 0;
     g_main_flags_72c = 0;
 
+    memset(
+        g_trace_pc,
+        0,
+        sizeof(g_trace_pc)
+    );
+
+    g_trace_count = 0;
+    g_trace_last_phys = 0xFFFFFFFFu;
+
+    g_hit_startup = 0;
+    g_hit_service = 0;
+    g_hit_load_wait = 0;
+    g_b31_req_snap = 0;
+    g_b31_req_10 = g_b31_req_18 = g_b31_req_1c = g_b31_req_20 = 0;
+    g_b31_req_24 = g_b31_req_2c = g_b31_req_34 = g_b31_req_40 = 0;
+    g_b31_req_44 = 0;
+    g_b31_req_46 = g_b31_req_47 = 0;
+    g_b31_r137_ra = g_b31_r137_gp = 0;
+    g_b31_r137_a0 = g_b31_r137_a1 = g_b31_r137_a2 = g_b31_r137_a3 = 0;
+    g_b31_c460 = g_b31_c484 = g_b31_tbl0 = 0;
+    g_b32_getsec_calls = 0;
+    g_b32_getsec_ok = 0;
+    g_b32_getsec_fail = 0;
+    g_b32_last_req = 0;
+    g_b32_last_lba = 0;
+    g_b32_last_dst = 0;
+    g_b32_last_bytes = 0;
+    g_b32_last_remaining = 0;
+    g_b32_last_rc = 0;
+    g_b32_43e_returned = 0;
+    g_b32_43e_return_frame = 0;
+    g_b35_finalizer_active = 0;
+    g_b35_finalizer_resume = 0;
+    g_b35_finalizer_started = 0;
+    g_b35_finalizer_done = 0;
+    g_b35_c460_before = 0;
+    g_b35_c460_after = 0;
+    g_hit_delay_wait = 0;
+    g_hit_intro_init = 0;
+    g_hit_boot_loop = 0;
+    g_hit_fade_wait = 0;
+    g_hit_main_loop = 0;
+    g_hit_str = 0;
+    g_hit_ov16 = 0;
+    g_hit_ov18 = 0;
+
+    g_hit_7fcbc = 0;
+    g_hit_82158 = 0;
+    g_hit_12cd4 = 0;
+
+    g_ra_7fcbc = 0;
+    g_ra_82158 = 0;
+    g_ra_12cd4 = 0;
+
+    g_hit_401a4 = 0;
+    g_hit_74968 = 0;
+    g_hit_vblank_cb = 0;
+
+    g_ra_401a4 = 0;
+    g_sp_401a4 = 0;
+    g_ra_74968 = 0;
+    g_ra_vblank_cb = 0;
+    g_fast401_forced = 0;
+    g_fast401_frame = 0;
+    g_ra_43e3c = 0;
+    g_sp_43e3c = 0;
+    g_fast43e_forced = 0;
+    g_fast43e_frame = 0;
+
+    g_direct2df_active = 0;
+    g_direct2df_start_frame = 0;
+    g_direct2df_calls = 0;
+    g_direct2df_returns = 0;
+    g_direct2df_last_pc = 0;
+
+    g_b16_slice_yields = 0;
+    g_b16_slice_last_ms = 0;
+    g_b16_slice_max_ms = 0;
+    g_b16_last_handoffs = 0;
+
+    g_hit_85ddc = 0;
+    g_hit_85_range = 0;
+    g_85_last_phys = 0;
+    g_85_ra = 0;
+    g_85_sp = 0;
+    g_85_a0 = 0;
+    g_85_a1 = 0;
+    g_85_a2 = 0;
+    g_85_a3 = 0;
+    g_85_v0 = 0;
+    g_85_t0 = 0;
+    g_85_t1 = 0;
+    g_85_s0 = 0;
+    g_85_s1 = 0;
+    memset(g_85_ops, 0, sizeof(g_85_ops));
+    memset(g_12e_ops, 0, sizeof(g_12e_ops));
+
+
+    g_hle_85d98_calls = 0;
+    g_hle_85d98_last_src = 0;
+    g_hle_85d98_last_dst = 0;
+    g_hle_85d98_src_length = 0;
+    g_hle_85d98_src_org = 0;
+    g_hle_85d98_src_offset = 0;
+    g_hle_85d98_src_point = 0;
+    g_hle_85d98_src_tag = 0;
+    g_hle_85d98_dst_length = 0;
+    g_hle_85d98_dst_org = 0;
+    g_hle_85d98_dst_offset = 0;
+    g_hle_85d98_dst_point = 0;
+    g_hle_85d98_dst_tag = 0;
+    g_hle_85d98_bad_desc = 0;
+
+    g_vram_view_x = 0;
+    g_vram_view_y = 0;
+    g_vram_view_nonzero = 0;
+
+    g_vblank_registered_cb = 0;
+    g_vblank_registered_gp = 0;
+    g_vblank_bridge_ticks = 0;
+    g_vblank_bridge_target = 0;
+    g_vblank_bridge_target_41c = 0;
+    g_vblank_bridge_target_428 = 0;
+    g_vblank_bridge_before = 0;
+    g_vblank_bridge_after = 0;
+    g_vblank_bridge_41c_before = 0;
+    g_vblank_bridge_41c_after = 0;
+    g_vblank_bridge_428_before = 0;
+    g_vblank_bridge_428_after = 0;
+    g_vblank_bridge_sig_ok = 0;
+
+    g_vblank_sig_words[0] = 0;
+    g_vblank_sig_words[1] = 0;
+    g_vblank_sig_words[2] = 0;
+    g_vblank_sig_words[3] = 0;
+
+    g_irq_exec_calls = 0;
+    g_irq_exec_ok = 0;
+    g_irq_exec_fail = 0;
+    g_irq_exec_last_pc = 0;
+    g_irq_exec_last_phys = 0;
+    g_irq_exec_last_handoffs = 0;
+    g_irq_exec_hit_3ce34 = 0;
+    g_irq_exec_hit_vsync = 0;
+    g_irq_exec_last_code = 0;
+    g_irq_exec_last_probe_reason = 0;
+    g_irq_exec_last_interp_reason = 0;
+
+    g_hit_8111c = 0;
+    g_hit_82168 = 0;
+    g_hit_8219c = 0;
+
+    g_ra_8111c = 0;
+    g_ra_82168 = 0;
+    g_ra_8219c = 0;
+
+    g_82168_a0 = 0;
+    g_82168_a1 = 0;
+    g_82168_a2 = 0;
+    g_82168_a3 = 0;
+    g_82168_v0 = 0;
+    g_82168_t0 = 0;
+    g_82168_t1 = 0;
+    g_82168_sp = 0;
+
+    for (unsigned i = 0; i < 8u; ++i)
+    {
+        g_82168_ops[i] = 0;
+    }
+
+    g_vsync_stack_sp = 0;
+    memset(
+        g_vsync_stack_ra,
+        0,
+        sizeof(g_vsync_stack_ra)
+    );
+    g_vsync_stack_count = 0;
+    g_vsync_s0 = 0;
+    g_vsync_s1 = 0;
+
     g_fade_current = 0;
     g_fade_target = 0;
     g_fade_flags = 0;
@@ -777,6 +2899,1806 @@ static void fm_cd_hle_reset(void)
 
     g_fade_bridge_ticks = 0;
     g_fade_bridge_completions = 0;
+}
+
+
+
+/*
+ * ============================================================
+ * B21 - TIM asset probe
+ * ============================================================
+ *
+ * Objectif court terme : obtenir de VRAIS pixels du jeu sur la 3DS
+ * sans attendre que tout le pipeline de boot/OT soit parfait.
+ *
+ * On cherche directement les images TIM PS1 presentes sur le disque,
+ * on les decode en RGB555, puis on les affiche sur l'ecran superieur.
+ *
+ * Ce mode ne remplace pas le rendu du jeu : il sert a valider rapidement
+ * la chaine disque -> ressource graphique -> decode TIM -> affichage 3DS.
+ * Le runtime du jeu continue en parallele et reste visible avec Y.
+ */
+
+typedef struct FMTimProbe
+{
+    int active;
+    int found;
+    int show;
+    int using_named_file;
+    int error;
+
+    uint32_t start_lba;
+    uint32_t end_lba;
+    uint32_t scan_lba;
+    uint32_t scan_byte_offset;
+
+    uint32_t scanned_sectors;
+    uint32_t read_errors;
+    uint32_t candidates;
+    uint32_t images_found;
+
+    uint64_t found_abs_byte;
+    uint32_t found_lba;
+    uint32_t found_in_sector;
+
+    uint32_t mode;
+    uint32_t flags;
+    uint32_t width;
+    uint32_t height;
+    uint32_t clut_colors;
+
+    char target[64];
+} FMTimProbe;
+
+static FMTimProbe g_tim_probe;
+
+static uint8_t g_tim_sector_cache[2048];
+static uint32_t g_tim_sector_cache_lba = 0xFFFFFFFFu;
+static int g_tim_sector_cache_valid = 0;
+
+
+/*
+ * Lit des octets a une position absolue du data track 2048-byte/sector.
+ */
+static int fm_tim_read_abs(
+    uint64_t absolute_byte,
+    void *dst,
+    uint32_t size
+)
+{
+    uint8_t *out = (uint8_t *)dst;
+
+    while (size != 0u)
+    {
+        uint32_t lba =
+            (uint32_t)(absolute_byte / 2048u);
+
+        uint32_t in_sector =
+            (uint32_t)(absolute_byte % 2048u);
+
+        if (
+            !g_tim_sector_cache_valid
+            || g_tim_sector_cache_lba != lba
+        )
+        {
+            if (
+                fm_disc_read_sector(
+                    lba,
+                    g_tim_sector_cache
+                )
+                != 0
+            )
+            {
+                g_tim_sector_cache_valid = 0;
+                return 0;
+            }
+
+            g_tim_sector_cache_lba = lba;
+            g_tim_sector_cache_valid = 1;
+        }
+
+        uint32_t chunk =
+            2048u - in_sector;
+
+        if (chunk > size)
+        {
+            chunk = size;
+        }
+
+        memcpy(
+            out,
+            g_tim_sector_cache + in_sector,
+            chunk
+        );
+
+        out += chunk;
+        absolute_byte += chunk;
+        size -= chunk;
+    }
+
+    return 1;
+}
+
+
+static int fm_tim_read_u16(
+    uint64_t absolute_byte,
+    uint16_t *value
+)
+{
+    uint8_t b[2];
+
+    if (!fm_tim_read_abs(absolute_byte, b, sizeof(b)))
+    {
+        return 0;
+    }
+
+    *value =
+        (uint16_t)b[0]
+        |
+        ((uint16_t)b[1] << 8);
+
+    return 1;
+}
+
+
+static int fm_tim_read_u32(
+    uint64_t absolute_byte,
+    uint32_t *value
+)
+{
+    uint8_t b[4];
+
+    if (!fm_tim_read_abs(absolute_byte, b, sizeof(b)))
+    {
+        return 0;
+    }
+
+    *value =
+        (uint32_t)b[0]
+        |
+        ((uint32_t)b[1] << 8)
+        |
+        ((uint32_t)b[2] << 16)
+        |
+        ((uint32_t)b[3] << 24);
+
+    return 1;
+}
+
+
+/*
+ * Decode un TIM candidate directement depuis disc.bin.
+ * Retourne 1 uniquement si la structure est suffisamment coherente
+ * et qu'une image a effectivement ete produite dans "pixels".
+ */
+static int fm_tim_decode_at(
+    uint64_t base,
+    uint16_t *pixels
+)
+{
+    uint32_t magic = 0;
+    uint32_t flags = 0;
+
+    if (
+        !fm_tim_read_u32(base + 0u, &magic)
+        || !fm_tim_read_u32(base + 4u, &flags)
+    )
+    {
+        return 0;
+    }
+
+    if (magic != 0x00000010u)
+    {
+        return 0;
+    }
+
+    /*
+     * TIM standard : bits 0..2 = profondeur, bit3 = CLUT.
+     * Refuser les autres bits permet d'eliminer presque tous les
+     * faux positifs trouves en scannant des donnees compressees.
+     */
+    if ((flags & 0xFFFFFFF0u) != 0u)
+    {
+        return 0;
+    }
+
+    uint32_t mode = flags & 0x07u;
+    int has_clut = (flags & 0x08u) != 0u;
+
+    if (mode > 3u)
+    {
+        return 0;
+    }
+
+    if ((mode == 0u || mode == 1u) && !has_clut)
+    {
+        return 0;
+    }
+
+    uint64_t pos = base + 8u;
+
+    uint16_t palette[256];
+    uint32_t palette_count = 0u;
+
+    memset(
+        palette,
+        0,
+        sizeof(palette)
+    );
+
+    if (has_clut)
+    {
+        uint32_t block_size = 0;
+        uint16_t clut_x = 0;
+        uint16_t clut_y = 0;
+        uint16_t clut_w = 0;
+        uint16_t clut_h = 0;
+
+        if (
+            !fm_tim_read_u32(pos + 0u, &block_size)
+            || !fm_tim_read_u16(pos + 4u, &clut_x)
+            || !fm_tim_read_u16(pos + 6u, &clut_y)
+            || !fm_tim_read_u16(pos + 8u, &clut_w)
+            || !fm_tim_read_u16(pos + 10u, &clut_h)
+        )
+        {
+            return 0;
+        }
+
+        (void)clut_x;
+        (void)clut_y;
+
+        uint32_t expected_colors =
+            (uint32_t)clut_w
+            * (uint32_t)clut_h;
+
+        if (
+            block_size < 12u
+            || block_size > 0x00040000u
+            || clut_w == 0u
+            || clut_h == 0u
+            || expected_colors == 0u
+            || expected_colors > 4096u
+            || 12u + expected_colors * 2u > block_size
+        )
+        {
+            return 0;
+        }
+
+        /*
+         * Pour les TIM a plusieurs palettes, utiliser la premiere.
+         * C'est suffisant pour obtenir une vraie image visible.
+         */
+        palette_count = clut_w;
+
+        if (palette_count > 256u)
+        {
+            palette_count = 256u;
+        }
+
+        for (uint32_t i = 0u; i < palette_count; ++i)
+        {
+            if (
+                !fm_tim_read_u16(
+                    pos + 12u + i * 2u,
+                    &palette[i]
+                )
+            )
+            {
+                return 0;
+            }
+        }
+
+        pos += block_size;
+    }
+
+    uint32_t image_block_size = 0;
+    uint16_t image_x = 0;
+    uint16_t image_y = 0;
+    uint16_t width_words = 0;
+    uint16_t src_h16 = 0;
+
+    if (
+        !fm_tim_read_u32(pos + 0u, &image_block_size)
+        || !fm_tim_read_u16(pos + 4u, &image_x)
+        || !fm_tim_read_u16(pos + 6u, &image_y)
+        || !fm_tim_read_u16(pos + 8u, &width_words)
+        || !fm_tim_read_u16(pos + 10u, &src_h16)
+    )
+    {
+        return 0;
+    }
+
+    (void)image_x;
+    (void)image_y;
+
+    if (
+        image_block_size < 12u
+        || image_block_size > 0x00800000u
+        || width_words == 0u
+        || src_h16 == 0u
+    )
+    {
+        return 0;
+    }
+
+    uint32_t row_bytes =
+        (uint32_t)width_words * 2u;
+
+    uint32_t src_w = 0u;
+
+    switch (mode)
+    {
+        case 0u:
+            src_w = (uint32_t)width_words * 4u;
+            break;
+
+        case 1u:
+            src_w = (uint32_t)width_words * 2u;
+            break;
+
+        case 2u:
+            src_w = (uint32_t)width_words;
+            break;
+
+        case 3u:
+            src_w = row_bytes / 3u;
+            break;
+
+        default:
+            return 0;
+    }
+
+    uint32_t src_h =
+        (uint32_t)src_h16;
+
+    if (
+        src_w < 4u
+        || src_h < 4u
+        || src_w > 2048u
+        || src_h > 1024u
+        || row_bytes > 16384u
+        || 12u + row_bytes * src_h > image_block_size
+    )
+    {
+        return 0;
+    }
+
+    if (
+        mode == 0u
+        && palette_count < 16u
+    )
+    {
+        return 0;
+    }
+
+    if (
+        mode == 1u
+        && palette_count < 256u
+    )
+    {
+        return 0;
+    }
+
+    uint8_t *row =
+        malloc(
+            row_bytes
+        );
+
+    uint16_t *decoded_row =
+        malloc(
+            src_w
+            * sizeof(uint16_t)
+        );
+
+    if (!row || !decoded_row)
+    {
+        free(row);
+        free(decoded_row);
+        return 0;
+    }
+
+    memset(
+        pixels,
+        0,
+        320u * 256u * sizeof(uint16_t)
+    );
+
+    uint32_t out_w = src_w;
+    uint32_t out_h = src_h;
+
+    if (out_w > 320u)
+    {
+        out_h =
+            (uint32_t)(
+                ((uint64_t)out_h * 320u)
+                /
+                out_w
+            );
+
+        out_w = 320u;
+    }
+
+    if (out_h > 256u)
+    {
+        out_w =
+            (uint32_t)(
+                ((uint64_t)out_w * 256u)
+                /
+                out_h
+            );
+
+        out_h = 256u;
+    }
+
+    if (out_w == 0u)
+        out_w = 1u;
+
+    if (out_h == 0u)
+        out_h = 1u;
+
+    uint32_t dst_x =
+        (320u - out_w) / 2u;
+
+    uint32_t dst_y =
+        (256u - out_h) / 2u;
+
+    uint32_t last_src_y = 0xFFFFFFFFu;
+
+    for (uint32_t dy = 0u; dy < out_h; ++dy)
+    {
+        uint32_t src_y =
+            (uint32_t)(
+                ((uint64_t)dy * src_h)
+                /
+                out_h
+            );
+
+        if (src_y >= src_h)
+        {
+            src_y = src_h - 1u;
+        }
+
+        if (src_y != last_src_y)
+        {
+            uint64_t row_abs =
+                pos
+                + 12u
+                + (uint64_t)src_y * row_bytes;
+
+            if (
+                !fm_tim_read_abs(
+                    row_abs,
+                    row,
+                    row_bytes
+                )
+            )
+            {
+                free(row);
+                free(decoded_row);
+                return 0;
+            }
+
+            if (mode == 0u)
+            {
+                for (uint32_t x = 0u; x < src_w; ++x)
+                {
+                    uint8_t packed =
+                        row[x >> 1];
+
+                    uint8_t index =
+                        (x & 1u)
+                            ? (packed >> 4)
+                            : (packed & 0x0Fu);
+
+                    decoded_row[x] =
+                        palette[index];
+                }
+            }
+            else if (mode == 1u)
+            {
+                for (uint32_t x = 0u; x < src_w; ++x)
+                {
+                    decoded_row[x] =
+                        palette[row[x]];
+                }
+            }
+            else if (mode == 2u)
+            {
+                for (uint32_t x = 0u; x < src_w; ++x)
+                {
+                    decoded_row[x] =
+                        (uint16_t)row[x * 2u]
+                        |
+                        ((uint16_t)row[x * 2u + 1u] << 8);
+                }
+            }
+            else
+            {
+                for (uint32_t x = 0u; x < src_w; ++x)
+                {
+                    uint32_t o = x * 3u;
+
+                    uint8_t r = row[o + 0u];
+                    uint8_t g = row[o + 1u];
+                    uint8_t b = row[o + 2u];
+
+                    decoded_row[x] =
+                        (uint16_t)(
+                            (r >> 3)
+                            |
+                            ((uint16_t)(g >> 3) << 5)
+                            |
+                            ((uint16_t)(b >> 3) << 10)
+                        );
+                }
+            }
+
+            last_src_y = src_y;
+        }
+
+        uint16_t *dst =
+            pixels
+            + (dst_y + dy) * 320u
+            + dst_x;
+
+        for (uint32_t dx = 0u; dx < out_w; ++dx)
+        {
+            uint32_t src_x =
+                (uint32_t)(
+                    ((uint64_t)dx * src_w)
+                    /
+                    out_w
+                );
+
+            if (src_x >= src_w)
+            {
+                src_x = src_w - 1u;
+            }
+
+            dst[dx] =
+                decoded_row[src_x];
+        }
+    }
+
+    free(row);
+    free(decoded_row);
+
+    g_tim_probe.mode = mode;
+    g_tim_probe.flags = flags;
+    g_tim_probe.width = src_w;
+    g_tim_probe.height = src_h;
+    g_tim_probe.clut_colors = palette_count;
+
+    return 1;
+}
+
+
+static void fm_tim_probe_begin_full_disc(void)
+{
+    memset(
+        &g_tim_probe,
+        0,
+        sizeof(g_tim_probe)
+    );
+
+    g_tim_probe.active = 1;
+    g_tim_probe.start_lba = 0u;
+
+    /*
+     * Valeur volontairement large. Le scan s'arrete egalement si
+     * plusieurs lectures consecutives echouent.
+     */
+    g_tim_probe.end_lba = 400000u;
+    g_tim_probe.scan_lba = 0u;
+    g_tim_probe.scan_byte_offset = 0u;
+
+    strncpy(
+        g_tim_probe.target,
+        "DISC FULL SCAN",
+        sizeof(g_tim_probe.target) - 1u
+    );
+}
+
+
+static void fm_tim_probe_begin(void)
+{
+    static const char *paths[] =
+    {
+        "\\M\\MRG\\SU\\SU.MRG;1",
+        "\\M\\MRG\\SU\\SU.MRG",
+        "\\MRG\\SU\\SU.MRG;1",
+        "\\DATA\\SU.MRG;1",
+        "\\SU.MRG;1"
+    };
+
+    memset(
+        &g_tim_probe,
+        0,
+        sizeof(g_tim_probe)
+    );
+
+    uint32_t lba = 0u;
+    uint32_t size = 0u;
+
+    for (
+        unsigned i = 0u;
+        i < sizeof(paths) / sizeof(paths[0]);
+        ++i
+    )
+    {
+        if (
+            fm_disc_find_file(
+                paths[i],
+                &lba,
+                &size
+            )
+        )
+        {
+            g_tim_probe.active = 1;
+            g_tim_probe.using_named_file = 1;
+            g_tim_probe.start_lba = lba;
+            g_tim_probe.end_lba =
+                lba
+                +
+                (size + 2047u) / 2048u;
+
+            g_tim_probe.scan_lba = lba;
+            g_tim_probe.scan_byte_offset = 0u;
+
+            strncpy(
+                g_tim_probe.target,
+                paths[i],
+                sizeof(g_tim_probe.target) - 1u
+            );
+
+            return;
+        }
+    }
+
+    fm_tim_probe_begin_full_disc();
+}
+
+
+static void fm_tim_probe_next(void)
+{
+    if (!g_tim_probe.found)
+    {
+        return;
+    }
+
+    uint64_t resume =
+        g_tim_probe.found_abs_byte
+        + 4u;
+
+    g_tim_probe.scan_lba =
+        (uint32_t)(resume / 2048u);
+
+    g_tim_probe.scan_byte_offset =
+        (uint32_t)(resume % 2048u);
+
+    g_tim_probe.active = 1;
+    g_tim_probe.found = 0;
+    g_tim_probe.show = 0;
+    g_tim_probe.error = 0;
+}
+
+
+/*
+ * Scanner incrementiel : aucun blocage de plusieurs secondes.
+ * "sector_budget" peut etre eleve tant que le jeu est en pause.
+ */
+static void fm_tim_probe_step(
+    uint16_t *pixels,
+    uint32_t sector_budget
+)
+{
+    if (
+        !g_tim_probe.active
+        || g_tim_probe.found
+        || !pixels
+    )
+    {
+        return;
+    }
+
+    uint32_t consecutive_errors = 0u;
+
+    while (
+        sector_budget-- != 0u
+        && g_tim_probe.active
+    )
+    {
+        if (
+            g_tim_probe.scan_lba
+            >=
+            g_tim_probe.end_lba
+        )
+        {
+            /*
+             * Si la cible SU.MRG ne contenait aucun TIM, continuer
+             * automatiquement sur le disque complet.
+             */
+            if (g_tim_probe.using_named_file)
+            {
+                fm_tim_probe_begin_full_disc();
+                continue;
+            }
+
+            g_tim_probe.active = 0;
+            g_tim_probe.error = 2;
+            break;
+        }
+
+        uint8_t sector[2048];
+
+        if (
+            fm_disc_read_sector(
+                g_tim_probe.scan_lba,
+                sector
+            )
+            != 0
+        )
+        {
+            ++g_tim_probe.read_errors;
+            ++consecutive_errors;
+            ++g_tim_probe.scan_lba;
+            g_tim_probe.scan_byte_offset = 0u;
+
+            if (consecutive_errors >= 16u)
+            {
+                g_tim_probe.active = 0;
+                g_tim_probe.error = 1;
+            }
+
+            continue;
+        }
+
+        consecutive_errors = 0u;
+
+        uint32_t start =
+            g_tim_probe.scan_byte_offset;
+
+        if (start > 2040u)
+        {
+            start = 0u;
+        }
+
+        /*
+         * TIM est normalement aligne, mais scanner octet par octet
+         * rend le probe robuste aux conteneurs MRG.
+         */
+        for (uint32_t p = start; p + 8u <= 2048u; ++p)
+        {
+            if (
+                sector[p + 0u] != 0x10u
+                || sector[p + 1u] != 0x00u
+                || sector[p + 2u] != 0x00u
+                || sector[p + 3u] != 0x00u
+            )
+            {
+                continue;
+            }
+
+            ++g_tim_probe.candidates;
+
+            uint64_t absolute =
+                (uint64_t)g_tim_probe.scan_lba
+                * 2048u
+                +
+                p;
+
+            if (
+                fm_tim_decode_at(
+                    absolute,
+                    pixels
+                )
+            )
+            {
+                g_tim_probe.found = 1;
+                g_tim_probe.show = 1;
+                g_tim_probe.active = 0;
+                ++g_tim_probe.images_found;
+
+                g_tim_probe.found_abs_byte =
+                    absolute;
+
+                g_tim_probe.found_lba =
+                    g_tim_probe.scan_lba;
+
+                g_tim_probe.found_in_sector =
+                    p;
+
+                return;
+            }
+        }
+
+        ++g_tim_probe.scanned_sectors;
+        ++g_tim_probe.scan_lba;
+        g_tim_probe.scan_byte_offset = 0u;
+    }
+}
+
+
+
+/*
+ * ============================================================
+ * B23 - PAL-FR WA_MRG campaign background viewer
+ * ============================================================
+ *
+ * Le jeu stocke ses backgrounds de campagne dans DATA/WA_MRG.MRG.
+ * On demande d'abord AU CODE DU JEU (FUN_8002DF2C) de calculer
+ * l'LBA relatif, la taille et le type pour l'index choisi. Cela evite
+ * de figer les constantes de la version US sur notre executable PAL.
+ *
+ * En cas d'echec du petit appel guest isole, on conserve les constantes
+ * connues comme fallback de diagnostic.
+ */
+
+typedef struct FMBgViewer
+{
+    int ready;
+    int loaded;
+    int error;
+    int guest_calc_ok;
+
+    uint32_t wa_lba;
+    uint32_t wa_size;
+
+    uint32_t group;
+    uint32_t ordinal;
+    uint32_t game_index;
+
+    uint32_t rel_lba;
+    uint32_t lba_sectors;
+    uint32_t type;
+
+    uint32_t width;
+    uint32_t height;
+    uint32_t nonzero;
+
+    uint32_t calc_pc0;
+    uint32_t calc_pc1;
+    uint32_t calc_v0;
+} FMBgViewer;
+
+static FMBgViewer g_bg;
+
+/*
+ * B24 - pont runtime -> background PAL.
+ *
+ * 0x8002E11C est la vraie routine PAL qui transforme l'index de
+ * background puis programme une lecture asynchrone dans WA_MRG.MRG.
+ * Tant que la couche CD asynchrone PS1 n'est pas complete, on satisfait
+ * cette requete synchronement depuis disc.bin et on laisse le jeu
+ * poursuivre son etat. L'image affichee est donc choisie PAR LE JEU.
+ */
+static uint32_t g_bg_hle_calls = 0u;
+static uint32_t g_bg_hle_ok = 0u;
+static uint32_t g_bg_hle_fail = 0u;
+static uint32_t g_bg_hle_raw = 0u;
+static uint32_t g_bg_hle_resolved = 0u;
+static uint32_t g_bg_hle_object = 0u;
+
+/*
+ * B25 - HLE du vrai LoadImage GPU utilise par les loaders du jeu.
+ *
+ * FUN_80082380 finit normalement par programmer le DMA2 GPU puis
+ * attendre sa fin. Notre DMA de bring-up n'achemine pas encore toujours
+ * ces transferts jusqu'au software renderer. On reproduit donc ici le
+ * transfert GPU CPU->VRAM avec la commande GP0 A0h, en lisant le RECT
+ * et les pixels directement dans la RAM guest.
+ */
+static uint32_t g_loadimg_hle_calls = 0u;
+static uint32_t g_loadimg_hle_ok = 0u;
+static uint32_t g_loadimg_hle_fail = 0u;
+static uint32_t g_loadimg_hle_rect = 0u;
+static uint32_t g_loadimg_hle_src = 0u;
+static uint32_t g_loadimg_hle_pixels = 0u;
+static uint32_t g_loadimg_hle_first = 0u;
+
+
+/*
+ * ============================================================
+ * B40 - provenance des uploads de palette/CLUT
+ * ============================================================
+ *
+ * B39 montre que le sprite est bien texturé et que ses indices 4 bpp
+ * varient, mais que les 16 entrées de CLUT lues en VRAM valent toutes
+ * 0x1111. On mémorise donc les petits LoadImage (palettes probables)
+ * avec une copie des pixels AU MOMENT DE L'UPLOAD.
+ */
+#define B40_UPLOAD_RING 64u
+#define B40_UPLOAD_SNAPSHOT 1024u
+
+typedef struct FMB40UploadTrace
+{
+    uint32_t serial;
+    uint32_t src;
+    uint16_t x;
+    uint16_t y;
+    uint16_t w;
+    uint16_t h;
+    uint16_t snap_count;
+    uint16_t pixels[B40_UPLOAD_SNAPSHOT];
+} FMB40UploadTrace;
+
+static FMB40UploadTrace g_b40_uploads[B40_UPLOAD_RING];
+static uint32_t g_b40_upload_head = 0u;
+static uint32_t g_b40_upload_count = 0u;
+
+
+/*
+ * ============================================================
+ * B43 - provenance de toutes les zones texture LoadImage
+ * ============================================================
+ */
+#define B43_LOAD_RING 64u
+
+typedef struct FMB43LoadTrace
+{
+    uint32_t serial;
+    uint32_t src;
+    uint16_t x;
+    uint16_t y;
+    uint16_t w;
+    uint16_t h;
+    uint32_t first;
+} FMB43LoadTrace;
+
+static FMB43LoadTrace g_b43_loads[B43_LOAD_RING];
+static uint32_t g_b43_load_head = 0u;
+static uint32_t g_b43_load_count = 0u;
+
+
+/*
+ * B41 - provenance CD des buffers envoyes a LoadImage.
+ * 64 transferts suffisent ici : le boot observe en fait ~39 secteurs.
+ */
+#define B41_CD_RING 64u
+
+typedef struct FMB41CdTrace
+{
+    uint32_t serial;
+    uint32_t lba;
+    uint32_t dst;
+    uint32_t bytes;
+} FMB41CdTrace;
+
+static FMB41CdTrace g_b41_cd[B41_CD_RING];
+static uint32_t g_b41_cd_head = 0u;
+static uint32_t g_b41_cd_count = 0u;
+
+static int fm_hle_gpu_load_image(CPUState *cpu)
+{
+    if (!cpu)
+    {
+        return 0;
+    }
+
+    uint32_t rect = cpu->gpr[4];
+    uint32_t srcp = cpu->gpr[5];
+
+    ++g_loadimg_hle_calls;
+    g_loadimg_hle_rect = rect;
+    g_loadimg_hle_src = srcp;
+    g_loadimg_hle_pixels = 0u;
+    g_loadimg_hle_first = 0u;
+
+    if (rect == 0u || srcp == 0u)
+    {
+        ++g_loadimg_hle_fail;
+        return 0;
+    }
+
+    uint32_t x = cpu->read_half(rect + 0u) & 0x3FFu;
+    uint32_t y = cpu->read_half(rect + 2u) & 0x1FFu;
+    uint32_t w = cpu->read_half(rect + 4u);
+    uint32_t h = cpu->read_half(rect + 6u);
+
+    if (
+        w == 0u
+        || h == 0u
+        || w > 1024u
+        || h > 512u
+        || ((uint64_t)w * h) > (1024u * 512u)
+    )
+    {
+        ++g_loadimg_hle_fail;
+        return 0;
+    }
+
+    uint32_t pixels = w * h;
+    g_loadimg_hle_pixels = pixels;
+    g_loadimg_hle_first = cpu->read_word(srcp);
+
+    {
+        FMB43LoadTrace *lt =
+            &g_b43_loads[g_b43_load_head % B43_LOAD_RING];
+
+        lt->serial = g_loadimg_hle_calls;
+        lt->src = srcp;
+        lt->x = (uint16_t)x;
+        lt->y = (uint16_t)y;
+        lt->w = (uint16_t)w;
+        lt->h = (uint16_t)h;
+        lt->first = g_loadimg_hle_first;
+
+        g_b43_load_head =
+            (g_b43_load_head + 1u)
+            % B43_LOAD_RING;
+
+        if (g_b43_load_count < B43_LOAD_RING)
+        {
+            ++g_b43_load_count;
+        }
+    }
+
+    /*
+     * B40 : les CLUT PS1 arrivent typiquement sous forme de lignes
+     * 16x1 (4 bpp) ou 256x1 (8 bpp). On garde aussi quelques petits
+     * blocs afin de ne pas rater une palette empaquetée différemment.
+     */
+    if (h <= 4u && w <= 256u)
+    {
+        FMB40UploadTrace *t =
+            &g_b40_uploads[g_b40_upload_head % B40_UPLOAD_RING];
+
+        memset(t, 0, sizeof(*t));
+
+        t->serial = g_loadimg_hle_calls;
+        t->src = srcp;
+        t->x = (uint16_t)x;
+        t->y = (uint16_t)y;
+        t->w = (uint16_t)w;
+        t->h = (uint16_t)h;
+
+        uint32_t n = pixels;
+        if (n > B40_UPLOAD_SNAPSHOT)
+        {
+            n = B40_UPLOAD_SNAPSHOT;
+        }
+
+        t->snap_count = (uint16_t)n;
+
+        for (uint32_t i = 0u; i < n; ++i)
+        {
+            t->pixels[i] = cpu->read_half(srcp + i * 2u);
+        }
+
+        g_b40_upload_head =
+            (g_b40_upload_head + 1u)
+            % B40_UPLOAD_RING;
+
+        if (g_b40_upload_count < B40_UPLOAD_RING)
+        {
+            ++g_b40_upload_count;
+        }
+    }
+
+    /* GP0 A0h : CPU -> VRAM. */
+    fm_gpu_gp0_write(0xA0000000u);
+    fm_gpu_gp0_write((y << 16) | x);
+    fm_gpu_gp0_write((h << 16) | w);
+
+    for (uint32_t i = 0u; i < pixels; i += 2u)
+    {
+        uint32_t lo = cpu->read_half(srcp + i * 2u);
+        uint32_t hi = 0u;
+
+        if (i + 1u < pixels)
+        {
+            hi = cpu->read_half(srcp + (i + 1u) * 2u);
+        }
+
+        fm_gpu_gp0_write(lo | (hi << 16));
+    }
+
+    ++g_loadimg_hle_ok;
+    return 1;
+}
+
+
+
+/*
+ * ============================================================
+ * B26 - WA_MRG -> VRAM bridge
+ * ============================================================
+ *
+ * B25 a confirme que le runtime actuel n'appelle pas encore LoadImage2.
+ * Pour connecter quand meme une vraie ressource du disque au pipeline
+ * GPU PS1, on injecte le background PAL decode par B23/B24 dans les
+ * deux pages framebuffer (x=0 et x=320) via la vraie commande
+ * GP0 A0h CPU->VRAM.
+ *
+ * Ce n'est plus un simple "preview" 3DS : les pixels passent par le
+ * parser GP0 et vivent dans la VRAM emulee, donc les primitives du jeu
+ * peuvent ensuite dessiner par-dessus.
+ */
+static uint32_t g_bg_vram_pending = 0u;
+static uint32_t g_bg_vram_calls = 0u;
+static uint32_t g_bg_vram_ok = 0u;
+static uint32_t g_bg_vram_pixels = 0u;
+static uint32_t g_bg_vram_words = 0u;
+static uint32_t g_bg_vram_after_upload_nz = 0u;
+
+/*
+ * B42 : 1 = framebuffer reel du jeu, 0 = ancien mode diagnostic
+ * avec background WA_MRG force et clears noirs bloques.
+ */
+static int g_b42_native_video = 1;
+
+static void fm_bg_upload_rect_gp0(
+    const uint16_t *pixels,
+    uint32_t page_x
+)
+{
+    uint32_t src_x = 0u;
+    uint32_t src_y = 48u;
+    uint32_t w = 320u;
+    uint32_t h = 160u;
+
+    if (!pixels)
+    {
+        return;
+    }
+
+    if (g_bg.type == 2u)
+    {
+        src_x = 32u;
+        src_y = 0u;
+        w = 256u;
+        h = 256u;
+    }
+
+    uint32_t dst_x = page_x + src_x;
+    uint32_t dst_y = src_y;
+
+    fm_gpu_gp0_write(0xA0000000u);
+    fm_gpu_gp0_write((dst_y << 16) | dst_x);
+    fm_gpu_gp0_write((h << 16) | w);
+
+    uint32_t packed = 0u;
+    uint32_t half = 0u;
+
+    for (uint32_t y = 0u; y < h; ++y)
+    {
+        const uint16_t *row =
+            pixels + (src_y + y) * 320u + src_x;
+
+        for (uint32_t x = 0u; x < w; ++x)
+        {
+            uint32_t c = row[x];
+
+            if (half == 0u)
+            {
+                packed = c;
+                half = 1u;
+            }
+            else
+            {
+                packed |= c << 16;
+                fm_gpu_gp0_write(packed);
+                packed = 0u;
+                half = 0u;
+                ++g_bg_vram_words;
+            }
+
+            ++g_bg_vram_pixels;
+        }
+    }
+
+    if (half != 0u)
+    {
+        fm_gpu_gp0_write(packed);
+        ++g_bg_vram_words;
+    }
+}
+
+
+static void fm_bg_upload_preview_to_vram(
+    const uint16_t *pixels
+)
+{
+    if (!pixels || !g_bg.loaded)
+    {
+        return;
+    }
+
+    ++g_bg_vram_calls;
+    g_bg_vram_pixels = 0u;
+    g_bg_vram_words = 0u;
+
+    fm_bg_upload_rect_gp0(pixels, 0u);
+    fm_bg_upload_rect_gp0(pixels, 320u);
+
+    /* Snapshot immediat : prouve si l'upload a reellement rempli la VRAM. */
+    FMGpuDebugStats snap;
+    memset(&snap, 0, sizeof(snap));
+    fm_gpu_debug_stats(&snap);
+    g_bg_vram_after_upload_nz = snap.nonzero_vram;
+
+    ++g_bg_vram_ok;
+}
+
+
+static uint32_t fm_bg_bcd_index(uint32_t group, uint32_t ordinal)
+{
+    ordinal %= 100u;
+
+    return
+        ((group & 0xFFu) << 8)
+        |
+        (((ordinal / 10u) & 0x0Fu) << 4)
+        |
+        (ordinal % 10u);
+}
+
+
+static int fm_bg_calc_lba_guest(
+    CPUState *cpu,
+    uint32_t game_index,
+    uint32_t *out_lba,
+    uint32_t *out_size,
+    uint32_t *out_type
+)
+{
+    const uint32_t sentinel = 0x8000FFD0u;
+    const uint32_t scratch = 0x801FC800u;
+
+    if (!cpu || !out_lba || !out_size || !out_type)
+    {
+        return 0;
+    }
+
+    cpu->write_word(scratch + 0u, 0u);
+    cpu->write_word(scratch + 4u, 0u);
+
+    CPUState t = *cpu;
+
+    t.pc = 0x8002DF2Cu;
+    t.gpr[4] = game_index;
+    t.gpr[5] = scratch + 0u;
+    t.gpr[6] = scratch + 4u;
+    t.gpr[29] = 0x801FC700u;
+    t.gpr[31] = sentinel;
+    t.gpr[0] = 0u;
+
+    g_bg.calc_pc0 = t.pc;
+    g_bg.calc_pc1 = 0u;
+    g_bg.calc_v0 = 0u;
+
+    for (uint32_t handoff = 0u; handoff < 16u; ++handoff)
+    {
+        g_bg.calc_pc1 = t.pc;
+
+        if (t.pc == sentinel)
+        {
+            uint32_t lba = t.gpr[2];
+            uint32_t sz = cpu->read_word(scratch + 0u);
+            uint32_t ty = cpu->read_word(scratch + 4u);
+
+            g_bg.calc_v0 = lba;
+
+            if (
+                ty <= 2u
+                &&
+                (
+                    sz == 0x21u
+                    || sz == 0x51u
+                    || sz == 0x71u
+                )
+                && lba < 0x20000u
+            )
+            {
+                *out_lba = lba;
+                *out_size = sz;
+                *out_type = ty;
+                return 1;
+            }
+
+            return 0;
+        }
+
+        FMRuntimeProbeResult p =
+            fm_runtime_probe(
+                &t,
+                t.pc,
+                8192u
+            );
+
+        if (p.reason == FM_STOP_BUDGET)
+        {
+            continue;
+        }
+
+        if (p.reason == FM_STOP_RETURNED)
+        {
+            if (p.dispatch_result == 1)
+            {
+                continue;
+            }
+
+            FMInterpResult ir =
+                fm_interp_run_block(
+                    &t,
+                    512u
+                );
+
+            if (
+                ir.reason == FM_INTERP_BLOCK_DONE
+                || ir.reason == FM_INTERP_BUDGET
+            )
+            {
+                continue;
+            }
+        }
+
+        return 0;
+    }
+
+    return 0;
+}
+
+
+static void fm_bg_calc_lba_fallback(
+    uint32_t game_index,
+    uint32_t *out_lba,
+    uint32_t *out_size,
+    uint32_t *out_type
+)
+{
+    uint32_t group = game_index >> 8;
+    uint32_t low = game_index & 0xFFu;
+    uint32_t ordinal =
+        10u * ((low >> 4) & 0x0Fu)
+        + (low & 0x0Fu);
+
+    uint32_t start = 0u;
+    uint32_t size = 0x21u;
+
+    if (group == 1u)
+    {
+        start = 0x672u;
+        size = 0x51u;
+    }
+    else if (group == 2u)
+    {
+        start = 0x13BCu;
+        size = 0x71u;
+    }
+
+    *out_lba = 0x29E8u + start + ordinal * size;
+    *out_size = size;
+    *out_type = group <= 2u ? group : 0u;
+}
+
+
+static int fm_bg_read_block(
+    uint32_t absolute_lba,
+    uint8_t *dst,
+    uint32_t sectors
+)
+{
+    for (uint32_t s = 0u; s < sectors; ++s)
+    {
+        if (
+            fm_disc_read_sector(
+                absolute_lba + s,
+                dst + s * 2048u
+            )
+            != 0
+        )
+        {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+
+static void fm_bg_clear_preview(uint16_t *pixels)
+{
+    if (pixels)
+    {
+        memset(
+            pixels,
+            0,
+            320u * 256u * sizeof(uint16_t)
+        );
+    }
+}
+
+
+static int fm_bg_decode_main0(
+    const uint8_t *block,
+    uint32_t block_bytes,
+    uint32_t type,
+    uint16_t *pixels
+)
+{
+    if (!block || !pixels || type > 2u)
+    {
+        return 0;
+    }
+
+    const uint32_t img_size = 128u * 512u;
+    const uint32_t simg_half = (256u * 256u) / 2u;
+
+    uint32_t img_count = 1u;
+    uint32_t simg_count = 0u;
+
+    if (type == 1u)
+    {
+        img_count = 2u;
+        simg_count = 1u;
+    }
+    else if (type == 2u)
+    {
+        img_count = 3u;
+        simg_count = 1u;
+    }
+
+    uint32_t palette_off =
+        img_size * img_count
+        + simg_half * simg_count;
+
+    if (palette_off + 512u > block_bytes)
+    {
+        return 0;
+    }
+
+    const uint8_t *indices = block;
+    const uint16_t *palette =
+        (const uint16_t *)(block + palette_off);
+
+    fm_bg_clear_preview(pixels);
+
+    uint32_t nz = 0u;
+
+    if (type == 2u)
+    {
+        /*
+         * Type 2, image principale 0 : 128x512 -> 256x256.
+         * Les deux moities 128x256 deviennent gauche / droite.
+         */
+        const uint32_t dst_x0 = 32u;
+
+        for (uint32_t y = 0u; y < 256u; ++y)
+        {
+            for (uint32_t x = 0u; x < 256u; ++x)
+            {
+                uint32_t src_index;
+
+                if (x < 128u)
+                {
+                    src_index = y * 128u + x;
+                }
+                else
+                {
+                    src_index =
+                        32768u
+                        + y * 128u
+                        + (x - 128u);
+                }
+
+                uint16_t c = palette[indices[src_index]];
+                pixels[y * 320u + dst_x0 + x] = c;
+
+                if ((c & 0x7FFFu) != 0u)
+                {
+                    ++nz;
+                }
+            }
+        }
+
+        g_bg.width = 256u;
+        g_bg.height = 256u;
+    }
+    else
+    {
+        /*
+         * Type 0/1, image principale 0 : untile 128x512 -> 320x160.
+         * Mapping equivalent au viewer public BGEx, mais directement
+         * en RGB555 pour notre framebuffer 3DS.
+         */
+        const uint32_t dst_y0 = 48u;
+        const uint32_t part2_start = img_size / 2u;          /* 32768 */
+        const uint32_t part2_size = 128u * 160u;             /* 20480 */
+        const uint32_t part34_start = part2_start + part2_size; /* 53248 */
+
+        for (uint32_t y = 0u; y < 160u; ++y)
+        {
+            for (uint32_t x = 0u; x < 320u; ++x)
+            {
+                uint32_t src_index;
+
+                if (x < 128u)
+                {
+                    src_index = y * 128u + x;
+                }
+                else if (x < 256u)
+                {
+                    src_index =
+                        part2_start
+                        + y * 128u
+                        + (x - 128u);
+                }
+                else if (y < 80u)
+                {
+                    src_index =
+                        part34_start
+                        + y * 128u
+                        + (x - 256u);
+                }
+                else
+                {
+                    src_index =
+                        part34_start
+                        + (y - 80u) * 128u
+                        + 64u
+                        + (x - 256u);
+                }
+
+                if (src_index >= img_size)
+                {
+                    return 0;
+                }
+
+                uint16_t c = palette[indices[src_index]];
+                pixels[(dst_y0 + y) * 320u + x] = c;
+
+                if ((c & 0x7FFFu) != 0u)
+                {
+                    ++nz;
+                }
+            }
+        }
+
+        g_bg.width = 320u;
+        g_bg.height = 160u;
+    }
+
+    g_bg.nonzero = nz;
+    return nz != 0u;
+}
+
+
+static int fm_bg_load(
+    CPUState *cpu,
+    uint16_t *pixels
+)
+{
+    if (!cpu || !pixels || !g_bg.ready)
+    {
+        return 0;
+    }
+
+    g_bg.loaded = 0;
+    g_bg.error = 0;
+    g_bg.game_index =
+        fm_bg_bcd_index(
+            g_bg.group,
+            g_bg.ordinal
+        );
+
+    uint32_t rel = 0u;
+    uint32_t sectors = 0u;
+    uint32_t type = 0u;
+
+    /*
+     * PAL-FR (SLES_039.48): the background loader uses 0x29E8
+     * as the WA_MRG-relative base. The old 0x8002DF2C probe was
+     * from the US layout and is not the PAL calculator entry point.
+     * Use the constants recovered from this executable directly.
+     */
+    g_bg.guest_calc_ok = 0;
+
+    fm_bg_calc_lba_fallback(
+        g_bg.game_index,
+        &rel,
+        &sectors,
+        &type
+    );
+
+    g_bg.rel_lba = rel;
+    g_bg.lba_sectors = sectors;
+    g_bg.type = type;
+
+    if (
+        sectors == 0u
+        || sectors > 0x80u
+        || type > 2u
+        || ((uint64_t)rel + sectors) * 2048u > g_bg.wa_size
+    )
+    {
+        g_bg.error = 3;
+        fm_bg_clear_preview(pixels);
+        return 0;
+    }
+
+    uint32_t bytes = sectors * 2048u;
+    uint8_t *block = (uint8_t *)malloc(bytes);
+
+    if (!block)
+    {
+        g_bg.error = 4;
+        return 0;
+    }
+
+    int ok =
+        fm_bg_read_block(
+            g_bg.wa_lba + rel,
+            block,
+            sectors
+        );
+
+    if (!ok)
+    {
+        free(block);
+        g_bg.error = 5;
+        return 0;
+    }
+
+    ok =
+        fm_bg_decode_main0(
+            block,
+            bytes,
+            type,
+            pixels
+        );
+
+    free(block);
+
+    if (!ok)
+    {
+        g_bg.error = 6;
+        return 0;
+    }
+
+    g_bg.loaded = 1;
+    g_bg_vram_pending = 1u;
+    return 1;
+}
+
+
+static void fm_bg_begin(
+    CPUState *cpu,
+    uint16_t *pixels
+)
+{
+    memset(&g_bg, 0, sizeof(g_bg));
+
+    uint32_t lba = 0u;
+    uint32_t size = 0u;
+
+    static const char *paths[] =
+    {
+        "\\DATA\\WA_MRG.MRG;1",
+        "\\DATA\\WA_MRG.MRG",
+        "\\WA_MRG.MRG;1"
+    };
+
+    for (unsigned i = 0u; i < sizeof(paths) / sizeof(paths[0]); ++i)
+    {
+        if (fm_disc_find_file(paths[i], &lba, &size))
+        {
+            g_bg.wa_lba = lba;
+            g_bg.wa_size = size;
+            g_bg.ready = 1;
+            break;
+        }
+    }
+
+    if (!g_bg.ready)
+    {
+        g_bg.error = 1;
+        return;
+    }
+
+    g_bg.group = 0u;
+    g_bg.ordinal = 1u;
+
+    fm_bg_load(cpu, pixels);
+}
+
+
+static void fm_bg_change(
+    CPUState *cpu,
+    uint16_t *pixels,
+    int delta_ordinal,
+    int delta_group
+)
+{
+    int group = (int)g_bg.group + delta_group;
+
+    while (group < 0)
+        group += 3;
+    while (group > 2)
+        group -= 3;
+
+    int ordinal = (int)g_bg.ordinal + delta_ordinal;
+
+    while (ordinal < 0)
+        ordinal += 100;
+    while (ordinal >= 100)
+        ordinal -= 100;
+
+    g_bg.group = (uint32_t)group;
+    g_bg.ordinal = (uint32_t)ordinal;
+
+    fm_bg_load(cpu, pixels);
+}
+
+/*
+ * Resout les deux indices speciaux 0x10/0x11 exactement comme la
+ * routine PAL 0x8002E11C. Le choix depend de DAT_8009C44B.
+ */
+static uint32_t fm_bg_resolve_runtime_index(
+    CPUState *cpu,
+    uint32_t raw_index
+)
+{
+    uint32_t idx = raw_index & 0xFFFFu;
+
+    if (!cpu)
+    {
+        return idx;
+    }
+
+    if (idx == 0x10u || idx == 0x11u)
+    {
+        uint8_t variant = cpu->read_byte(0x8009C44Bu);
+
+        if (variant >= 1u && variant <= 4u)
+        {
+            uint32_t base =
+                idx == 0x10u
+                    ? 0x42u
+                    : 0x43u;
+
+            idx = base + (uint32_t)(variant - 1u) * 2u;
+        }
+    }
+
+    return idx;
+}
+
+
+static int fm_bg_load_game_index(
+    CPUState *cpu,
+    uint16_t *pixels,
+    uint32_t game_index
+)
+{
+    uint32_t group = (game_index >> 8) & 0xFFu;
+    uint32_t low = game_index & 0xFFu;
+    uint32_t tens = (low >> 4) & 0x0Fu;
+    uint32_t ones = low & 0x0Fu;
+
+    if (group > 2u || tens > 9u || ones > 9u)
+    {
+        return 0;
+    }
+
+    uint32_t ordinal = tens * 10u + ones;
+
+    /* Eviter de relire 0x21..0x71 secteurs si le jeu redemande
+       exactement le background deja affiche. */
+    if (
+        g_bg.loaded
+        && g_bg.group == group
+        && g_bg.ordinal == ordinal
+    )
+    {
+        return 1;
+    }
+
+    g_bg.group = group;
+    g_bg.ordinal = ordinal;
+
+    return fm_bg_load(cpu, pixels);
 }
 
 
@@ -821,6 +4743,125 @@ static int load_preview(uint16_t *pixels)
  * ============================================================
  */
 
+
+/*
+ * ============================================================
+ * B33 - immediate LibCD callback bridge
+ * ============================================================
+ */
+static void fm_b33_fill_cd_result(CPUState *cpu, uint32_t command)
+{
+    if (!cpu)
+    {
+        return;
+    }
+
+    for (unsigned i = 0; i < 16u; ++i)
+    {
+        cpu->write_byte(g_b33_result_scratch + i, 0u);
+    }
+
+    /* Status "OK/ready" utilise par nos autres HLE LibCD. */
+    cpu->write_byte(g_b33_result_scratch + 0u, 0x02u);
+
+    /*
+     * CdlGetlocL (0x10) : FUN_800142AC convertit les 3 premiers
+     * octets BCD en LBA. Fournir la position host courante permet
+     * au vrai callback de conserver un etat coherent.
+     */
+    if (command == 0x10u)
+    {
+        uint32_t abs_sector = g_cd_lba + 150u;
+        uint32_t minute = abs_sector / (60u * 75u);
+        uint32_t rem = abs_sector % (60u * 75u);
+        uint32_t second = rem / 75u;
+        uint32_t frame_cd = rem % 75u;
+
+        cpu->write_byte(
+            g_b33_result_scratch + 0u,
+            (uint8_t)(((minute / 10u) << 4) | (minute % 10u))
+        );
+        cpu->write_byte(
+            g_b33_result_scratch + 1u,
+            (uint8_t)(((second / 10u) << 4) | (second % 10u))
+        );
+        cpu->write_byte(
+            g_b33_result_scratch + 2u,
+            (uint8_t)(((frame_cd / 10u) << 4) | (frame_cd % 10u))
+        );
+    }
+}
+
+
+static int fm_b33_schedule_cd_callback(
+    CPUState *cpu,
+    uint32_t command,
+    uint32_t callback,
+    uint32_t resume_pc,
+    uint32_t params,
+    uint32_t context
+)
+{
+    if (!cpu)
+    {
+        return 0;
+    }
+
+    g_b33_cb_cmd = command & 0xFFu;
+    g_b33_cb_addr = callback;
+    g_b33_cb_resume = resume_pc;
+    g_b33_last_params = params;
+    g_b33_last_ctx = context;
+
+    fm_b33_fill_cd_result(cpu, command);
+
+    /* Pas de callback : la commande est simplement acceptee. */
+    if (
+        callback < 0x80010000u
+        || callback >= 0x801E0000u
+    )
+    {
+        ++g_b33_cb_skipped;
+        cpu->gpr[2] = 1u;
+        cpu->pc = resume_pc;
+        cpu->gpr[31] = resume_pc;
+        cpu->gpr[0] = 0u;
+        return 1;
+    }
+
+    /* Une seule profondeur suffit pour le chemin succes (event 2). */
+    if (g_b33_cb_active)
+    {
+        ++g_b33_cb_skipped;
+        cpu->gpr[2] = 1u;
+        cpu->pc = resume_pc;
+        cpu->gpr[31] = resume_pc;
+        cpu->gpr[0] = 0u;
+        return 1;
+    }
+
+    for (unsigned i = 0; i < 32u; ++i)
+    {
+        g_b33_saved_gpr[i] = cpu->gpr[i];
+    }
+    ++g_b33_ctx_saved;
+
+    g_b33_cb_active = 1u;
+    ++g_b33_cb_started;
+
+    /*
+     * Les callbacks du moteur testent a0 == 2 pour CdlComplete
+     * et a0 == 5 pour l'erreur/retry. a1 pointe sur le resultat.
+     */
+    cpu->gpr[4] = 2u;
+    cpu->gpr[5] = g_b33_result_scratch;
+    cpu->pc = callback;
+    cpu->gpr[31] = g_b33_cb_sentinel;
+    cpu->gpr[0] = 0u;
+
+    return 1;
+}
+
 int main(void)
 {
     gfxInitDefault();
@@ -864,6 +4905,14 @@ int main(void)
             * sizeof(uint16_t)
         );
 
+    /* B24 : fond WA_MRG + primitives GPU du runtime superposees. */
+    uint16_t *composite =
+        malloc(
+            320
+            * 256
+            * sizeof(uint16_t)
+        );
+
     uint8_t *ram =
         malloc(
             2
@@ -874,6 +4923,7 @@ int main(void)
     if (
         !vram
         || !preview
+        || !composite
         || !ram
     )
     {
@@ -898,6 +4948,7 @@ int main(void)
 
         free(vram);
         free(preview);
+        free(composite);
         free(ram);
 
         gfxExit();
@@ -941,8 +4992,11 @@ int main(void)
             preview
         );
 
-    int show_preview =
-        have_preview;
+    /*
+     * B15 : pas de preview artificielle pendant le bring-up.
+     * On veut voir la VRAM du vrai jeu des qu'un seul pixel apparait.
+     */
+    int show_preview = 0;
 
     int crop = 0;
     int x = 160;
@@ -969,6 +5023,8 @@ int main(void)
                 ram,
                 &entry
             );
+
+    /* B24 : WA_MRG PAL-FR + pont vers les requetes du runtime. */
 
 
     /*
@@ -1004,6 +5060,16 @@ int main(void)
             cpu->read_word(
                 cpu->pc
             );
+    }
+
+
+    /*
+     * B24 : garder un background de reference immediat, puis le runtime
+     * remplacera automatiquement cet index via le hook 8002E11C.
+     */
+    if (disc_status == 0 && cpu && memory_status == 0)
+    {
+        fm_bg_begin(cpu, preview);
     }
 
 
@@ -1209,22 +5275,358 @@ int main(void)
         )
         {
             /*
-             * Plusieurs passages ARM / BIOS / R3000A
-             * dans la même frame.
+             * B15 : une fois en mode DIRECT-2DF, chaque retour a la
+             * sentinelle declenche exactement une nouvelle iteration de
+             * la vraie machine d'etat au debut de la frame suivante.
              */
+            if (
+                g_direct2df_active
+                && cpu->pc == g_direct2df_sentinel
+            )
+            {
+                cpu->pc = 0x8002DF60u;
+                cpu->gpr[31] = g_direct2df_sentinel;
+                cpu->gpr[0] = 0u;
+
+                ++g_direct2df_calls;
+            }
+
+            /*
+             * Plusieurs passages ARM / BIOS / R3000A dans la meme frame.
+             *
+             * B16 : en DIRECT-2DF on vise une tranche courte (~5 ms max)
+             * afin de rendre la main a Azahar/3DS et retrouver ~60 FPS.
+             */
+            uint64_t b16_slice_start_ms = osGetTime();
+            unsigned b16_handoff_count = 0u;
+            unsigned b16_handoff_limit =
+                g_direct2df_active ? 16u : 128u;
+
             for (
                 unsigned handoff = 0;
-                handoff < 128
+                handoff < b16_handoff_limit
                 && game_running;
                 ++handoff
             )
             {
+                b16_handoff_count = handoff + 1u;
+
+                if (
+                    g_direct2df_active
+                    && handoff != 0u
+                    && (osGetTime() - b16_slice_start_ms) >= 5u
+                )
+                {
+                    ++g_b16_slice_yields;
+                    break;
+                }
                 uint32_t dispatch_address =
                     cpu->pc;
 
                 uint32_t phys =
                     dispatch_address
                     & 0x1FFFFFFFu;
+
+
+                /*
+                 * ============================================
+                 * B37 - DMA2/GPU sync
+                 * ============================================
+                 *
+                 * FUN_800819E0:
+                 *   80081A90 -> poll DMA2 CHCR bit24
+                 *   80081AC0 -> poll GPUSTAT bit26
+                 *
+                 * Notre DMA host est immediat : si bit24 reste leve
+                 * quand le jeu entre dans cette attente, on termine le
+                 * handshake en relachant START/BUSY + manual trigger.
+                 */
+                if (
+                    phys >= 0x00081A90u
+                    &&
+                    phys <= 0x00081ABCu
+                )
+                {
+                    uint32_t chcr =
+                        fm_memory_read_word(0x1F8010A8u);
+
+                    g_b37_last_chcr_before = chcr;
+                    g_b37_last_gpustat =
+                        fm_memory_read_word(0x1F801814u);
+                    g_b37_ring_write =
+                        fm_memory_read_word(0x80095BC0u);
+                    g_b37_ring_read =
+                        fm_memory_read_word(0x80095BC4u);
+
+                    ++g_b37_dma_wait_hits;
+
+                    if (chcr & 0x01000000u)
+                    {
+                        uint32_t done_chcr =
+                            chcr
+                            &
+                            ~(
+                                0x01000000u
+                                |
+                                0x10000000u
+                            );
+
+                        fm_memory_write_word(
+                            0x1F8010A8u,
+                            done_chcr
+                        );
+
+                        g_b37_last_chcr_after =
+                            fm_memory_read_word(0x1F8010A8u);
+
+                        ++g_b37_dma_forced_clear;
+                    }
+                    else
+                    {
+                        g_b37_last_chcr_after = chcr;
+                    }
+                }
+
+                if (
+                    phys >= 0x00081AC0u
+                    &&
+                    phys <= 0x00081ADCu
+                )
+                {
+                    g_b37_last_gpustat =
+                        fm_memory_read_word(0x1F801814u);
+                    g_b37_ring_write =
+                        fm_memory_read_word(0x80095BC0u);
+                    g_b37_ring_read =
+                        fm_memory_read_word(0x80095BC4u);
+                }
+
+
+                /*
+                 * Retour normal d'une iteration DIRECT-2DF.
+                 * Ne pas tenter de dispatcher la sentinelle.
+                 */
+                if (
+                    g_direct2df_active
+                    && dispatch_address == g_direct2df_sentinel
+                )
+                {
+                    ++g_direct2df_returns;
+                    g_direct2df_last_pc = dispatch_address;
+                    static_miss = 0;
+                    break;
+                }
+
+                /* Retour du vrai callback LibCD guest lance par B33/B34. */
+                if (
+                    g_b33_cb_active
+                    && dispatch_address == g_b33_cb_sentinel
+                )
+                {
+                    uint32_t resume_pc = g_b33_cb_resume;
+                    uint32_t completed_cmd = g_b33_cb_cmd & 0xFFu;
+
+                    g_b33_cb_active = 0u;
+                    ++g_b33_cb_done;
+
+                    /* B36: le callback est une interruption logique.
+                     * Restaurer les registres du caller de la commande,
+                     * puis seulement poser la valeur de retour de l'enqueue. */
+                    for (unsigned i = 0; i < 32u; ++i)
+                    {
+                        cpu->gpr[i] = g_b33_saved_gpr[i];
+                    }
+                    ++g_b33_ctx_restored;
+
+                    cpu->gpr[2] = 1u;
+                    cpu->pc = resume_pc;
+                    cpu->gpr[0] = 0u;
+
+                    /*
+                     * ReadN accepte : le vrai controleur PS1 livrerait
+                     * ensuite CdlDataReady (event 1). On l'arme pour la
+                     * frame suivante, afin de ne pas faire completion et
+                     * data-ready dans la meme pseudo-interruption.
+                     */
+                    if (completed_cmd == 0x06u)
+                    {
+                        g_b34_ready_pending = 1u;
+                        g_b34_ready_arm_frame = frame + 1u;
+                    }
+
+                    static_miss = 0;
+                    continue;
+                }
+
+                /*
+                 * B35 : retour du vrai cleanup CD FUN_800143D4.
+                 * Reprendre exactement le PC suspendu avant le
+                 * DataReady une fois les flags CD nettoyes par le jeu.
+                 */
+                if (
+                    g_b35_finalizer_active
+                    && dispatch_address == g_b35_finalizer_sentinel
+                )
+                {
+                    uint32_t resume_pc = g_b35_saved_pc;
+
+                    g_b35_finalizer_active = 0u;
+                    ++g_b35_finalizer_done;
+                    g_b35_c460_after = cpu->read_word(0x8009C460u);
+
+                    /* B36: ne surtout pas remplacer RA par PC.
+                     * Sur B35 cela pouvait transformer VSync en boucle
+                     * auto-referente (PC=RA=800746B8). */
+                    for (unsigned i = 0; i < 32u; ++i)
+                    {
+                        cpu->gpr[i] = g_b35_saved_gpr[i];
+                    }
+                    ++g_b35_ctx_restored;
+
+                    cpu->pc = resume_pc;
+                    cpu->gpr[0] = 0u;
+
+                    static_miss = 0;
+                    continue;
+                }
+
+                /* Retour du callback CdlDataReady (80013B44). */
+                if (
+                    g_b34_ready_active
+                    && dispatch_address == g_b34_ready_sentinel
+                )
+                {
+                    uint32_t resume_pc = g_b34_ready_saved_pc;
+
+                    g_b34_ready_active = 0u;
+                    ++g_b34_ready_done;
+
+                    /* Le callback peut librement modifier a/t/v/ra. Pour
+                     * retrouver la requete, utiliser le GP sauvegarde du
+                     * contexte interrompu, pas celui de fin de callback. */
+                    uint32_t req = 0u;
+                    if (g_b34_ready_saved_gpr[28] != 0u)
+                    {
+                        req = cpu->read_word(g_b34_ready_saved_gpr[28] + 0x10u);
+                    }
+                    if (req < 0x80000000u || req >= 0x80200000u)
+                    {
+                        req = 0x800EB1B8u;
+                    }
+
+                    g_b34_ready_req = req;
+                    g_b34_ready_after = cpu->read_word(req + 0x10u);
+
+                    /* B36 : restaurer le vrai contexte interrompu AVANT
+                     * de reprendre ou d'appeler le cleanup final. */
+                    for (unsigned i = 0; i < 32u; ++i)
+                    {
+                        cpu->gpr[i] = g_b34_ready_saved_gpr[i];
+                    }
+                    ++g_b34_ready_ctx_restored;
+                    cpu->pc = resume_pc;
+                    cpu->gpr[0] = 0u;
+
+                    if ((int32_t)g_b34_ready_after > 0)
+                    {
+                        g_b34_ready_pending = 1u;
+                        g_b34_ready_arm_frame = frame + 1u;
+                    }
+                    else
+                    {
+                        g_b34_ready_pending = 0u;
+                        g_cd_reading = 0;
+
+                        /* Dernier secteur consomme : appeler le vrai
+                         * cleanup depuis le contexte restaure, puis remettre
+                         * CE MEME contexte apres son retour. */
+                        g_b35_finalizer_resume = resume_pc;
+                        g_b35_saved_pc = resume_pc;
+                        g_b35_saved_ra = cpu->gpr[31];
+                        for (unsigned i = 0; i < 32u; ++i)
+                        {
+                            g_b35_saved_gpr[i] = cpu->gpr[i];
+                        }
+                        ++g_b35_ctx_saved;
+
+                        g_b35_c460_before = cpu->read_word(0x8009C460u);
+                        g_b35_finalizer_active = 1u;
+                        ++g_b35_finalizer_started;
+
+                        cpu->pc = g_b35_finalizer_addr;
+                        cpu->gpr[31] = g_b35_finalizer_sentinel;
+                        cpu->gpr[0] = 0u;
+                    }
+
+                    static_miss = 0;
+                    continue;
+                }
+
+                /*
+                 * B34 : livraison d'un vrai CdlDataReady au callback
+                 * moteur 80013B44. Ce callback appelle ensuite
+                 * FUN_8007E968, qui est deja ponte par B32 vers disc.bin.
+                 */
+                if (
+                    g_b34_ready_pending
+                    && !g_b34_ready_active
+                    && !g_b33_cb_active
+                    && frame >= g_b34_ready_arm_frame
+                )
+                {
+                    uint32_t req = 0u;
+                    if (cpu->gpr[28] != 0u)
+                    {
+                        req = cpu->read_word(cpu->gpr[28] + 0x10u);
+                    }
+                    if (req < 0x80000000u || req >= 0x80200000u)
+                    {
+                        req = 0x800EB1B8u;
+                    }
+
+                    uint32_t remaining = cpu->read_word(req + 0x10u);
+                    g_b34_ready_req = req;
+                    g_b34_ready_before = remaining;
+
+                    if ((int32_t)remaining > 0)
+                    {
+                        g_b34_ready_pending = 0u;
+                        g_b34_ready_active = 1u;
+                        g_b34_ready_resume = dispatch_address;
+                        g_b34_ready_saved_pc = dispatch_address;
+                        g_b34_ready_saved_ra = cpu->gpr[31];
+                        for (unsigned i = 0; i < 32u; ++i)
+                        {
+                            g_b34_ready_saved_gpr[i] = cpu->gpr[i];
+                        }
+                        ++g_b34_ready_ctx_saved;
+                        ++g_b34_ready_started;
+
+                        cpu->gpr[4] = 1u; /* CdlDataReady */
+                        cpu->gpr[5] = g_b33_result_scratch;
+                        cpu->pc = g_b34_ready_cb;
+                        cpu->gpr[31] = g_b34_ready_sentinel;
+                        cpu->gpr[0] = 0u;
+
+                        static_miss = 0;
+                        continue;
+                    }
+
+                    g_b34_ready_pending = 0u;
+                }
+
+
+                if (g_direct2df_active)
+                {
+                    g_direct2df_last_pc = dispatch_address;
+                }
+
+
+                fm_trace_dispatch(
+                    cpu,
+                    dispatch_address,
+                    phys
+                );
 
 
                 /*
@@ -1418,6 +5820,15 @@ int main(void)
                  */
                 if (phys == 0x000746B8u)
                 {
+                    /*
+                     * Snapshot de la pile avant de toucher aux
+                     * registres de retour. Le dernier build montre
+                     * que le boot repasse constamment ici.
+                     */
+                    fm_capture_vsync_stack(
+                        cpu
+                    );
+
                     int32_t mode =
                         (int32_t)cpu->gpr[4];
 
@@ -1490,13 +5901,84 @@ int main(void)
 
 
                     /*
-                     * VSync(1) :
-                     * ne bloque pas.
+                     * VSync(1) : temps depuis le dernier VBlank
+                     * en unites HSync.
+                     *
+                     * Le Timer1 PS1 n'est pas encore suffisamment
+                     * cadence pendant le bring-up. Utiliser directement
+                     * sa valeur ici peut donc renvoyer 0 indefiniment et
+                     * enfermer le jeu dans ses boucles de timeout.
+                     *
+                     * On derive temporairement ce temps de l'horloge hote.
+                     * Forbidden Memories PAL utilise environ 15.625 kHz
+                     * d'HSync, soit 15.625 lignes par milliseconde.
                      */
                     if (mode == 1)
                     {
+                        ++g_vsync_hle_mode1_calls;
+
+
+                        uint64_t host_now_ms =
+                            osGetTime();
+
+
+                        if (g_vsync_host_epoch_ms == 0)
+                        {
+                            g_vsync_host_epoch_ms =
+                                host_now_ms;
+                        }
+
+
+                        uint64_t elapsed_ms =
+                            host_now_ms
+                            -
+                            g_vsync_host_epoch_ms;
+
+
+                        uint64_t host_hsync64 =
+                            (
+                                elapsed_ms
+                                *
+                                15625ull
+                            )
+                            /
+                            1000ull;
+
+
+                        if (host_hsync64 > 0xFFFFu)
+                        {
+                            host_hsync64 =
+                                0xFFFFu;
+                        }
+
+
+                        uint32_t host_hsync =
+                            (uint32_t)host_hsync64;
+
+
+                        g_vsync_hle_mode1_last =
+                            host_hsync;
+
+
+                        if (host_hsync != 0u)
+                        {
+                            ++g_vsync_hle_mode1_nonzero;
+                        }
+
+
+                        if (
+                            host_hsync
+                            >
+                            g_vsync_hle_mode1_max
+                        )
+                        {
+                            g_vsync_hle_mode1_max =
+                                host_hsync;
+                        }
+
+
                         cpu->gpr[2] =
-                            timer_delta;
+                            host_hsync;
 
 
                         cpu->pc =
@@ -1592,6 +6074,13 @@ int main(void)
                         0x80092DB8u,
                         timer_now
                     );
+
+
+                    /*
+                     * Nouveau point de depart pour VSync(1).
+                     */
+                    g_vsync_host_epoch_ms =
+                        osGetTime();
 
 
                     cpu->gpr[2] =
@@ -1695,6 +6184,344 @@ int main(void)
                     static_miss = 1;
                     game_running = 0;
                     break;
+                }
+
+
+                /*
+                 * ============================================
+                 * B33 - LibCD async command callback bridge
+                 *
+                 * FUN_8007B78C(command, params, callback, context)
+                 *
+                 * La PS1 place la commande en file puis livre le callback
+                 * plus tard. Sur notre backend host la commande peut etre
+                 * consideree terminee immediatement : on execute toutefois
+                 * le VRAI callback du jeu (event 2) afin que sa machine
+                 * d'etat avance sans inventer ses effets internes.
+                 * ============================================
+                 */
+                if (phys == 0x0007B78Cu)
+                {
+                    uint32_t command = cpu->gpr[4] & 0xFFu;
+                    uint32_t params = cpu->gpr[5];
+                    uint32_t callback = cpu->gpr[6];
+                    uint32_t context = cpu->gpr[7];
+                    uint32_t resume_pc = cpu->gpr[31];
+
+                    ++g_b33_async_calls;
+                    g_cd_last_cmd = command;
+
+                    if (command == 0x02u && params != 0u)
+                    {
+                        uint32_t minute = fm_bcd_to_u32(cpu->read_byte(params + 0u));
+                        uint32_t second = fm_bcd_to_u32(cpu->read_byte(params + 1u));
+                        uint32_t frame_cd = fm_bcd_to_u32(cpu->read_byte(params + 2u));
+                        uint32_t absolute_sector = ((minute * 60u + second) * 75u) + frame_cd;
+                        g_cd_lba = absolute_sector >= 150u ? absolute_sector - 150u : 0u;
+                        g_cd_pos = 2048u;
+                    }
+
+                    if (command == 0x06u)
+                    {
+                        g_cd_reading = 1;
+                        g_cd_pos = 2048u;
+                        g_cd_error = 0;
+                    }
+                    else if (command == 0x09u)
+                    {
+                        g_cd_reading = 0;
+                    }
+
+                    fm_b33_schedule_cd_callback(
+                        cpu,
+                        command,
+                        callback,
+                        resume_pc,
+                        params,
+                        context
+                    );
+
+                    static_miss = 0;
+                    continue;
+                }
+
+                /*
+                 * FUN_8007BA00(mode, params, command, callback, ctx)
+                 *
+                 * IMPORTANT B34 : le SLES PAL prouve que la commande est
+                 * dans a2, pas dans a0. Exemple observe a 80014928 :
+                 *   a0=A0, a1=gp+21C, a2=06(ReadN), a3=80013FBC.
+                 */
+                if (phys == 0x0007BA00u)
+                {
+                    uint32_t mode = cpu->gpr[4] & 0xFFu;
+                    uint32_t params = cpu->gpr[5];
+                    uint32_t command = cpu->gpr[6] & 0xFFu;
+                    uint32_t callback = cpu->gpr[7];
+                    uint32_t resume_pc = cpu->gpr[31];
+                    uint32_t context = cpu->read_word(cpu->gpr[29] + 16u);
+
+                    ++g_b33_raw_calls;
+                    g_b34_last_mode = mode;
+                    g_b34_last_command = command;
+                    g_cd_last_cmd = command;
+
+                    if (command == 0x02u && params != 0u)
+                    {
+                        uint32_t minute = fm_bcd_to_u32(cpu->read_byte(params + 0u));
+                        uint32_t second = fm_bcd_to_u32(cpu->read_byte(params + 1u));
+                        uint32_t frame_cd = fm_bcd_to_u32(cpu->read_byte(params + 2u));
+                        uint32_t absolute_sector = ((minute * 60u + second) * 75u) + frame_cd;
+                        g_cd_lba = absolute_sector >= 150u ? absolute_sector - 150u : 0u;
+                        g_cd_pos = 2048u;
+                    }
+
+                    if (command == 0x06u)
+                    {
+                        g_cd_reading = 1;
+                        g_cd_pos = 2048u;
+                        g_cd_error = 0;
+                    }
+                    else if (command == 0x09u)
+                    {
+                        g_cd_reading = 0;
+                    }
+
+                    fm_b33_schedule_cd_callback(
+                        cpu,
+                        command,
+                        callback,
+                        resume_pc,
+                        params,
+                        context
+                    );
+
+                    static_miss = 0;
+                    continue;
+                }
+
+
+                /*
+                 * ============================================
+                 * B32 - CdGetSector bridge
+                 *
+                 * FUN_8007E968(dest, words)
+                 *
+                 * Le vrai jeu arrive ici depuis son callback CD quand
+                 * un secteur est pret. Sur PS1, cette routine lance le
+                 * DMA3 depuis le controleur CD vers la RAM. Sur 3DS on
+                 * remplace seulement ce DMA materiel par une lecture du
+                 * meme LBA dans disc.bin.
+                 *
+                 * Le pointeur de requete courant est conserve par le
+                 * moteur CD en gp+0x10. +0x24 contient le LBA logique
+                 * courant de la sous-requete. Le code guest qui suit
+                 * garde la responsabilite de decrementer +0x10, avancer
+                 * les buffers et appeler les callbacks de completion.
+                 * ============================================
+                 */
+                if (phys == 0x0007E968u)
+                {
+                    uint32_t destination = cpu->gpr[4];
+                    uint32_t words = cpu->gpr[5];
+                    uint32_t bytes = words * 4u;
+
+                    if (bytes > 2048u)
+                    {
+                        bytes = 2048u;
+                    }
+
+                    uint32_t req = 0u;
+
+                    if (cpu->gpr[28] != 0u)
+                    {
+                        req = cpu->read_word(
+                            cpu->gpr[28] + 0x10u
+                        );
+                    }
+
+                    if (
+                        req < 0x80000000u
+                        || req >= 0x80200000u
+                    )
+                    {
+                        req = 0x800EB1B8u;
+                    }
+
+                    uint32_t lba =
+                        cpu->read_word(req + 0x24u);
+
+                    uint32_t remaining =
+                        cpu->read_word(req + 0x10u);
+
+                    ++g_b32_getsec_calls;
+                    g_b32_last_req = req;
+                    g_b32_last_lba = lba;
+                    g_b32_last_dst = destination;
+                    g_b32_last_bytes = bytes;
+                    g_b32_last_remaining = remaining;
+
+                    int rc = -1;
+
+                    if (
+                        bytes != 0u
+                        && destination >= 0x80000000u
+                        && destination < 0x80200000u
+                    )
+                    {
+                        rc = fm_disc_read_sector(
+                            lba,
+                            g_cd_sector
+                        );
+                    }
+
+                    g_b32_last_rc = (uint32_t)rc;
+
+                    if (rc == 0)
+                    {
+                        for (
+                            uint32_t i = 0;
+                            i < bytes;
+                            ++i
+                        )
+                        {
+                            cpu->write_byte(
+                                destination + i,
+                                g_cd_sector[i]
+                            );
+                        }
+
+                        {
+                            FMB41CdTrace *ct =
+                                &g_b41_cd[g_b41_cd_head % B41_CD_RING];
+
+                            ct->serial = g_b32_getsec_calls;
+                            ct->lba = lba;
+                            ct->dst = destination;
+                            ct->bytes = bytes;
+
+                            g_b41_cd_head =
+                                (g_b41_cd_head + 1u)
+                                % B41_CD_RING;
+
+                            if (g_b41_cd_count < B41_CD_RING)
+                            {
+                                ++g_b41_cd_count;
+                            }
+                        }
+
+                        ++g_b32_getsec_ok;
+                        ++g_cd_sector_count;
+                        g_cd_error = 0;
+
+                        /*
+                         * FUN_8007E968 renvoie 1 lorsque le transfert DMA
+                         * s'est termine correctement.
+                         */
+                        cpu->gpr[2] = 1u;
+                    }
+                    else
+                    {
+                        ++g_b32_getsec_fail;
+                        g_cd_error = rc;
+
+                        cpu->gpr[2] = 0u;
+                    }
+
+                    cpu->pc = cpu->gpr[31];
+                    cpu->gpr[0] = 0u;
+
+                    static_miss = 0;
+                    continue;
+                }
+
+
+                /*
+                 * ============================================
+                 * B25 - GPU LoadImage HLE
+                 *
+                 * FUN_80082380(RECT *rect, uint16_t *pixels)
+                 *
+                 * C'est le point commun utilise par le streaming du jeu
+                 * pour envoyer palettes, textures et blocs d'image vers
+                 * la VRAM PS1. On effectue le meme transfert via GP0 A0h
+                 * puis on retourne immediatement comme la routine native
+                 * apres DMA termine.
+                 * ============================================
+                 */
+                if (phys == 0x00082380u)
+                {
+                    if (fm_hle_gpu_load_image(cpu))
+                    {
+                        cpu->gpr[2] = 0u;
+                        cpu->pc = cpu->gpr[31];
+                        cpu->gpr[0] = 0u;
+                        static_miss = 0;
+                        continue;
+                    }
+                }
+
+
+                /*
+                 * ============================================
+                 * B25 - Background loader PAL HLE
+                 *
+                 * FUN_8002E11C (SLES_039.48 FR)
+                 *
+                 * Le code original calcule :
+                 *   sector = 0x29E8 + group_offset + ordinal * size
+                 * puis demarre FUN_80014E08() en asynchrone.
+                 *
+                 * Notre CD bas niveau n'achemine pas encore ce flux
+                 * completement. On lit donc le meme bloc depuis disc.bin,
+                 * on le decode avec le format natif WA_MRG valide en B23,
+                 * puis on retourne synchronement. Ainsi, c'est bien
+                 * l'index demande par le runtime qui choisit le decor.
+                 * ============================================
+                 */
+                if (phys == 0x0002E11Cu)
+                {
+                    uint32_t object = cpu->gpr[4];
+                    uint32_t raw_index = cpu->gpr[5] & 0xFFFFu;
+                    uint32_t resolved =
+                        fm_bg_resolve_runtime_index(cpu, raw_index);
+
+                    ++g_bg_hle_calls;
+                    g_bg_hle_raw = raw_index;
+                    g_bg_hle_resolved = resolved;
+                    g_bg_hle_object = object;
+
+                    /* La routine native memorise l'index final en +0x3C. */
+                    if (object != 0u)
+                    {
+                        cpu->write_half(
+                            object + 0x3Cu,
+                            (uint16_t)resolved
+                        );
+                    }
+
+                    if (
+                        fm_bg_load_game_index(
+                            cpu,
+                            preview,
+                            resolved
+                        )
+                    )
+                    {
+                        ++g_bg_hle_ok;
+                    }
+                    else
+                    {
+                        ++g_bg_hle_fail;
+                    }
+
+                    /* Completion synchrone : ne pas poser le busy flag
+                       0x10 de DAT_8009C460. L'attente 80013700 verra le
+                       chargeur idle et le state machine peut continuer. */
+                    cpu->pc = cpu->gpr[31];
+                    cpu->gpr[0] = 0u;
+                    static_miss = 0;
+                    continue;
                 }
 
 
@@ -2004,7 +6831,8 @@ int main(void)
                 {
                     uint32_t command =
                         cpu->gpr[4]
-                        & 0xFFu;
+                        &
+                        0xFFu;
 
                     uint32_t params =
                         cpu->gpr[5];
@@ -2251,6 +7079,100 @@ int main(void)
 
                 /*
                  * ============================================
+                 * B19 - GsSortOt natif borne + direct OT
+                 * ============================================
+                 *
+                 * 1) Essayer le VRAI FUN_80085D98 dans un CPU temporaire.
+                 *    S'il revient, ses modifications RAM sont conservees.
+                 *
+                 * 2) S'il boucle sur une OT corrompue, ne rien splicer a la
+                 *    main. On rend la main au jeu comme B17 et on soumet
+                 *    directement l'OT source au GPU avec un walker borne.
+                 *    Les primitives peuvent etre mal ordonnees, mais ce
+                 *    chemin maximise nos chances d'obtenir les premiers
+                 *    vrais pixels sans fabriquer d'image.
+                 */
+                if (phys == 0x00085D98u)
+                {
+                    uint32_t src_ot = cpu->gpr[4];
+                    uint32_t dst_ot = cpu->gpr[5];
+                    uint32_t native_result = dst_ot;
+
+                    ++g_hle_85d98_calls;
+                    g_hle_85d98_last_src = src_ot;
+                    g_hle_85d98_last_dst = dst_ot;
+
+                    if (src_ot != 0u)
+                    {
+                        g_hle_85d98_src_length = cpu->read_word(src_ot + 0u);
+                        g_hle_85d98_src_org    = cpu->read_word(src_ot + 4u);
+                        g_hle_85d98_src_offset = cpu->read_word(src_ot + 8u);
+                        g_hle_85d98_src_point  = cpu->read_word(src_ot + 12u);
+                        g_hle_85d98_src_tag    = cpu->read_word(src_ot + 16u);
+                    }
+
+                    if (dst_ot != 0u)
+                    {
+                        g_hle_85d98_dst_length = cpu->read_word(dst_ot + 0u);
+                        g_hle_85d98_dst_org    = cpu->read_word(dst_ot + 4u);
+                        g_hle_85d98_dst_offset = cpu->read_word(dst_ot + 8u);
+                        g_hle_85d98_dst_point  = cpu->read_word(dst_ot + 12u);
+                        g_hle_85d98_dst_tag    = cpu->read_word(dst_ot + 16u);
+                    }
+
+                    /*
+                     * B20 : avant tout traitement, remettre seulement la
+                     * sentinelle de fin des deux OTs. La trace B19 montrait
+                     * une chaine de buckets vides qui descendait bien au-dela
+                     * de src->org, ce qui explique les boucles de GsSortOt.
+                     */
+                    fm_repair_ot_sentinel(cpu, src_ot);
+                    fm_repair_ot_sentinel(cpu, dst_ot);
+
+                    /*
+                     * Soumettre AUSSI l'OT source telle que le jeu vient de
+                     * la construire, avant que GsSortOt ne la fusionne.
+                     * Cela vise directement les premiers pixels : si des
+                     * primitives existent, elles atteignent tout de suite
+                     * notre parser GP0, sans attendre la destination finale.
+                     */
+                    if (g_hle_85d98_src_tag != 0u)
+                    {
+                        fm_submit_ot_safe(
+                            cpu,
+                            g_hle_85d98_src_tag
+                        );
+                    }
+
+                    if (
+                        fm_try_native_gssortot(
+                            cpu,
+                            src_ot,
+                            dst_ot,
+                            &native_result
+                        )
+                    )
+                    {
+                        cpu->gpr[2] = native_result;
+                    }
+                    else
+                    {
+                        /*
+                         * Pas de splice manuel : on a deja soumis l'OT source
+                         * de facon bornee. Le jeu continue sans corruption.
+                         */
+                        cpu->gpr[2] = dst_ot;
+                    }
+
+                    cpu->pc = cpu->gpr[31];
+                    cpu->gpr[0] = 0u;
+
+                    static_miss = 0;
+                    continue;
+                }
+
+                /*
+                 * ============================================
                  * ARM recompiled code
                  * ============================================
                  */
@@ -2258,7 +7180,9 @@ int main(void)
                     fm_runtime_probe(
                         cpu,
                         dispatch_address,
-                        250000
+                        g_direct2df_active
+                            ? 16000u
+                            : 250000u
                     );
 
                 probe_ran = 1;
@@ -2322,7 +7246,9 @@ int main(void)
                     interp =
                         fm_interp_run_block(
                             cpu,
-                            1024
+                            g_direct2df_active
+                                ? 128u
+                                : 1024u
                         );
 
                     interp_ran = 1;
@@ -2360,52 +7286,87 @@ int main(void)
                 game_running = 0;
                 break;
             }
+
+            if (g_direct2df_active)
+            {
+                uint32_t elapsed_ms =
+                    (uint32_t)(osGetTime() - b16_slice_start_ms);
+
+                g_b16_slice_last_ms = elapsed_ms;
+                g_b16_last_handoffs = b16_handoff_count;
+
+                if (elapsed_ms > g_b16_slice_max_ms)
+                {
+                    g_b16_slice_max_ms = elapsed_ms;
+                }
+            }
         }
 
 
         /*
          * ====================================================
-         * Old prototype controls
+         * B22 WA_MRG background controls
+         * ====================================================
+         * X/Y : background suivant / precedent dans le groupe
+         * R/L : groupe 0/1/2 suivant / precedent
+         * A   : runtime PS1 run/pause (inchange)
+         */
+        if ((down & KEY_X) && cpu)
+        {
+            fm_bg_change(cpu, preview, +1, 0);
+        }
+
+        if ((down & KEY_Y) && cpu)
+        {
+            fm_bg_change(cpu, preview, -1, 0);
+        }
+
+        if ((down & KEY_R) && cpu)
+        {
+            fm_bg_change(cpu, preview, 0, +1);
+        }
+
+        if ((down & KEY_L) && cpu)
+        {
+            fm_bg_change(cpu, preview, 0, -1);
+        }
+
+        /*
+         * ====================================================
+         * B42 - ZL : bascule NATIF / ancien mode diagnostic
+         * ====================================================
+         *
+         * NATIF  : aucun WA_MRG force, clears du jeu autorises.
+         * LEGACY : comportement B28/B41 pour comparaison.
+         */
+        if (down & KEY_ZL)
+        {
+            g_b42_native_video = !g_b42_native_video;
+
+            fm_gpu_b42_set_preserve_background_clears(
+                g_b42_native_video ? 0 : 1
+            );
+
+            if (!g_b42_native_video && g_bg.loaded)
+            {
+                g_bg_vram_pending = 1u;
+            }
+        }
+
+        /*
+         * ====================================================
+         * B26 - push du vrai background dans la VRAM PS1
          * ====================================================
          */
-
         if (
-            (down & KEY_X)
-            && have_preview
+            !g_b42_native_video
+            && g_bg_vram_pending
+            && g_bg.loaded
         )
         {
-            show_preview =
-                !show_preview;
+            fm_bg_upload_preview_to_vram(preview);
+            g_bg_vram_pending = 0u;
         }
-
-        if (down & KEY_Y)
-        {
-            crop =
-                !crop;
-        }
-
-        x +=
-            (held & KEY_DRIGHT ? 2 : 0)
-            -
-            (held & KEY_DLEFT ? 2 : 0);
-
-        y +=
-            (held & KEY_DDOWN ? 2 : 0)
-            -
-            (held & KEY_DUP ? 2 : 0);
-
-        if (x < 32)
-            x = 32;
-
-        if (x > 288)
-            x = 288;
-
-        if (y < 32)
-            y = 32;
-
-        if (y > 224)
-            y = 224;
-
 
         /*
          * ====================================================
@@ -2416,17 +7377,156 @@ int main(void)
         uint64_t render_start =
             svcGetSystemTick();
 
-        if (fm_gpu_has_frame())
+        /*
+         * B15 FIRST IMAGE :
+         * scanner periodiquement plusieurs pages VRAM et afficher la
+         * fenetre 320x240 contenant le plus de pixels non nuls.
+         *
+         * Cela ne cree aucun pixel : c'est uniquement une vue de la VRAM
+         * produite par Forbidden Memories. Des que le jeu place une
+         * image, un framebuffer ou meme un atlas de textures quelque part
+         * dans la VRAM, on doit pouvoir le voir.
+         */
+        if ((frame % 60u) == 0u)
+        {
+            static const unsigned xs[] = { 0u, 320u, 640u };
+            static const unsigned ys[] = { 0u, 256u };
+
+            uint32_t best_nz = 0u;
+            unsigned best_x = fm_gpu_display_x();
+            unsigned best_y = fm_gpu_display_y();
+
+            if (best_x > 704u)
+                best_x = 0u;
+            if (best_y > 272u)
+                best_y = 0u;
+
+            for (unsigned yi = 0; yi < 2u; ++yi)
+            {
+                for (unsigned xi = 0; xi < 3u; ++xi)
+                {
+                    unsigned vx = xs[xi];
+                    unsigned vy = ys[yi];
+                    uint32_t nz = 0u;
+
+                    /*
+                     * Echantillonnage 1 pixel sur 2 pour limiter le cout.
+                     */
+                    for (unsigned py = 0; py < 240u; py += 2u)
+                    {
+                        const uint16_t *row =
+                            vram
+                            + (vy + py) * 1024u
+                            + vx;
+
+                        for (unsigned px = 0; px < 320u; px += 2u)
+                        {
+                            if (row[px] != 0u)
+                            {
+                                ++nz;
+                            }
+                        }
+                    }
+
+                    if (nz > best_nz)
+                    {
+                        best_nz = nz;
+                        best_x = vx;
+                        best_y = vy;
+                    }
+                }
+            }
+
+            g_vram_view_x = best_x;
+            g_vram_view_y = best_y;
+            g_vram_view_nonzero = best_nz;
+        }
+
+        if (
+            g_b42_native_video
+            && fm_gpu_has_frame()
+        )
+        {
+            /*
+             * B42 : montrer le framebuffer choisi par le vrai GP1 du jeu.
+             * Aucun background artificiel n'est melange ici.
+             */
+            unsigned display_x = fm_gpu_display_x();
+            unsigned display_y = fm_gpu_display_y();
+
+            if (display_x > 704u)
+            {
+                display_x = 0u;
+            }
+
+            if (display_y > 272u)
+            {
+                display_y = 0u;
+            }
+
+            fm_present_rgb555(
+                vram + display_y * 1024u + display_x,
+                1024,
+                crop
+            );
+        }
+        else if (
+            !g_b42_native_video
+            && g_bg.loaded
+            && g_bg_vram_ok != 0u
+        )
+        {
+            /*
+             * Ancien mode B26/B28 conserve pour comparaison avec ZL.
+             */
+            unsigned vx = fm_gpu_display_x();
+            unsigned vy = fm_gpu_display_y();
+
+            if (vx != 0u && vx != 320u)
+            {
+                vx = 320u;
+            }
+
+            if (vy > 256u)
+            {
+                vy = 0u;
+            }
+
+            fm_present_rgb555(
+                vram + vy * 1024u + vx,
+                1024,
+                0
+            );
+        }
+        else if (
+            !g_b42_native_video
+            && g_bg.loaded
+        )
+        {
+            fm_present_rgb555(
+                preview,
+                320,
+                0
+            );
+        }
+        else if (
+            fm_gpu_has_frame()
+            || g_vram_view_nonzero != 0u
+        )
         {
             unsigned display_x =
-                fm_gpu_display_x();
+                g_vram_view_nonzero != 0u
+                    ? (unsigned)g_vram_view_x
+                    : fm_gpu_display_x();
 
             unsigned display_y =
-                fm_gpu_display_y();
+                g_vram_view_nonzero != 0u
+                    ? (unsigned)g_vram_view_y
+                    : fm_gpu_display_y();
 
             const uint16_t *game_frame =
                 vram
-                + display_y * 1024
+                + display_y * 1024u
                 + display_x;
 
             fm_present_rgb555(
@@ -2445,32 +7545,15 @@ int main(void)
         }
         else
         {
+            /*
+             * Noir volontaire : pas de triangle/prototype artificiel.
+             */
             sw_fill_rect(
                 0,
                 0,
                 320,
                 256,
-                0x1842
-            );
-
-            int pulse =
-                (frame / 2)
-                % 32;
-
-            sw_draw_gouraud_triangle(
-                x,
-                y - 30,
-                31,
-
-                x - 30,
-                y + 30,
-                31 << 5,
-
-                x + 30,
-                y + 30,
-                (uint16_t)(
-                    pulse << 10
-                )
+                0
             );
 
             fm_present_rgb555(
@@ -2519,361 +7602,870 @@ int main(void)
 
             /*
              * =================================================
-             * DEBUG COMPACT
-             *
-             * Volontairement dense afin de garder CPU, ARM,
-             * R3000A, GPU, CD, ISO et BIOS visibles ensemble.
+             * BUILD B12 - vrai callback VBlank guest
              * =================================================
+             *
+             * On n'imite plus le callback : on execute son vrai code
+             * MIPS avec le runtime ARM + fallback R3000A dans un CPU
+             * temporaire. Les effets RAM/MMIO sont donc ceux du jeu.
              */
 
-            printf(
-                "RAM          : %s\n",
-                memory_status == 0
-                    ? "OK"
-                    : "ERR"
-            );
-
-
-            printf(
-                "I_STAT/MASK  : %04X / %04X\n",
-                (unsigned)fm_memory_i_stat(),
-                (unsigned)fm_memory_i_mask()
-            );
-
-
-            printf(
-                "Last MMIO    : %08lX (%u)\n",
-                (unsigned long)
-                    fm_memory_last_unmapped(),
-                fm_memory_unmapped_count()
-            );
-
-
-            printf(
-                "\n--- CPU ---\n"
-            );
-
-
-            if (cpu)
-            {
-                printf(
-                    "PC  : %08lX RA : %08lX\n",
-                    (unsigned long)cpu->pc,
-                    (unsigned long)cpu->gpr[31]
-                );
-
-
-                printf(
-                    "A0  : %08lX A1 : %08lX\n",
-                    (unsigned long)cpu->gpr[4],
-                    (unsigned long)cpu->gpr[5]
-                );
-
-
-                printf(
-                    "A2  : %08lX T1 : %08lX\n",
-                    (unsigned long)cpu->gpr[6],
-                    (unsigned long)cpu->gpr[9]
-                );
-            }
-
-
-            printf(
-                "--- ARM RECOMP --- RUN : %s\n",
-                game_running
-                    ? "OUI"
-                    : "NON"
-            );
-
-
-            printf(
-                "Stop ARM     : %s\n",
-                probe_ran
-                    ? fm_runtime_stop_name(
-                        probe.reason
-                    )
-                    : "-"
-            );
-
-
-            printf(
-                "Dispatch     : %08lX / %d\n",
-                (unsigned long)
-                    last_dispatch_address,
-                probe_ran
-                    ? probe.dispatch_result
-                    : -1
-            );
-
-
-            printf(
-                "--- R3000A --- Utilise : %s\n",
-                interp_ran
-                    ? "OUI"
-                    : "NON"
-            );
-
-
-            printf(
-                "Stop interp  : %s\n",
-                interp_ran
-                    ? fm_interp_stop_name(
-                        interp.reason
-                    )
-                    : "-"
-            );
-
-
-            printf(
-                "PC/opcode    : %08lX %08lX\n",
-                interp_ran
-                    ? (unsigned long)interp.pc
-                    : 0ul,
-                interp_ran
-                    ? (unsigned long)interp.instruction
-                    : 0ul
-            );
-
+            uint32_t clk440 = fm_memory_read_word(0x8009C440u);
+            uint32_t clk444 = fm_memory_read_word(0x8009C444u);
+            uint32_t clk41c = fm_memory_read_word(0x8009C41Cu);
+            uint32_t clk428 = fm_memory_read_word(0x8009C428u);
+            uint32_t clk44c = fm_memory_read_word(0x8009C44Cu);
+            uint32_t clk438 = fm_memory_read_word(0x8009C438u);
+            uint8_t clk425 = fm_memory_read_byte(0x8009C425u);
 
             FMGpuDebugStats gpu_debug;
+            fm_gpu_debug_stats(&gpu_debug);
 
-            fm_gpu_debug_stats(
-                &gpu_debug
-            );
-
+            printf("BUILD B46-GPU-SPRITE-PROVENANCE\n");
 
             printf(
-                "--- GPU --- GP0 T/F : %llu / %llu\n",
-                (unsigned long long)gpu_debug.gp0_words,
-                (unsigned long long)gp0_last_frame
+                "BG:%s err:%d layout:PAL idx:%03lX\n",
+                g_bg.loaded ? "OK" : "NO",
+                g_bg.error,
+                (unsigned long)g_bg.game_index
             );
-
 
             printf(
-                "Pkt F/D/C/U/E: %llu/%llu/%llu/%llu/%llu\n",
-                (unsigned long long)gpu_debug.packets_fill,
-                (unsigned long long)gpu_debug.packets_draw,
-                (unsigned long long)gpu_debug.packets_copy,
-                (unsigned long long)gpu_debug.packets_upload,
-                (unsigned long long)gpu_debug.packets_env
+                "WA LBA:%lu size:%lu\n",
+                (unsigned long)g_bg.wa_lba,
+                (unsigned long)g_bg.wa_size
             );
-
 
             printf(
-                "VRAM NZ 0/320/D: %lu/%lu/%lu\n",
-                (unsigned long)gpu_debug.nonzero_page0,
-                (unsigned long)gpu_debug.nonzero_page320,
-                (unsigned long)gpu_debug.nonzero_display
+                "REL:%05lX sec:%lX type:%lu abs:%lu\n",
+                (unsigned long)g_bg.rel_lba,
+                (unsigned long)g_bg.lba_sectors,
+                (unsigned long)g_bg.type,
+                (unsigned long)(g_bg.wa_lba + g_bg.rel_lba)
             );
-
 
             printf(
-                "VRAM total   : %lu  Frame:%s\n",
-                (unsigned long)gpu_debug.nonzero_vram,
-                fm_gpu_has_frame()
-                    ? "OUI"
-                    : "NON"
+                "IMG:%lux%lu nz:%lu grp:%lu n:%02lu\n",
+                (unsigned long)g_bg.width,
+                (unsigned long)g_bg.height,
+                (unsigned long)g_bg.nonzero,
+                (unsigned long)g_bg.group,
+                (unsigned long)g_bg.ordinal
             );
-
 
             printf(
-                "Disp %u,%u %s Area %d,%d-%d,%d\n",
-                gpu_debug.display_x,
-                gpu_debug.display_y,
-                gpu_debug.display_disabled
-                    ? "OFF"
-                    : "ON",
-                gpu_debug.draw_x1,
-                gpu_debug.draw_y1,
-                gpu_debug.draw_x2,
-                gpu_debug.draw_y2
+                "PAL base:29E8  +G1:0672 +G2:13BC\n"
             );
-
 
             printf(
-                "Off %d,%d  GPUSTAT:%08lX\n",
-                gpu_debug.offset_x,
-                gpu_debug.offset_y,
-                (unsigned long)fm_gpu_status()
+                "BGREQ C/OK/F:%lu/%lu/%lu raw:%04lX\n",
+                (unsigned long)g_bg_hle_calls,
+                (unsigned long)g_bg_hle_ok,
+                (unsigned long)g_bg_hle_fail,
+                (unsigned long)g_bg_hle_raw
             );
-
 
             printf(
-                "Static miss  : %s\n",
-                static_miss
-                    ? "OUI"
-                    : "NON"
+                "BGREQ idx:%04lX obj:%08lX\n",
+                (unsigned long)g_bg_hle_resolved,
+                (unsigned long)g_bg_hle_object
             );
-
-
-            FMDmaDebugStats dma_debug;
-
-            fm_memory_dma_debug(
-                &dma_debug
-            );
-
 
             printf(
-                "--- DMA2 --- Xfer/LL : %lu/%lu\n",
-                (unsigned long)dma_debug.dma2_transfer_count,
-                (unsigned long)dma_debug.dma2_linked_transfer_count
+                "LOADIMG C/OK/F:%lu/%lu/%lu pix:%lu\n",
+                (unsigned long)g_loadimg_hle_calls,
+                (unsigned long)g_loadimg_hle_ok,
+                (unsigned long)g_loadimg_hle_fail,
+                (unsigned long)g_loadimg_hle_pixels
             );
 
-
             printf(
-                "Words T/L    : %llu/%lu\n",
-                (unsigned long long)dma_debug.dma2_word_count,
-                (unsigned long)dma_debug.dma2_last_words
+                "BGVRAM C/OK:%lu/%lu pix:%lu words:%lu\n",
+                (unsigned long)g_bg_vram_calls,
+                (unsigned long)g_bg_vram_ok,
+                (unsigned long)g_bg_vram_pixels,
+                (unsigned long)g_bg_vram_words
             );
 
-
             printf(
-                "Nodes/Header : %lu/%08lX\n",
-                (unsigned long)dma_debug.dma2_last_nodes,
-                (unsigned long)dma_debug.dma2_last_first_header
+                "B42 VIDEO:%s CLRKEEP:%d DXY:%u,%u ZL=MODE\n",
+                g_b42_native_video ? "NATIVE" : "LEGACY",
+                fm_gpu_b42_get_preserve_background_clears(),
+                fm_gpu_display_x(),
+                fm_gpu_display_y()
             );
 
-
             printf(
-                "MADR/CHCR    : %08lX/%08lX\n",
-                (unsigned long)dma_debug.dma2_last_start_madr,
-                (unsigned long)dma_debug.dma2_last_chcr
+                "A=RUN  X/Y BG  L/R TYPE  (VRAM)\n"
             );
 
-
             printf(
-                "DMA6 X/W     : %lu/%llu\n",
-                (unsigned long)dma_debug.dma6_transfer_count,
-                (unsigned long long)dma_debug.dma6_word_count
-            );
-
-
-            printf(
-                "--- CD HLE --- Cmd/LBA : %02lX / %lu\n",
-                (unsigned long)g_cd_last_cmd,
-                (unsigned long)g_cd_lba
-            );
-
-
-            printf(
-                "Pos/sec      : %lu / %lu\n",
-                (unsigned long)g_cd_pos,
-                (unsigned long)g_cd_sector_count
-            );
-
-
-            printf(
-                "Read/err     : %s / %d\n",
-                g_cd_reading
-                    ? "OUI"
-                    : "NON",
-                g_cd_error
-            );
-
-
-            printf(
-                "--- ISO SEARCH --- OK : %s\n",
-                g_cd_search_ok
-                    ? "OUI"
-                    : "NON"
-            );
-
-
-            printf(
-                "LBA / size   : %lu / %lu\n",
-                (unsigned long)g_cd_search_lba,
-                (unsigned long)g_cd_search_size
-            );
-
-
-            printf(
-                "Path         : %.34s\n",
-                g_cd_search_path
-            );
-
-
-            printf(
-                "BIOS dbg     : %08lX / %02lX / %d\n",
-                (unsigned long)g_bios_debug_addr,
-                (unsigned long)g_bios_debug_fn,
-                g_bios_debug_result
-            );
-
-
-            printf(
-                "VSYNC HLE C/W/Q: %lu/%lu/%lu M:%ld\n",
-                (unsigned long)g_vsync_hle_calls,
-                (unsigned long)g_vsync_hle_wait_calls,
-                (unsigned long)g_vsync_hle_query_calls,
-                (long)g_vsync_hle_last_mode
-            );
-
-
-            printf(
-                "STATE 60A    : %02X low:%02X C:%lu S:%lu\n",
+                "RUN:%s PC:%08lX STATE:%02X 425:%02X\n",
+                game_running ? "Y" : "N",
+                cpu ? (unsigned long)cpu->pc : 0ul,
                 (unsigned)g_main_state,
-                (unsigned)(g_main_state & 0x1Fu),
-                (unsigned long)g_main_state_changes,
-                (unsigned long)g_main_state_stable_frames
+                (unsigned)clk425
             );
 
+            printf(
+                "FAST:%lu/%lu D2DF:%lu C/R:%lu/%lu\n",
+                (unsigned long)g_fast401_forced,
+                (unsigned long)g_fast43e_forced,
+                (unsigned long)g_direct2df_active,
+                (unsigned long)g_direct2df_calls,
+                (unsigned long)g_direct2df_returns
+            );
 
             printf(
-                "60C/D/E      : %02X/%02X/%02X CTX:%08lX\n",
+                "SORT C/OK/F:%lu/%lu/%lu OTFIX:%lu\n",
+                (unsigned long)g_sort_native_calls,
+                (unsigned long)g_sort_native_ok,
+                (unsigned long)g_sort_native_fail,
+                (unsigned long)g_ot_fix_changed
+            );
+
+            printf(
+                "CD sec:%lu cmd:%02lX OV:%lu/%lu  R137:%lu\n",
+                (unsigned long)g_cd_sector_count,
+                (unsigned long)g_cd_last_cmd,
+                (unsigned long)g_hit_ov16,
+                (unsigned long)g_hit_ov18,
+                (unsigned long)g_hit_load_wait
+            );
+
+            printf(
+                "ACMD/R:%lu/%lu CB:%lu/%lu skip:%lu cmd:%02lX\n",
+                (unsigned long)g_b33_async_calls,
+                (unsigned long)g_b33_raw_calls,
+                (unsigned long)g_b33_cb_started,
+                (unsigned long)g_b33_cb_done,
+                (unsigned long)g_b33_cb_skipped,
+                (unsigned long)g_b33_cb_cmd
+            );
+
+            printf(
+                "B34 mode/cmd:%02lX/%02lX READY:%lu/%lu p:%lu\n",
+                (unsigned long)g_b34_last_mode,
+                (unsigned long)g_b34_last_command,
+                (unsigned long)g_b34_ready_started,
+                (unsigned long)g_b34_ready_done,
+                (unsigned long)g_b34_ready_pending
+            );
+
+            printf(
+                "RD req:%08lX rem:%08lX>%08lX\n",
+                (unsigned long)g_b34_ready_req,
+                (unsigned long)g_b34_ready_before,
+                (unsigned long)g_b34_ready_after
+            );
+
+            printf(
+                "B36 FIN S/D:%lu/%lu C460:%08lX>%08lX\n",
+                (unsigned long)g_b35_finalizer_started,
+                (unsigned long)g_b35_finalizer_done,
+                (unsigned long)g_b35_c460_before,
+                (unsigned long)g_b35_c460_after
+            );
+            printf(
+                "CTX C:%lu/%lu R:%lu/%lu F:%lu/%lu RA:%08lX\n",
+                (unsigned long)g_b33_ctx_saved,
+                (unsigned long)g_b33_ctx_restored,
+                (unsigned long)g_b34_ready_ctx_saved,
+                (unsigned long)g_b34_ready_ctx_restored,
+                (unsigned long)g_b35_ctx_saved,
+                (unsigned long)g_b35_ctx_restored,
+                (unsigned long)g_b34_ready_saved_ra
+            );
+
+            printf(
+                "B37 DMA wait/fix:%lu/%lu CH:%08lX>%08lX\n",
+                (unsigned long)g_b37_dma_wait_hits,
+                (unsigned long)g_b37_dma_forced_clear,
+                (unsigned long)g_b37_last_chcr_before,
+                (unsigned long)g_b37_last_chcr_after
+            );
+
+            {
+                uint32_t br_count = 0u;
+                uint8_t br_op = 0u;
+                int br_tex = 0, br_raw = 0;
+                int br_x = 0, br_y = 0, br_w = 0, br_h = 0;
+                int br_u = 0, br_v = 0, br_cx = 0, br_cy = 0;
+                uint16_t br_tp = 0u;
+                uint32_t br_cmd[4] = {0u,0u,0u,0u};
+
+                if (fm_gpu_b38_bigrect_get(
+                        &br_count, &br_op, &br_tex, &br_raw,
+                        &br_x, &br_y, &br_w, &br_h,
+                        &br_u, &br_v, &br_cx, &br_cy,
+                        &br_tp, br_cmd))
+                {
+                    printf(
+                        "BIG:%lu op:%02X T/R:%d/%d xy:%d,%d wh:%d,%d\n",
+                        (unsigned long)br_count,
+                        (unsigned)br_op,
+                        br_tex,
+                        br_raw,
+                        br_x, br_y, br_w, br_h
+                    );
+
+                    printf(
+                        "BIG uv:%d,%d CL:%d,%d TP:%03X c:%08lX\n",
+                        br_u, br_v, br_cx, br_cy,
+                        (unsigned)br_tp,
+                        (unsigned long)br_cmd[0]
+                    );
+
+                    printf(
+                        "BIG cmd:%08lX %08lX %08lX %08lX\n",
+                        (unsigned long)br_cmd[0],
+                        (unsigned long)br_cmd[1],
+                        (unsigned long)br_cmd[2],
+                        (unsigned long)br_cmd[3]
+                    );
+
+                    {
+                        uint32_t tw = 0u;
+                        int dep = 0, tbx = 0, tby = 0;
+                        uint32_t texels = 0u, inz = 0u, cnz = 0u, uniq = 0u;
+                        uint16_t pal[16] = {0};
+                        uint8_t si[8] = {0};
+                        uint16_t sc[8] = {0};
+
+                        if (fm_gpu_b39_texture_probe_get(
+                                &tw, &dep, &tbx, &tby,
+                                &texels, &inz, &cnz, &uniq,
+                                pal, si, sc))
+                        {
+                            printf(
+                                "TEX d:%d base:%d,%d TW:%05lX uniq:%lu\n",
+                                dep, tbx, tby,
+                                (unsigned long)tw,
+                                (unsigned long)uniq
+                            );
+
+                            printf(
+                                "TEX nz i/c:%lu/%lu of:%lu idx:%X%X%X%X%X%X%X%X\n",
+                                (unsigned long)inz,
+                                (unsigned long)cnz,
+                                (unsigned long)texels,
+                                si[0], si[1], si[2], si[3],
+                                si[4], si[5], si[6], si[7]
+                            );
+
+                            /*
+                             * B43 : quel LoadImage a réellement alimenté
+                             * la zone VRAM échantillonnée par ce sprite ?
+                             *
+                             * Pour le cas courant TW=0, la boite est exacte.
+                             * Si une texture window est active, on garde une
+                             * boite conservative et on l'indique via TW.
+                             */
+                            {
+                                unsigned ppw =
+                                    dep == 0 ? 4u :
+                                    dep == 1 ? 2u : 1u;
+
+                                unsigned u0 = (unsigned)br_u & 0xFFu;
+                                unsigned v0 = (unsigned)br_v & 0xFFu;
+
+                                unsigned tx =
+                                    (unsigned)tbx
+                                    +
+                                    (u0 / ppw);
+
+                                unsigned ty =
+                                    (unsigned)tby
+                                    +
+                                    v0;
+
+                                unsigned tw_words =
+                                    (
+                                        (u0 % ppw)
+                                        +
+                                        (unsigned)br_w
+                                        +
+                                        ppw
+                                        - 1u
+                                    )
+                                    /
+                                    ppw;
+
+                                unsigned th_words =
+                                    (unsigned)br_h;
+
+                                unsigned tex_hits = 0u;
+                                const FMB43LoadTrace *tex_best = NULL;
+
+                                for (
+                                    uint32_t k = 0u;
+                                    k < g_b43_load_count;
+                                    ++k
+                                )
+                                {
+                                    uint32_t li =
+                                        (
+                                            g_b43_load_head
+                                            + B43_LOAD_RING
+                                            - 1u
+                                            - k
+                                        )
+                                        % B43_LOAD_RING;
+
+                                    const FMB43LoadTrace *lt =
+                                        &g_b43_loads[li];
+
+                                    uint32_t ax0 = lt->x;
+                                    uint32_t ay0 = lt->y;
+                                    uint32_t ax1 = ax0 + lt->w;
+                                    uint32_t ay1 = ay0 + lt->h;
+
+                                    uint32_t bx0 = tx;
+                                    uint32_t by0 = ty;
+                                    uint32_t bx1 = bx0 + tw_words;
+                                    uint32_t by1 = by0 + th_words;
+
+                                    if (
+                                        ax0 < bx1
+                                        && bx0 < ax1
+                                        && ay0 < by1
+                                        && by0 < ay1
+                                    )
+                                    {
+                                        ++tex_hits;
+
+                                        if (!tex_best)
+                                        {
+                                            tex_best = lt;
+                                        }
+                                    }
+                                }
+
+                                printf(
+                                    "TBOX:%u,%u %ux%u hits:%u TW:%05lX\\n",
+                                    tx, ty,
+                                    tw_words, th_words,
+                                    tex_hits,
+                                    (unsigned long)tw
+                                );
+
+                                if (tex_best)
+                                {
+                                    printf(
+                                        "TUP #%lu xy:%u,%u wh:%u,%u src:%08lX\\n",
+                                        (unsigned long)tex_best->serial,
+                                        (unsigned)tex_best->x,
+                                        (unsigned)tex_best->y,
+                                        (unsigned)tex_best->w,
+                                        (unsigned)tex_best->h,
+                                        (unsigned long)tex_best->src
+                                    );
+
+                                    unsigned tcd_hits = 0u;
+                                    const FMB41CdTrace *tcd_best = NULL;
+
+                                    uint32_t src_begin = tex_best->src;
+                                    uint32_t src_end =
+                                        tex_best->src
+                                        +
+                                        (uint32_t)tex_best->w
+                                        *
+                                        (uint32_t)tex_best->h
+                                        *
+                                        2u;
+
+                                    for (
+                                        uint32_t k = 0u;
+                                        k < g_b41_cd_count;
+                                        ++k
+                                    )
+                                    {
+                                        uint32_t ci =
+                                            (
+                                                g_b41_cd_head
+                                                + B41_CD_RING
+                                                - 1u
+                                                - k
+                                            )
+                                            % B41_CD_RING;
+
+                                        const FMB41CdTrace *ct =
+                                            &g_b41_cd[ci];
+
+                                        uint32_t cd0 = ct->dst;
+                                        uint32_t cd1 = ct->dst + ct->bytes;
+
+                                        if (
+                                            src_begin < cd1
+                                            && cd0 < src_end
+                                        )
+                                        {
+                                            ++tcd_hits;
+
+                                            if (!tcd_best)
+                                            {
+                                                tcd_best = ct;
+                                            }
+                                        }
+                                    }
+
+                                    if (tcd_best)
+                                    {
+                                        printf(
+                                            "TCD hits:%u LBA:%08lX dst:%08lX\\n",
+                                            tcd_hits,
+                                            (unsigned long)tcd_best->lba,
+                                            (unsigned long)tcd_best->dst
+                                        );
+                                    }
+                                    else
+                                    {
+                                        printf("TCD hits:0\\n");
+                                    }
+                                }
+                                else
+                                {
+                                    const FMB43LoadTrace *last = NULL;
+
+                                    if (g_b43_load_count != 0u)
+                                    {
+                                        uint32_t li =
+                                            (
+                                                g_b43_load_head
+                                                + B43_LOAD_RING
+                                                - 1u
+                                            )
+                                            % B43_LOAD_RING;
+
+                                        last = &g_b43_loads[li];
+                                    }
+
+                                    if (last)
+                                    {
+                                        printf(
+                                            "TUP NONE last#%lu xy:%u,%u wh:%u,%u\\n",
+                                            (unsigned long)last->serial,
+                                            (unsigned)last->x,
+                                            (unsigned)last->y,
+                                            (unsigned)last->w,
+                                            (unsigned)last->h
+                                        );
+                                    }
+                                    else
+                                    {
+                                        printf("TUP NONE no LoadImage\\n");
+                                    }
+                                }
+                            }
+
+                            printf(
+                                "PAL:%04X %04X %04X %04X %04X %04X %04X %04X\n",
+                                pal[0], pal[1], pal[2], pal[3],
+                                pal[4], pal[5], pal[6], pal[7]
+                            );
+
+                            printf(
+                                "COL:%04X %04X %04X %04X\n",
+                                sc[0], sc[1], sc[2], sc[3]
+                            );
+
+
+                            /*
+                             * B40 : retrouver le dernier petit LoadImage qui
+                             * a couvert le pixel de départ de cette CLUT.
+                             */
+                            {
+                                unsigned cl_hits = 0u;
+                                const FMB40UploadTrace *best = NULL;
+                                uint32_t best_offset = 0u;
+
+                                for (uint32_t k = 0u; k < g_b40_upload_count; ++k)
+                                {
+                                    uint32_t idx =
+                                        (
+                                            g_b40_upload_head
+                                            + B40_UPLOAD_RING
+                                            - 1u
+                                            - k
+                                        )
+                                        % B40_UPLOAD_RING;
+
+                                    const FMB40UploadTrace *t =
+                                        &g_b40_uploads[idx];
+
+                                    uint32_t x0 = t->x;
+                                    uint32_t y0 = t->y;
+                                    uint32_t x1 = x0 + t->w;
+                                    uint32_t y1 = y0 + t->h;
+
+                                    if (
+                                        (uint32_t)br_cx >= x0
+                                        && (uint32_t)br_cx < x1
+                                        && (uint32_t)br_cy >= y0
+                                        && (uint32_t)br_cy < y1
+                                    )
+                                    {
+                                        ++cl_hits;
+
+                                        if (!best)
+                                        {
+                                            best = t;
+                                            best_offset =
+                                                ((uint32_t)br_cy - y0) * t->w
+                                                + ((uint32_t)br_cx - x0);
+                                        }
+                                    }
+                                }
+
+                                if (best)
+                                {
+                                    printf(
+                                        "CLUP hits:%u #%lu xy:%u,%u wh:%u,%u\n",
+                                        cl_hits,
+                                        (unsigned long)best->serial,
+                                        (unsigned)best->x,
+                                        (unsigned)best->y,
+                                        (unsigned)best->w,
+                                        (unsigned)best->h
+                                    );
+
+                                    printf(
+                                        "CLUP src:%08lX off:%lu snap:%u\n",
+                                        (unsigned long)best->src,
+                                        (unsigned long)best_offset,
+                                        (unsigned)best->snap_count
+                                    );
+
+                                    uint16_t at_upload[8] = {0};
+                                    uint16_t now_ram[8] = {0};
+
+                                    for (unsigned q = 0u; q < 8u; ++q)
+                                    {
+                                        uint32_t p = best_offset + q;
+
+                                        if (p < best->snap_count)
+                                        {
+                                            at_upload[q] = best->pixels[p];
+                                        }
+
+                                        if (
+                                            p
+                                            <
+                                            (uint32_t)best->w * best->h
+                                        )
+                                        {
+                                            now_ram[q] = cpu->read_half(
+                                                best->src + p * 2u
+                                            );
+                                        }
+                                    }
+
+                                    printf(
+                                        "CLAT:%04X %04X %04X %04X %04X %04X %04X %04X\n",
+                                        at_upload[0], at_upload[1],
+                                        at_upload[2], at_upload[3],
+                                        at_upload[4], at_upload[5],
+                                        at_upload[6], at_upload[7]
+                                    );
+
+                                    printf(
+                                        "CLNOW:%04X %04X %04X %04X %04X %04X %04X %04X\n",
+                                        now_ram[0], now_ram[1],
+                                        now_ram[2], now_ram[3],
+                                        now_ram[4], now_ram[5],
+                                        now_ram[6], now_ram[7]
+                                    );
+
+                                    /*
+                                     * Chercher si un vrai secteur CD a
+                                     * directement rempli la zone source de
+                                     * ce LoadImage.
+                                     */
+                                    unsigned cd_hits = 0u;
+                                    const FMB41CdTrace *cd_best = NULL;
+
+                                    uint32_t src_begin = best->src;
+                                    uint32_t src_end =
+                                        best->src
+                                        +
+                                        (uint32_t)best->w
+                                        *
+                                        (uint32_t)best->h
+                                        *
+                                        2u;
+
+                                    for (
+                                        uint32_t k = 0u;
+                                        k < g_b41_cd_count;
+                                        ++k
+                                    )
+                                    {
+                                        uint32_t ci =
+                                            (
+                                                g_b41_cd_head
+                                                + B41_CD_RING
+                                                - 1u
+                                                - k
+                                            )
+                                            % B41_CD_RING;
+
+                                        const FMB41CdTrace *ct =
+                                            &g_b41_cd[ci];
+
+                                        uint32_t cd_begin = ct->dst;
+                                        uint32_t cd_end =
+                                            ct->dst + ct->bytes;
+
+                                        if (
+                                            src_begin < cd_end
+                                            &&
+                                            cd_begin < src_end
+                                        )
+                                        {
+                                            ++cd_hits;
+
+                                            if (!cd_best)
+                                            {
+                                                cd_best = ct;
+                                            }
+                                        }
+                                    }
+
+                                    if (cd_best)
+                                    {
+                                        printf(
+                                            "CDSRC hits:%u #%lu LBA:%08lX\n",
+                                            cd_hits,
+                                            (unsigned long)cd_best->serial,
+                                            (unsigned long)cd_best->lba
+                                        );
+
+                                        printf(
+                                            "CDSRC dst:%08lX bytes:%lu\n",
+                                            (unsigned long)cd_best->dst,
+                                            (unsigned long)cd_best->bytes
+                                        );
+                                    }
+                                    else
+                                    {
+                                        printf(
+                                            "CDSRC hits:0 src not direct-CD\n"
+                                        );
+                                    }
+                                }
+                                else
+                                {
+                                    printf(
+                                        "CLUP hits:0 smallUploads:%lu\n",
+                                        (unsigned long)g_b40_upload_count
+                                    );
+                                }
+                            }
+                        }
+                        else
+                        {
+                            printf("TEX probe:none\n");
+                        }
+                    }
+                }
+                else
+                {
+                    printf("BIG:none\n");
+                }
+            }
+
+            {
+                uint32_t wf=0u, wd=0u, wc=0u, wu=0u, ws=0u;
+                uint8_t wt=0u, wo=0u;
+                int wx=0, wy=0, ww=0, wh=0;
+                uint32_t wcmd[4] = {0u,0u,0u,0u};
+
+                fm_gpu_b44_watch_get(
+                    &wf, &wd, &wc, &wu,
+                    &ws, &wt, &wo,
+                    &wx, &wy, &ww, &wh,
+                    wcmd
+                );
+
+                printf(
+                    "W290,64 18x72 F/D/C/U:%lu/%lu/%lu/%lu\\n",
+                    (unsigned long)wf,
+                    (unsigned long)wd,
+                    (unsigned long)wc,
+                    (unsigned long)wu
+                );
+
+                if (ws != 0u)
+                {
+                    printf(
+                        "WLAST #%lu %c op:%02X xy:%d,%d wh:%d,%d\\n",
+                        (unsigned long)ws,
+                        wt ? (char)wt : '?',
+                        (unsigned)wo,
+                        wx, wy, ww, wh
+                    );
+
+                    printf(
+                        "WCMD:%08lX %08lX %08lX %08lX\\n",
+                        (unsigned long)wcmd[0],
+                        (unsigned long)wcmd[1],
+                        (unsigned long)wcmd[2],
+                        (unsigned long)wcmd[3]
+                    );
+                }
+                else
+                {
+                    printf("WLAST:none\\n");
+                }
+            }
+
+            {
+                uint32_t ph=0u, ps=0u, pea=0u, pfa=0u;
+                uint16_t pe1=0u, ptp=0u;
+                int pox=0, poy=0;
+                uint32_t pcmd[4] = {0u,0u,0u,0u};
+
+                if (fm_gpu_b46_sprite_provenance_get(
+                        &ph, &ps, &pe1, &pea, &pfa,
+                        &ptp, &pox, &poy, pcmd))
+                {
+                    printf(
+                        "GPU64 hits:%lu serial:%lu E1:%03X age:%lu\n",
+                        (unsigned long)ph,
+                        (unsigned long)ps,
+                        (unsigned)pe1,
+                        (unsigned long)pea
+                    );
+
+                    printf(
+                        "GPU64 fillAge:%lu TP:%03X off:%d,%d\n",
+                        (unsigned long)pfa,
+                        (unsigned)ptp,
+                        pox, poy
+                    );
+
+                    printf(
+                        "GPU64 cmd:%08lX %08lX %08lX %08lX\n",
+                        (unsigned long)pcmd[0],
+                        (unsigned long)pcmd[1],
+                        (unsigned long)pcmd[2],
+                        (unsigned long)pcmd[3]
+                    );
+                }
+                else
+                {
+                    printf("GPU64:none\n");
+                }
+            }
+
+            printf(
+                "B38 STAT:%08lX ring:%lu/%lu PC:%08lX\n",
+                (unsigned long)g_b37_last_gpustat,
+                (unsigned long)g_b37_ring_write,
+                (unsigned long)g_b37_ring_read,
+                cpu ? (unsigned long)cpu->pc : 0ul
+            );
+
+            printf(
+                "GETSEC C/O/F:%lu/%lu/%lu rc:%ld\n",
+                (unsigned long)g_b32_getsec_calls,
+                (unsigned long)g_b32_getsec_ok,
+                (unsigned long)g_b32_getsec_fail,
+                (long)(int32_t)g_b32_last_rc
+            );
+
+            printf(
+                "GET req/lba:%08lX/%08lX rem:%08lX\n",
+                (unsigned long)g_b32_last_req,
+                (unsigned long)g_b32_last_lba,
+                (unsigned long)g_b32_last_remaining
+            );
+
+            printf(
+                "GET dst/bytes:%08lX/%lu 43N:%lu\n",
+                (unsigned long)g_b32_last_dst,
+                (unsigned long)g_b32_last_bytes,
+                (unsigned long)g_b32_43e_returned
+            );
+
+            printf(
+                "REQ snap:%lu 10:%08lX 18:%08lX\n",
+                (unsigned long)g_b31_req_snap,
+                (unsigned long)g_b31_req_10,
+                (unsigned long)g_b31_req_18
+            );
+
+            printf(
+                "REQ 1C:%08lX 20:%08lX 24:%08lX\n",
+                (unsigned long)g_b31_req_1c,
+                (unsigned long)g_b31_req_20,
+                (unsigned long)g_b31_req_24
+            );
+
+            printf(
+                "REQ 2C:%08lX 34:%08lX 40:%08lX\n",
+                (unsigned long)g_b31_req_2c,
+                (unsigned long)g_b31_req_34,
+                (unsigned long)g_b31_req_40
+            );
+
+            printf(
+                "REQ 44:%04X 46/47:%02X/%02X\n",
+                (unsigned)g_b31_req_44,
+                (unsigned)g_b31_req_46,
+                (unsigned)g_b31_req_47
+            );
+
+            printf(
+                "137 RA/GP:%08lX/%08lX\n",
+                (unsigned long)g_b31_r137_ra,
+                (unsigned long)g_b31_r137_gp
+            );
+
+            printf(
+                "137 A0/A1:%08lX/%08lX A2/A3:%08lX/%08lX\n",
+                (unsigned long)g_b31_r137_a0,
+                (unsigned long)g_b31_r137_a1,
+                (unsigned long)g_b31_r137_a2,
+                (unsigned long)g_b31_r137_a3
+            );
+
+            printf(
+                "C460/C484/T0:%08lX/%08lX/%08lX\n",
+                (unsigned long)g_b31_c460,
+                (unsigned long)g_b31_c484,
+                (unsigned long)g_b31_tbl0
+            );
+
+            printf(
+                "ST:%02X stable:%lu 60C/D/E:%02X/%02X/%02X\n",
+                (unsigned)g_main_state,
+                (unsigned long)g_main_state_stable_frames,
                 (unsigned)g_main_state_60c,
                 (unsigned)g_main_state_60d,
-                (unsigned)g_main_state_60e,
-                (unsigned long)g_main_render_ctx
+                (unsigned)g_main_state_60e
             );
 
-
             printf(
-                "FRAME T/D    : %u/%ld F6A0:%08lX\n",
-                (unsigned)g_main_frame_target,
-                (long)g_main_frame_done,
-                (unsigned long)g_main_flags_6a0
-            );
-
-
-            printf(
-                "F710/F72C    : %08lX/%08lX\n",
-                (unsigned long)g_main_flags_710,
-                (unsigned long)g_main_flags_72c
-            );
-
-
-            printf(
-                "FADE C/D/E/F : %02X/%02X/%02X/%02X S:%lu\n",
+                "FADE:%02X/%02X/%02X done:%lu  GPU:%llu/%llu/%llu/%llu\n",
                 (unsigned)g_fade_current,
                 (unsigned)g_fade_target,
                 (unsigned)g_fade_flags,
-                (unsigned)g_fade_step,
-                (unsigned long)g_fade_scale
+                (unsigned long)g_fade_bridge_completions,
+                (unsigned long long)gpu_debug.packets_fill,
+                (unsigned long long)gpu_debug.packets_draw,
+                (unsigned long long)gpu_debug.packets_copy,
+                (unsigned long long)gpu_debug.packets_upload
             );
-
 
             printf(
-                "FADE bridge  : T:%lu DONE:%lu\n",
-                (unsigned long)g_fade_bridge_ticks,
-                (unsigned long)g_fade_bridge_completions
+                "GP0:%llu VRAM:%lu VIEW:%lu,%lu nz:%lu\n",
+                (unsigned long long)gpu_debug.gp0_words,
+                (unsigned long)gpu_debug.nonzero_vram,
+                (unsigned long)g_vram_view_x,
+                (unsigned long)g_vram_view_y,
+                (unsigned long)g_vram_view_nonzero
             );
-
-
-            printf(
-                "STR OBS      : B:%08lX F:%u\n",
-                (unsigned long)g_str_intro_last_base,
-                (unsigned)g_str_intro_last_done
-            );
-
-
-            printf(
-                "GAME LOG[%lu]: %.46s\n",
-                (unsigned long)g_game_log_count,
-                g_game_log[0]
-                    ? g_game_log
-                    : "-"
-            );
-
 
             /*
              * Reset des compteurs de mesure de rendu sans
@@ -2922,6 +8514,185 @@ int main(void)
         if (memory_status == 0)
         {
             fm_memory_vblank_tick();
+
+            /*
+             * B12 : executer le vrai callback VBlank du jeu dans un
+             * contexte CPU isole, sans detruire les registres du
+             * thread principal.
+             */
+            if (game_running)
+            {
+                fm_execute_guest_vblank_callback(
+                    cpu,
+                    frame
+                );
+
+                /*
+                 * =====================================================
+                 * B13 FASTBOOT 401A4
+                 * =====================================================
+                 *
+                 * B12 a prouve que le vrai callback VBlank s'execute
+                 * correctement (retour propre + 8003CE34 traverse),
+                 * mais le startup reste dans la boucle interne de
+                 * FUN_800401A4.
+                 *
+                 * On laisse d'abord la fonction faire son setup et au
+                 * moins quatre vrais callbacks VBlank. Quand le thread
+                 * principal est de nouveau dans le VSync de cette boucle,
+                 * on restaure le SP d'entree et on reprend exactement au
+                 * RA du JAL appelant (80012B48 sur notre build FR).
+                 *
+                 * Cela evite de sauter le setup de 401A4 tout en supprimant
+                 * uniquement son attente infinie dans notre environnement.
+                 */
+                if (
+                    !g_fast401_forced
+                    && g_hit_401a4 != 0u
+                    && g_sp_401a4 != 0u
+                    && g_ra_401a4 != 0u
+                    && g_irq_exec_ok >= 4u
+                    && ((cpu->pc & 0x1FFFFFFFu) == 0x000746B8u)
+                    && cpu->gpr[31] == 0x80012D48u
+                )
+                {
+                    cpu->pc = g_ra_401a4;
+                    cpu->gpr[29] = g_sp_401a4;
+                    cpu->gpr[31] = g_ra_401a4;
+                    cpu->gpr[2] = 0u;
+                    cpu->gpr[0] = 0u;
+
+                    /* Annuler l'attente VSync HLE devenue obsolete. */
+                    g_vsync_wait_active = 0;
+                    g_vsync_wait_until_frame = 0;
+
+                    g_fast401_forced = 1u;
+                    g_fast401_frame = frame;
+                }
+
+                /*
+                 * B32 : si FUN_80043E3C revient d'elle-meme apres que
+                 * le pont CD a effectivement livre des secteurs, noter
+                 * ce retour naturel. On ne saute plus sa sequence
+                 * d'initialisation.
+                 */
+                if (
+                    !g_b32_43e_returned
+                    && g_b32_getsec_ok != 0u
+                    && g_ra_43e3c != 0u
+                    && cpu->pc == g_ra_43e3c
+                )
+                {
+                    g_b32_43e_returned = 1u;
+                    g_b32_43e_return_frame = frame;
+                }
+
+
+                /*
+                 * =====================================================
+                 * B14 FASTBOOT 43E3C
+                 * =====================================================
+                 *
+                 * B13 a prouve que le retour force de 401A4 nous fait
+                 * bien entrer dans FUN_80043E3C. Le nouveau verrou est
+                 * son attente de chargement asynchrone : 80013700 est
+                 * atteint, mais aucun secteur CD n'est jamais transfere.
+                 *
+                 * On ne saute pas 43E3C a son entree. On attend qu'elle
+                 * ait initialise sa requete et soit effectivement entree
+                 * dans 80013700, puis on restaure le contexte d'entree
+                 * de 43E3C et on reprend au vrai RA du startup.
+                 *
+                 * C'est volontairement un FASTBOOT de bring-up : le but
+                 * est d'atteindre 8002DF60 et de provoquer enfin les
+                 * premieres commandes graphiques utiles du jeu.
+                 */
+                if (
+                    !g_fast43e_forced
+                    && !g_b32_43e_returned
+                    && g_fast401_forced
+                    && g_hit_intro_init != 0u
+                    && g_hit_load_wait != 0u
+                    && g_ra_43e3c != 0u
+                    && g_sp_43e3c != 0u
+                    && g_irq_exec_ok >= 8u
+                    /*
+                     * B32 laisse maintenant la vraie requete CD se
+                     * terminer. L'ancien fastboot n'est conserve qu'en
+                     * filet de securite si le bridge n'a jamais reussi
+                     * a fournir un secteur apres plusieurs secondes.
+                     */
+                    && g_b32_getsec_ok == 0u
+                    && frame >= (g_fast401_frame + 300u)
+                )
+                {
+                    cpu->pc = g_ra_43e3c;
+                    cpu->gpr[29] = g_sp_43e3c;
+                    cpu->gpr[31] = g_ra_43e3c;
+                    cpu->gpr[2] = 0u;
+                    cpu->gpr[0] = 0u;
+
+                    /* Sortir proprement de toute attente HLE en cours. */
+                    g_vsync_wait_active = 0;
+                    g_vsync_wait_until_frame = 0;
+
+                    g_fast43e_forced = 1u;
+                    g_fast43e_frame = frame;
+                }
+
+                /*
+                 * =====================================================
+                 * B15 DIRECT MAIN STATE MACHINE
+                 * =====================================================
+                 *
+                 * B14 a enfin fait apparaitre de vraies commandes DRAW
+                 * et COPY GPU, mais le startup n'appelle toujours pas
+                 * naturellement 8002DF60. On cesse d'attendre : apres
+                 * 43E3C, on initialise le flag attendu par le startup et
+                 * on pilote directement la vraie fonction 8002DF60.
+                 */
+                if (
+                    !g_direct2df_active
+                    &&
+                    (
+                        (
+                            g_fast43e_forced
+                            && frame >= (g_fast43e_frame + 2u)
+                        )
+                        ||
+                        (
+                            /*
+                             * En chemin naturel, laisser le startup
+                             * poursuivre seul. Direct-2DF ne redevient
+                             * qu'un fallback si 8002DF60 n'est toujours
+                             * jamais atteint deux secondes plus tard.
+                             */
+                            g_b32_43e_returned
+                            && g_hit_main_loop == 0u
+                            && frame >= (g_b32_43e_return_frame + 120u)
+                        )
+                    )
+                )
+                {
+                    fm_memory_write_byte(
+                        0x8009C60Du,
+                        8u
+                    );
+
+                    g_direct2df_active = 1u;
+                    g_direct2df_start_frame = frame;
+
+                    /*
+                     * Forcer le premier scheduling a la frame suivante.
+                     */
+                    cpu->pc = g_direct2df_sentinel;
+                    cpu->gpr[31] = g_direct2df_sentinel;
+                    cpu->gpr[0] = 0u;
+
+                    g_vsync_wait_active = 0;
+                    g_vsync_wait_until_frame = 0;
+                }
+            }
         }
 
 
@@ -2937,6 +8708,15 @@ int main(void)
             fm_service_fade_bridge();
 
             fm_update_game_state_debug();
+
+            /*
+             * Des que le vrai boot atteint le lecteur STR, sauter
+             * uniquement la premiere video pour viser directement
+             * l'ecran titre/menu et obtenir une image jouable.
+             */
+            fm_try_force_intro_stream_end(
+                game_running
+            );
         }
 
 
@@ -2956,6 +8736,7 @@ int main(void)
 
     free(vram);
     free(preview);
+    free(composite);
     free(ram);
 
     gfxExit();
