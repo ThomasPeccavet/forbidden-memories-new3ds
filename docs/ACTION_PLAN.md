@@ -1,169 +1,132 @@
 # Plan d'action — New Nintendo 3DS
 
-Objectif : obtenir le **premier écran réellement produit par Forbidden Memories sur New 3DS/Azahar**, puis poursuivre jusqu'au menu et au premier duel.
+Objectif actif : obtenir le **menu principal français visible et navigable** sur
+Azahar à partir du vrai overlay SU.
 
-Le plan est volontairement ordonné par dépendances. Éviter de travailler sur l'audio, les sauvegardes ou l'optimisation tant que le boot graphique n'est pas stable.
+Les anciens objectifs « première VRAM » et « premier écran réel » sont atteints :
+le logo Konami et l'écran titre sont déjà rendus.
 
-## Phase 0 — Stabiliser le boot actuel
+## Phase 1 — Isoler le défaut de rendu du menu SU
 
-### 0.1 Implémenter A0:44 `FlushCache`
+### 1.1 Mesurer le coût GP0 par étape de frame
 
-Critère de succès : le boot ne s'arrête plus sur `PC=0xA0 / T1=0x44` et revient à `$ra` sans altérer les registres guest non concernés.
+Instrumenter :
 
-### 0.2 Journaliser les prochains appels BIOS inconnus
+- entrée/sortie de `FUN_80041674` ;
+- entrée/sortie du callback `0x80180B4C` ;
+- compteur GP0 avant/après chaque étape.
 
-Ajouter un diagnostic compact : vecteur A0/B0/C0, numéro, A0-A3, RA, PC avant/après.
+Critère de succès : déterminer qui émet réellement les primitives du menu.
 
-Critère de succès : chaque nouvel arrêt BIOS est identifiable sans modifier manuellement plusieurs fichiers.
+### 1.2 Inspecter les listes du renderer
 
-## Phase 1 — Interruptions PS1 minimales
+Le menu crée ses objets via `FUN_800403D0(..., 2)`, donc ils sont associés au
+layer/type 2.
 
-### 1.1 I_STAT / I_MASK
+Tracer :
 
-Implémenter au minimum :
+- `DAT_800F11C0[]` / `DAT_800F11D0[]` ;
+- chaîne next/prev des objets ;
+- présence des pointeurs `DAT_80184794 .. DAT_801847BC` ;
+- flags `+0x08`, position `+0x30`, type `+0x1E`, callback/données utiles.
 
-- `0x1F801070` I_STAT ;
-- `0x1F801074` I_MASK ;
-- lectures/écritures 16 et 32 bits cohérentes ;
-- acquittement des bits I_STAT selon la sémantique PS1.
+Critère de succès : prouver que les objets SU sont réellement vus par le renderer
+global.
 
-Critère de succès : `Last MMIO` ne reste plus bloqué sur `1F801074` et les boucles d'attente IRQ progressent.
+### 1.3 Tracer les dernières primitives GPU
 
-### 1.2 VBlank minimal
+Utiliser la trace B29/B38 existante pour conserver plusieurs commandes récentes :
 
-Lever périodiquement l'IRQ VBlank dans I_STAT en fonction de la boucle 3DS/Azahar.
+- opcode ;
+- coordonnées ;
+- texpage ;
+- CLUT ;
+- draw offset ;
+- draw area.
 
-Critère de succès : les fonctions de synchronisation ne tournent plus indéfiniment en attente d'une interruption verticale.
+Critère de succès : identifier des primitives correspondant au menu à
+`x ~= 160`, ou prouver qu'elles n'atteignent jamais GP0.
 
-### 1.3 Respecter I_MASK
+### 1.4 Départager les scénarios
 
-Une IRQ ne doit devenir visible au CPU que si son bit est autorisé.
+- **pas de GP0 menu** → réparer le parcours/layer/callback objet ;
+- **GP0 menu présent mais hors écran** → corriger coords / draw offset / display page ;
+- **GP0 menu présent mais transparent/noir** → inspecter texture / CLUT / flags ;
+- **GP0 menu présent puis recouvert** → identifier et désactiver/retirer les objets titre obsolètes.
 
-Critère de succès : pas de déclenchement permanent ni d'IRQ storm.
+## Phase 2 — Menu visible et navigable
 
-## Phase 2 — GPU jusqu'à la première VRAM réelle
+Une fois le menu visible :
 
-### 2.1 Instrumenter GP0
+1. valider Haut/Bas ;
+2. valider la sélection ;
+3. valider Croix / Rond ;
+4. comparer le comportement avec le runtime PC ;
+5. supprimer ou réduire les bridges B70/B71/B73/B75 si la cause racine est comprise.
 
-Compteurs séparés :
+Critère de succès :
 
-- mots GP0 ;
-- commandes environnement E1-E6 ;
-- fill ;
-- triangles ;
-- rectangles/sprites ;
-- CPU→VRAM ;
-- VRAM→VRAM ;
-- linked-list DMA ;
-- commandes inconnues.
+> menu français visible, sélection déplaçable et validation fonctionnelle.
 
-Critère de succès : savoir exactement pourquoi `Frame VRAM` reste NON.
+## Phase 3 — Nouvelle partie
 
-### 2.2 DMA2 GPU
+Sélectionner « Nlle partie » et tracer :
 
-Implémenter les registres DMA nécessaires, en priorité channel 2 : MADR, BCR, CHCR et linked-list GPU.
+- transition d'état ;
+- nouvel overlay chargé ;
+- nouveaux besoins CD ;
+- nouvelles instructions GTE ;
+- nouveaux besoins GPU/DMA.
 
-Le wrapper BIOS `A0:4B` est déjà utile, mais le jeu peut programmer le DMA directement via MMIO.
+Critère de succès : quitter proprement le menu SU sans patch manuel d'adresse.
 
-Critère de succès : une linked-list guest envoyée par DMA arrive réellement dans `fm_gpu_gp0_write`.
+## Phase 4 — Premier duel
 
-### 2.3 Première écriture VRAM
+Utiliser le runtime PC comme oracle fonctionnel et avancer jusqu'à Simon Muran.
 
-Critère de succès : `fm_gpu_has_frame()` devient vrai suite au code du jeu, pas suite à une primitive de démonstration.
+Critères :
 
-### 2.4 Présentation écran supérieur
+- introduction franchie ;
+- plateau visible ;
+- main de cartes visible ;
+- entrée utilisateur fonctionnelle ;
+- un tour complet exécutable.
 
-Présenter la zone VRAM définie par GP1 display start et le mode vidéo courant.
+## Phase 5 — Remplacer les bridges de bring-up
 
-Critère de succès : premier écran, même partiel/corrompu, provenant de Forbidden Memories.
+Les bridges actuels ont permis d'identifier les attentes réelles, mais ne doivent
+pas devenir l'architecture finale.
 
-## Phase 3 — CD-ROM et chargement dynamique
+À généraliser :
 
-### 3.1 Identifier le premier besoin CD après le boot
+- completion CD async ;
+- DMA2 ;
+- synchronization GPU ;
+- GTE helpers ;
+- état / overlays ;
+- timing d'animation.
 
-Tracer les accès MMIO CD-ROM `0x1F801800..803` et les appels BIOS associés.
+Pour chaque bridge : documenter la condition qui le déclenche, retrouver la
+sémantique PS1 originale, puis déplacer la correction dans le composant matériel
+ou runtime approprié.
 
-### 3.2 Contrôleur CD minimal
+## Phase 6 — Audio, sauvegarde et performance
 
-Implémenter uniquement les commandes réellement nécessaires au démarrage : status, Setloc, ReadN/ReadS, Getloc, Pause/Stop selon la trace.
-
-### 3.3 IRQ CD et secteurs Form1/Form2
-
-Réutiliser le lecteur BIN existant et étendre au besoin vers Form2/XA sans charger tout le disque en RAM.
-
-Critère de succès : le jeu charge ses données sans dépendre d'un stub permanent.
-
-## Phase 4 — Overlays dynamiques
-
-### 4.1 Détecter les écritures de code vers `0x801xxxxx`
-
-Journaliser l'adresse, taille, source disque et SHA-256 de chaque image chargée.
-
-### 4.2 Fallback R3000A comme filet de sécurité
-
-Le code dynamique doit pouvoir démarrer immédiatement via l'interpréteur avant toute recompilation dédiée.
-
-### 4.3 Recompilation optionnelle des overlays chauds
-
-Une fois les images identifiées de manière stable, générer des objets ARM distincts par overlay et sélectionner la bonne version selon le contenu RAM.
-
-Critère de succès : ne jamais confondre deux images occupant la même adresse PS1 à des moments différents.
-
-## Phase 5 — GTE
-
-Commencer uniquement lorsqu'un arrêt `FM_INTERP_GTE` ou `FM_STOP_GTE` empêche le boot/rendu.
-
-Réutiliser autant que possible la sémantique du runtime PSXRecomp au lieu de créer des approximations silencieuses.
-
-Critère de succès : géométrie de menu/duel cohérente et pas seulement absence de crash.
-
-## Phase 6 — Entrées et menu
-
-Raccorder les boutons 3DS au pad PS1 du jeu, sans conflit avec l'interface de diagnostic.
-
-Critère de succès : écran titre puis menu français navigable dans Azahar.
-
-## Phase 7 — Audio et sauvegarde
-
-Après obtention du menu et d'un duel visuel :
+Après un premier duel visuel :
 
 - SPU ;
 - XA ;
-- synchronisation audio ;
 - memory card ;
-- sauvegarde/chargement.
+- sauvegarde/chargement ;
+- tests New 3DS physique ;
+- profiling ARM11/interpréteur/rasteriseur ;
+- optimisation des seuls hotspots mesurés.
 
-## Phase 8 — Performance New 3DS
+## Discipline de travail
 
-Mesurer sur matériel physique :
-
-- temps ARM recompilé ;
-- temps interpréteur ;
-- temps rasteriseur ;
-- mémoire ;
-- débit CD ;
-- frame pacing.
-
-Optimiser seulement les zones mesurées comme réellement coûteuses.
-
-## Priorité Work immédiate
-
-Pour une session autonome ChatGPT Work, suivre cet ordre :
-
-1. lire `docs/WORK_HANDOFF.md` et `docs/CURRENT_STATUS.md` ;
-2. inspecter les sources 3DS actuelles ;
-3. implémenter et tester A0:44 ;
-4. implémenter I_STAT/I_MASK ;
-5. instrumenter le GPU ;
-6. implémenter DMA2 si la trace le demande ;
-7. obtenir `Frame VRAM = OUI` ;
-8. afficher cette VRAM sur l'écran supérieur ;
-9. commit/push après chaque jalon reproductible.
-
-## Règles de travail
-
-- ne pas ajouter des seeds une par une si le fallback R3000A peut continuer ;
-- ne pas stubber silencieusement GTE/CD/IRQ avec des valeurs arbitraires ;
-- conserver un diagnostic précis à chaque arrêt ;
-- ne jamais committer BIN, BIOS Sony, EXE extrait, dumps RAM ou C généré du jeu ;
-- garder PSXRecomp épinglé à la révision documentée tant qu'un changement amont n'est pas volontairement validé.
+- conserver des diagnostics courts et reproductibles ;
+- ne pas transformer un appel inconnu en no-op sans preuve ;
+- comparer chaque gros jalon avec le runtime PC ;
+- ne pas versionner le BIN, le BIOS Sony, l'EXE extrait ni les shards C générés ;
+- garder PSXRecomp sur la révision documentée tant qu'un changement amont n'est
+  pas volontairement validé.

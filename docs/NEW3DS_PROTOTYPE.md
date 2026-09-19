@@ -1,144 +1,116 @@
-# Prototype natif New 3DS — état du 17 septembre 2026
+# Prototype natif New 3DS — état du 19 septembre 2026
 
-Le prototype n'est pas encore un jeu jouable, mais il exécute désormais réellement le code français avec une architecture hybride ARM11 + R3000A.
+Le prototype exécute désormais suffisamment de la version française pour
+afficher le logo Konami et l'écran titre, reconnaître START, charger l'overlay
+SU et entrer dans la boucle du menu principal.
 
-## Ce que fait le backend 3DS
+## Backend actuel
 
-- application native libctru ;
-- accélération New 3DS ;
-- lecture du BIN français MODE2/2352 depuis SD ;
-- chargement du PS-X EXE à `0x80010000` ;
-- CPUState PSXRecomp, RAM 2 Mio, scratchpad et alias KSEG ;
-- code résident généré par PSXRecomp et recompilé pour ARM11 ;
-- dispatcher statique ;
-- fallback R3000A pour les blocs inconnus ;
-- HLE BIOS partiel ;
-- bridge GP0/GP1 et wrappers BIOS GPU ;
-- rasteriseur logiciel PSXRecomp compilé pour ARM11 ;
-- diagnostics CPU/BIOS/MMIO/GPU/interpréteur sur l'écran inférieur.
+- libctru / ARM11 ;
+- BIN MODE2/2352 depuis SD ;
+- PS-X EXE à `0x80010000` ;
+- RAM PS1 2 Mio + scratchpad + alias KSEG ;
+- code résident PSXRecomp ;
+- dispatcher natif ;
+- fallback R3000A ;
+- BIOS/MMIO/IRQ/pad nécessaires au chemin courant ;
+- CD sector reader + requêtes async ;
+- GPU GP0/GP1 + DMA/bridges de synchronization ;
+- rasteriseur logiciel ;
+- overlays dynamiques exécutables en RAM guest ;
+- diagnostics détaillés écran inférieur.
+
+## Résultat graphique validé
+
+Le backend a affiché de vraies images du jeu dans Azahar :
+
+1. Konami ;
+2. écran titre Forbidden Memories.
+
+Ce résultat invalide l'ancienne description « aucune image réelle » des notes du
+17 septembre.
+
+## Overlay SU
+
+Après START :
+
+- état résident 8 sélectionné ;
+- `SU.mrg` chargé ;
+- signature overlay observée à `0x80180000` ;
+- init `0x8018001C` exécutée ;
+- update `0x80180390` exécutée en boucle ;
+- `DAT_8009C898 = 0x80180B4C` ;
+- callback draw réellement appelé ;
+- 11 objets du menu présents en RAM.
+
+B75 montre que l'animation d'entrée peut être terminée et que les objets du groupe
+actif se retrouvent à `x=160`, timer `0`, flags visibles. L'écran reste
+néanmoins sur le titre : le prochain travail est donc dans la chaîne
+**objet → renderer → GP0 → VRAM visible**.
 
 ## Architecture
 
 ```text
-EXE français
+EXE + CD
    |
    v
-CPUState + RAM PS1
+CPUState / RAM
+   |
+   +--> code ARM11 recompilé
+   |
+   +--> fallback R3000A
    |
    v
-Dispatcher ARM11
-   |\
-   | \ adresse inconnue
-   |  v
-   |  R3000A fallback
-   |  |
-   +--+
-      |
-      v
- BIOS HLE / MMIO
-      |
-      +--> GPU GP0/GP1 --> software renderer --> VRAM --> écran supérieur
-      |
-      +--> IRQ/CD/etc. à compléter
+BIOS / MMIO / IRQ / pad
+   |
+   +--> CD / overlays
+   |
+   +--> GPU / DMA --> GP0 --> rasteriseur --> VRAM --> écran
 ```
 
-Le fallback R3000A a déjà été observé en fonctionnement dans Azahar : une destination non recompilée est exécutée par basic block puis le contrôle revient au dispatcher.
+## Bridges de bring-up importants
 
-## GPU
+Le `main.c` courant contient plusieurs bridges instrumentés qui ont permis de
+franchir des attentes spécifiques :
 
-`fm_gpu.c` parse déjà des commandes GP0 : environnement de dessin, polygones, lignes, rectangles/sprites, transferts CPU→VRAM, VRAM→VRAM et listes liées BIOS.
+- CD stream / requêtes async ;
+- helpers GTE ;
+- completion graphique type `0x20` ;
+- attente DMA2 ;
+- impulsion START 10 frames ;
+- entrée contrôlée vers l'état 8 ;
+- animation d'entrée SU.
 
-Les accès `0x1F801810` et `0x1F801814` sont routés depuis `fm_memory.c` vers GP0/GP1. Les appels BIOS GPU A0:46..4E passent par `fm_gpu_bios_call`.
+Ils sont utiles pour localiser les causes, mais constituent encore de la dette de
+bring-up à remplacer progressivement.
 
-Un bug de retour BIOS GPU a été corrigé : les handlers remettent maintenant `cpu->pc` à `$ra`. Avant correction, A0:49 se répétait et gonflait artificiellement le compteur GP0 à environ 90 000 mots ; après correction, le même stade du boot montre environ 4 mots GP0.
+## Build
 
-Le dernier test affiche encore `Frame VRAM = NON` : aucune image réelle du jeu n'est encore présentée.
-
-## BIOS / kernel
-
-Le shim couvre actuellement les services nécessaires déjà rencontrés :
-
-```text
-A0:72  _96_remove
-A0:9F  SetMem
-B0:18  ResetEntryInt
-B0:19  HookEntryInt
-B0:35  write
-B0:56  GetC0Table
-B0:57  GetB0Table
-B0:5B  ChangeClearPAD
-C0:02  SysEnqIntRP
-C0:03  SysDeqIntRP
-C0:0A  ChangeClearRCnt
-A0:46..4E GPU family
-```
-
-Le prochain appel observé est `A0:44 FlushCache`.
-
-## MMIO / IRQ
-
-Le dernier MMIO observé est `0x1F801074`, soit `I_MASK`. `I_STAT`/`I_MASK` et un VBlank minimal sont donc les prochains éléments kernel/hardware prioritaires.
-
-## Compilation
-
-Prérequis : devkitPro `3ds-dev`, Git, Python 3.11+ et PSXRecomp épinglé à :
+PSXRecomp :
 
 ```text
 1965b2df424da03483a5370340433a862f78f103
 ```
 
-Depuis la racine :
-
 ```sh
-git clone https://github.com/Unchiga/psxrecomp.git work/upstream-psxrecomp
-git -C work/upstream-psxrecomp checkout 1965b2df424da03483a5370340433a862f78f103
 export PATH=$DEVKITARM/bin:$PATH
 make -C 3ds clean
 make -C 3ds PSXRECOMP_ROOT=../work/upstream-psxrecomp -j4
 ```
 
-Le build utilise aussi :
-
-```text
-work/arm-generated-objects/fm-generated-combined.o
-```
-
-qui doit être généré localement à partir des shards français et ne doit pas être versionné.
-
-Sorties :
-
-```text
-3ds/fm-new3ds.elf
-3ds/fm-new3ds.3dsx
-```
-
-## Azahar
-
-Le disque est attendu à :
+Disque :
 
 ```text
 sdmc:/3ds/fm-new3ds/disc.bin
 ```
 
-Commandes principales :
+## Limites
 
-| Bouton | Action |
-| --- | --- |
-| A | RUN / PAUSE |
-| B | RESET JEU |
-| START + SELECT | Quitter |
-
-L'écran inférieur affiche le dernier PC, les registres, le dernier MMIO, le résultat du dispatcher, l'état du fallback R3000A et les compteurs GPU.
-
-## Limites actuelles
-
-- aucune image réelle de Forbidden Memories sur l'écran supérieur ;
-- IRQ/VBlank incomplets ;
-- DMA GPU à fiabiliser ;
-- contrôleur CD asynchrone incomplet ;
-- GTE complet absent ;
-- audio/SPU/XA absents ;
+- menu SU pas encore visible ;
+- pas encore de nouvelle partie sur 3DS ;
+- CD/IRQ/DMA/GTE encore partiellement bridgés ;
+- audio absent ;
 - sauvegarde absente ;
-- pas encore de validation sur New 3DS physique.
+- pas encore de validation New 3DS physique.
 
-Voir [CURRENT_STATUS.md](CURRENT_STATUS.md) et [ACTION_PLAN.md](ACTION_PLAN.md) pour la suite.
+Voir [CURRENT_STATUS.md](CURRENT_STATUS.md) et [ACTION_PLAN.md](ACTION_PLAN.md).
