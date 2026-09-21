@@ -2486,6 +2486,18 @@ static uint32_t g_sort_native_last_pc = 0;
 static int32_t  g_sort_native_last_code = 0;
 static uint32_t g_sort_native_last_handoffs = 0;
 
+/*
+ * B119 - direct C implementation of Psy-Q GsSortOt.
+ * Independently verified against the matching US Forbidden Memories
+ * LIBGS routine (GsSortOt, size 0xB4) and its MIPS instruction flow.
+ */
+static uint32_t g_b119_csort_calls = 0u;
+static uint32_t g_b119_csort_ok = 0u;
+static uint32_t g_b119_csort_fallbacks = 0u;
+static uint32_t g_b119_csort_last_nodes = 0u;
+static uint32_t g_b119_csort_max_nodes = 0u;
+static int32_t g_b119_csort_last_code = 0;
+
 static uint32_t g_ot_direct_calls = 0;
 static uint32_t g_ot_direct_ok = 0;
 static uint32_t g_ot_direct_bad = 0;
@@ -4597,6 +4609,212 @@ static int fm_execute_guest_vblank_callback(
     return 0;
 }
 
+
+
+/*
+ * B119 - exact fast-path translation of GsSortOt.
+ *
+ * Cross-check:
+ *   French SLES-03948 Ghidra FUN_80085D98: size 0xB4
+ *   US SLUS matching decomp GsSortOt:       size 0xB4
+ *
+ * The US assembly confirms the exact register/pointer order, including the
+ * slightly non-obvious t0/a3 progression used to select the source link that
+ * is spliced into the destination bucket.
+ *
+ * This function changes only guest RAM exactly as GsSortOt does. The old
+ * temporary-CPU implementation remains the fallback if validation fails.
+ */
+static int fm_try_c_gssortot(
+    CPUState *cpu,
+    uint32_t src_ot,
+    uint32_t dst_ot,
+    uint32_t *result_v0
+)
+{
+    const uint32_t link_mask = 0x00FFFFFFu;
+    const uint32_t header_mask = 0xFF000000u;
+    const uint32_t max_steps = 8192u;
+
+    ++g_b119_csort_calls;
+    g_b119_csort_last_nodes = 0u;
+    g_b119_csort_last_code = 0;
+
+    if (!cpu || src_ot == 0u || dst_ot == 0u)
+    {
+        g_b119_csort_last_code = -10;
+        ++g_b119_csort_fallbacks;
+        return 0;
+    }
+
+    uint32_t src_phys = src_ot & 0x1FFFFFFFu;
+    uint32_t dst_phys = dst_ot & 0x1FFFFFFFu;
+
+    if (
+        src_phys >= 0x00200000u
+        || dst_phys >= 0x00200000u
+        || (src_phys & 3u) != 0u
+        || (dst_phys & 3u) != 0u
+        || src_phys + 0x10u >= 0x00200000u
+        || dst_phys + 0x08u >= 0x00200000u
+    )
+    {
+        g_b119_csort_last_code = -11;
+        ++g_b119_csort_fallbacks;
+        return 0;
+    }
+
+    /*
+     * MIPS reference:
+     *   a2 = src->org
+     *   a0 = src->point
+     *   v1 = dst->offset
+     *   t3 = dst->org
+     *   a3 = a2
+     *   t0 = a2
+     */
+    uint32_t a2 = cpu->read_word(src_ot + 4u);
+    uint32_t a0 = cpu->read_word(src_ot + 0x0Cu);
+    uint32_t dst_offset = cpu->read_word(dst_ot + 8u);
+    uint32_t t3 = cpu->read_word(dst_ot + 4u);
+    uint32_t src_tag = cpu->read_word(src_ot + 0x10u);
+
+    uint32_t a2_phys = a2 & 0x1FFFFFFFu;
+    uint32_t t3_phys = t3 & 0x1FFFFFFFu;
+
+    if (
+        a2_phys >= 0x00200000u
+        || t3_phys >= 0x00200000u
+        || (a2_phys & 3u) != 0u
+        || (t3_phys & 3u) != 0u
+    )
+    {
+        g_b119_csort_last_code = -12;
+        ++g_b119_csort_fallbacks;
+        return 0;
+    }
+
+    uint32_t a3 = a2;
+    uint32_t t0 = a2;
+    uint32_t v0 = cpu->read_word(a2);
+
+    /*
+     * The subtraction occurs in the branch delay slot in the original,
+     * therefore it happens regardless of whether the source starts at
+     * the terminating bucket.
+     */
+    uint32_t otz = a0 - dst_offset;
+
+    if ((v0 & link_mask) != link_mask)
+    {
+        int found_end = 0;
+
+        for (uint32_t step = 0u; step < max_steps; ++step)
+        {
+            /*
+             * Exact 0x80085E54..0x80085E6C register order:
+             *   t0 = a3;
+             *   v0 = *a2;
+             *   a3 = a2;
+             *   a2 = v0 & 00FFFFFF;
+             *   v0 = *a2;
+             */
+            t0 = a3;
+            v0 = cpu->read_word(a2);
+            a3 = a2;
+            a2 = v0 & link_mask;
+
+            uint32_t next_phys = a2 & 0x1FFFFFFFu;
+
+            if (
+                next_phys >= 0x00200000u
+                || (next_phys & 3u) != 0u
+            )
+            {
+                g_b119_csort_last_code = -13;
+                ++g_b119_csort_fallbacks;
+                return 0;
+            }
+
+            v0 = cpu->read_word(a2);
+            g_b119_csort_last_nodes = step + 1u;
+
+            if ((v0 & link_mask) == link_mask)
+            {
+                found_end = 1;
+                break;
+            }
+        }
+
+        if (!found_end)
+        {
+            g_b119_csort_last_code = -14;
+            ++g_b119_csort_fallbacks;
+            return 0;
+        }
+    }
+
+    if (g_b119_csort_last_nodes > g_b119_csort_max_nodes)
+    {
+        g_b119_csort_max_nodes = g_b119_csort_last_nodes;
+    }
+
+    /*
+     * MIPS: bucket = dst->org + ((src->point - dst->offset) << 2)
+     * with normal 32-bit wraparound.
+     */
+    uint32_t bucket =
+        t3
+        +
+        (otz << 2);
+
+    uint32_t bucket_phys = bucket & 0x1FFFFFFFu;
+    uint32_t t0_phys = t0 & 0x1FFFFFFFu;
+
+    if (
+        bucket_phys >= 0x00200000u
+        || t0_phys >= 0x00200000u
+        || (bucket_phys & 3u) != 0u
+        || (t0_phys & 3u) != 0u
+    )
+    {
+        g_b119_csort_last_code = -15;
+        ++g_b119_csort_fallbacks;
+        return 0;
+    }
+
+    /*
+     * Exact two splices from the reference assembly. Re-read the
+     * destination bucket before the second write because the original does.
+     */
+    uint32_t src_link_word = cpu->read_word(t0);
+    uint32_t dst_bucket_word = cpu->read_word(bucket);
+
+    cpu->write_word(
+        t0,
+        (src_link_word & header_mask)
+        |
+        (dst_bucket_word & link_mask)
+    );
+
+    dst_bucket_word = cpu->read_word(bucket);
+
+    cpu->write_word(
+        bucket,
+        (dst_bucket_word & header_mask)
+        |
+        (src_tag & link_mask)
+    );
+
+    if (result_v0)
+    {
+        *result_v0 = dst_ot;
+    }
+
+    ++g_b119_csort_ok;
+    g_b119_csort_last_code = 1;
+    return 1;
+}
 
 
 /*
@@ -12743,13 +12961,31 @@ int main(void)
                      */
                     uint64_t b115_t2 = osGetTime();
 
+                    int b119_sort_code = 2;
+
                     int b115_native_ok =
-                        fm_try_native_gssortot(
+                        fm_try_c_gssortot(
                             cpu,
                             src_ot,
                             dst_ot,
                             &native_result
                         );
+
+                    if (!b115_native_ok)
+                    {
+                        b115_native_ok =
+                            fm_try_native_gssortot(
+                                cpu,
+                                src_ot,
+                                dst_ot,
+                                &native_result
+                            );
+
+                        b119_sort_code =
+                            b115_native_ok
+                                ? 1
+                                : g_sort_native_last_code;
+                    }
 
                     uint64_t b115_t3 = osGetTime();
 
@@ -12775,7 +13011,7 @@ int main(void)
                         b115_draw,
                         b115_env,
                         b115_other,
-                        g_sort_native_last_code
+                        b119_sort_code
                     );
 
                     if (b115_native_ok)
@@ -14063,7 +14299,7 @@ int main(void)
                 &b100_last_gp105
             );
 
-            printf("BUILD B118-DMA2-CYCLE-GUARD\n");
+            printf("BUILD B119-C-GSSORTOT\n");
 
             printf(
                 "RUN:%c CPU:%08lX RA:%08lX F:%lu I:%s\n",
@@ -14408,6 +14644,16 @@ int main(void)
                 (unsigned long)g_b115_slow_env,
                 (unsigned long)g_b115_slow_other,
                 (long)g_b115_slow_native_code
+            );
+
+            printf(
+                "B119 Csort c/ok/fb:%lu/%lu/%lu N:%lu/%lu code:%ld\n",
+                (unsigned long)g_b119_csort_calls,
+                (unsigned long)g_b119_csort_ok,
+                (unsigned long)g_b119_csort_fallbacks,
+                (unsigned long)g_b119_csort_last_nodes,
+                (unsigned long)g_b119_csort_max_nodes,
+                (long)g_b119_csort_last_code
             );
 
             {
