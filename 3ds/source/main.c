@@ -914,6 +914,623 @@ static uint32_t g_b75_last_c0 = 0u;
 static uint32_t g_b75_last_c5_before = 0u;
 static uint32_t g_b75_last_c5_after = 0u;
 static uint32_t g_b75_objects_settled = 0u;
+
+
+/*
+ * ============================================================
+ * B76 - ressource graphique SU a 0x801AF800
+ * ============================================================
+ *
+ * FUN_8006B350 charge 0x73 secteurs (0x39800 octets) de SU.MRG :
+ *
+ *   +0x00000 : 0x20000 -> tampon
+ *   +0x20000 : 0x10000 -> tampon
+ *   +0x30000 : 0x01000 -> 0x801DD000
+ *   +0x31000 : 0x08000 -> 0x80180000 (code overlay)
+ *   +0x39000 : 0x00800 -> 0x801AF800 (ressource sprites)
+ *
+ * Le code du menu utilise 0x801AF800 comme ressource de tous ses
+ * objets. Si cette derniere etape n'a pas ete publiee par notre
+ * chemin CD asynchrone, FUN_800418C0 voit un bloc sprite vide et
+ * retourne avant d'emettre les primitives du menu.
+ *
+ * B76 ne force le secteur que si les 64 premiers octets de
+ * 0x801AF800 sont TOUS nuls.
+ */
+static uint32_t g_b76_resource_bridge = 0u;
+static uint32_t g_b76_resource_attempt = 0u;
+static int32_t  g_b76_resource_rc = 0;
+static uint32_t g_b76_su_lba = 0u;
+static uint32_t g_b76_su_size = 0u;
+static uint32_t g_b76_pre_nonzero = 0u;
+static uint32_t g_b76_post_nonzero = 0u;
+static uint32_t g_b76_objects_rearmed = 0u;
+static uint32_t g_b76_bridge_frame = 0u;
+
+static uint32_t g_b76_418c0_menu_hits = 0u;
+static uint32_t g_b76_last_menu_obj = 0u;
+
+static uint8_t g_b76_sector[2048];
+
+
+/*
+ * ============================================================
+ * B77 - prouver ce que produit UN objet menu dans le GPU
+ * ============================================================
+ *
+ * B76 montre :
+ *   - 0x801AF800 est DEJA rempli (32/64 octets non nuls) ;
+ *   - O0 a un pointeur sprite valide 0x801AF8AA, count=1 ;
+ *   - FUN_800418C0 est appelee pour les objets menu ;
+ *   - 80041BB4 est atteint.
+ *
+ * Donc la ressource SU n'est pas le verrou.
+ *
+ * B77 associe maintenant chaque appel 800418C0 d'un objet SU au
+ * serial GPU avant/apres le call. On saura directement :
+ *
+ *   delta = 0  -> renderer objet ne produit aucune commande GPU
+ *   delta > 0  -> primitives bien envoyees au GPU
+ *
+ * On memorise aussi les 3 dernieres primitives DRAW apres le call.
+ */
+static uint32_t g_b77_menu_call_pending = 0u;
+static uint32_t g_b77_menu_call_obj = 0u;
+static uint32_t g_b77_menu_call_index = 0xFFFFFFFFu;
+
+static uint32_t g_b77_menu_calls = 0u;
+static uint32_t g_b77_menu_returns = 0u;
+static uint32_t g_b77_gpu_before = 0u;
+static uint32_t g_b77_gpu_after = 0u;
+static uint32_t g_b77_gpu_delta = 0u;
+static uint32_t g_b77_gpu_delta_nonzero = 0u;
+static uint32_t g_b77_gpu_delta_zero = 0u;
+static uint32_t g_b77_gpu_delta_max = 0u;
+
+static uint8_t  g_b77_op[3];
+static uint32_t g_b77_cmd0[3];
+static uint32_t g_b77_cmd1[3];
+static uint32_t g_b77_cmd2[3];
+static uint16_t g_b77_tp[3];
+static int32_t  g_b77_offx[3];
+static int32_t  g_b77_offy[3];
+
+
+/*
+ * ============================================================
+ * B78 - menu -> packet allocator -> Ordering Table
+ * ============================================================
+ *
+ * Correction importante de l'interpretation B77 :
+ *
+ * FUN_800418C0 ne pousse PAS directement ses primitives dans GP0.
+ * Elle construit des paquets dans le buffer courant DAT_800FF5C4
+ * puis FUN_80084018 les insere dans l'Ordering Table.
+ *
+ * Le "GPU delta = 0" de B77 n'etait donc pas une preuve d'absence
+ * de rendu. De plus le serial B44 est un watcher cible et non un
+ * compteur global.
+ *
+ * B78 suit le vrai chemin :
+ *
+ *   objet SU
+ *     -> FUN_800418C0
+ *     -> FUN_800424B8
+ *     -> FUN_80084018
+ *     -> packet buffer DAT_800FF5C4
+ *     -> bucket OT
+ *     -> DrawOTag / DMA2 plus tard
+ */
+static uint32_t g_b78_pending = 0u;
+static uint32_t g_b78_obj = 0u;
+static uint32_t g_b78_obj_index = 0xFFFFFFFFu;
+
+static uint32_t g_b78_layer = 0u;
+static uint32_t g_b78_ctx = 0u;
+static uint32_t g_b78_z = 0u;
+static int32_t  g_b78_zbase = 0;
+static int32_t  g_b78_bucket_index = -1;
+static uint32_t g_b78_ot_base = 0u;
+static uint32_t g_b78_bucket = 0u;
+
+static uint32_t g_b78_alloc_before = 0u;
+static uint32_t g_b78_alloc_after = 0u;
+static uint32_t g_b78_alloc_delta = 0u;
+
+static uint32_t g_b78_bucket_before = 0u;
+static uint32_t g_b78_bucket_after = 0u;
+
+static uint32_t g_b78_calls = 0u;
+static uint32_t g_b78_returns = 0u;
+static uint32_t g_b78_alloc_advanced = 0u;
+static uint32_t g_b78_bucket_changed = 0u;
+static uint32_t g_b78_bucket_points_packet = 0u;
+
+static uint32_t g_b78_addprim_hits = 0u;
+static uint32_t g_b78_addprim_packet = 0u;
+static uint32_t g_b78_addprim_ctx = 0u;
+static uint32_t g_b78_addprim_z = 0u;
+static uint32_t g_b78_addprim_words = 0u;
+
+static uint32_t g_b78_packet[8];
+
+static uint32_t g_b78_drawotag_hits = 0u;
+static uint32_t g_b78_drawotag_last_a0 = 0u;
+static uint32_t g_b78_drawotagenv_hits = 0u;
+
+static uint32_t g_b78_dma_wait_samples = 0u;
+static uint32_t g_b78_dma_madr = 0u;
+static uint32_t g_b78_dma_bcr = 0u;
+static uint32_t g_b78_dma_chcr = 0u;
+
+
+/*
+ * ============================================================
+ * B79 - soumission directe des packets produits par le menu
+ * ============================================================
+ *
+ * B78 a prouve que chaque objet SU :
+ *   - alloue un packet GPU valide dans DAT_800FF5C4 ;
+ *   - avance le packet allocator ;
+ *   - modifie son bucket dans l'Ordering Table.
+ *
+ * Exemple observe :
+ *   header : 0509CA58
+ *   GP0    : E1000228
+ *            64808080
+ *            002A006C
+ *            3428A060
+ *            00200068
+ *
+ * Le verrou est donc apres la construction du packet.
+ *
+ * B79 prend UNIQUEMENT les packets nouvellement alloues par les
+ * 11 objets menu et envoie leurs mots GP0 directement au parser
+ * GPU, sans attendre GsSortOt / DrawOTag / DMA2.
+ *
+ * Aucun packet n'est fabrique : ce sont exactement les mots
+ * produits par le code original.
+ *
+ * Si le menu devient visible, le bug est confirme dans :
+ *      OT -> DrawOTag -> DMA2
+ * Si rien ne change, on investiguera texture/CLUT/VRAM.
+ */
+static uint32_t g_b79_direct_calls = 0u;
+static uint32_t g_b79_direct_packets = 0u;
+static uint32_t g_b79_direct_words = 0u;
+static uint32_t g_b79_direct_bad = 0u;
+
+static uint32_t g_b79_last_header = 0u;
+static uint32_t g_b79_last_packet = 0u;
+static uint32_t g_b79_last_count = 0u;
+static uint32_t g_b79_last_opcode = 0u;
+
+static uint32_t g_b79_last_cmd0 = 0u;
+static uint32_t g_b79_last_cmd1 = 0u;
+static uint32_t g_b79_last_cmd2 = 0u;
+static uint32_t g_b79_last_cmd3 = 0u;
+static uint32_t g_b79_last_cmd4 = 0u;
+
+
+/*
+ * ============================================================
+ * B80 - corriger l'ordre des deux octets du pad PS1
+ * ============================================================
+ *
+ * FUN_8003CE34 du jeu ne depose pas le mot boutons dans l'ordre
+ * "conventionnel" d'un uint16_t PS1.
+ *
+ * Le vrai chemin fait :
+ *
+ *   CONCAT11(button_byte_0, button_byte_1) ^ 0xFFFF
+ *
+ * Ce qui revient, vu depuis DAT_8009C70C, a inverser les deux
+ * octets du masque 16 bits :
+ *
+ *   PS1 logique       DAT_8009C70C
+ *   UP    0x0010  ->  0x1000
+ *   RIGHT 0x0020  ->  0x2000
+ *   DOWN  0x0040  ->  0x4000
+ *   LEFT  0x0080  ->  0x8000
+ *
+ *   TRI   0x1000  ->  0x0010
+ *   CIRC  0x2000  ->  0x0020
+ *   CROSS 0x4000  ->  0x0040
+ *   SQUARE0x8000  ->  0x0080
+ *
+ * Cela explique exactement les masques du menu SU :
+ *
+ *   DAT_8009C728 & 0x5000  -> UP/DOWN
+ *   DAT_8009C72C & 0x8E0   -> boutons d'action
+ *
+ * B58 injectait jusqu'ici le mot non-swappe.
+ */
+static uint32_t g_b80_down_hits = 0u;
+static uint32_t g_b80_up_hits = 0u;
+static uint32_t g_b80_cross_hits = 0u;
+static uint32_t g_b80_circle_hits = 0u;
+
+static uint16_t g_b80_last_native = 0u;
+static uint16_t g_b80_last_guest = 0u;
+
+static uint32_t g_b80_sel_changes = 0u;
+static uint32_t g_b80_last_sel = 0xFFFFFFFFu;
+static uint32_t g_b80_last_sel_frame = 0u;
+
+
+/*
+ * ============================================================
+ * B81 - latch entree exactement a l'entree de 80180390
+ * ============================================================
+ *
+ * B80 prouve que les boutons 3DS arrivent bien cote hote, mais
+ * le menu n'observe aucun changement de selection.
+ *
+ * Le menu SU n'est execute qu'environ une fois toutes les
+ * plusieurs frames hote. Une impulsion pad tres courte peut donc
+ * etre calculee puis effacee entre deux passages dans 80180390.
+ *
+ * B81 conserve chaque front hote, puis injecte son masque guest
+ * EXACTEMENT au moment ou le vrai update menu 80180390 commence.
+ * L'impulsion reste visible pendant un update menu complet puis
+ * est nettoyee au passage suivant.
+ *
+ * Ce bridge ne remplace aucune logique de menu : il corrige
+ * uniquement le probleme de cadence/latch d'entree du bring-up.
+ */
+static uint32_t g_b81_pending_mask = 0u;
+static uint32_t g_b81_cleanup_mask = 0u;
+
+static uint32_t g_b81_armed = 0u;
+static uint32_t g_b81_injected = 0u;
+static uint32_t g_b81_cleaned = 0u;
+
+static uint32_t g_b81_last_mask = 0u;
+static uint32_t g_b81_last_update = 0u;
+static uint32_t g_b81_last_frame = 0u;
+
+static uint32_t g_b81_edge_before = 0u;
+static uint32_t g_b81_repeat_before = 0u;
+static uint32_t g_b81_held_before = 0u;
+
+static uint32_t g_b81_edge_after = 0u;
+static uint32_t g_b81_repeat_after = 0u;
+static uint32_t g_b81_held_after = 0u;
+
+static uint32_t g_b81_sel_before = 0u;
+
+
+/*
+ * ============================================================
+ * B82 - identifier le garde qui bloque 80180390
+ * ============================================================
+ *
+ * B81 a prouve :
+ *   - le front DOWN est capture ;
+ *   - 0x4000 est present dans H/E/R a l'entree de 80180390 ;
+ *   - la selection reste pourtant a 0.
+ *
+ * Le pseudo-C du menu montre quatre familles de gardes AVANT la
+ * navigation :
+ *
+ *   C7/C8/C9/C6 != 0         -> sous-dialogue actif
+ *   C4 != 0                  -> transition interne
+ *   FX=DAT_8018478C actif    -> animation overlay prioritaire
+ *   C5 != 0                  -> animation d'entree/sortie
+ *
+ * B82 photographie ces gardes au moment exact de l'injection et
+ * mesure la selection au passage menu suivant.
+ */
+static uint32_t g_b82_gate_samples = 0u;
+
+static uint32_t g_b82_c0 = 0u;
+static uint32_t g_b82_c1 = 0u;
+static uint32_t g_b82_c2 = 0u;
+static int32_t  g_b82_c3 = 0;
+static int32_t  g_b82_c4 = 0;
+static uint32_t g_b82_c5 = 0u;
+static uint32_t g_b82_c6 = 0u;
+static uint32_t g_b82_c7 = 0u;
+static uint32_t g_b82_c8 = 0u;
+static uint32_t g_b82_c9 = 0u;
+
+static uint32_t g_b82_fx_ptr = 0u;
+static uint32_t g_b82_fx_flags = 0u;
+static int32_t  g_b82_fx_timer = 0;
+static int32_t  g_b82_fx_pos = 0;
+static uint32_t g_b82_fx_wait = 0u;
+static uint32_t g_b82_fx_rgb = 0u;
+
+static uint32_t g_b82_block_dialog = 0u;
+static uint32_t g_b82_block_c4 = 0u;
+static uint32_t g_b82_block_fx = 0u;
+static uint32_t g_b82_block_c5 = 0u;
+
+static uint32_t g_b82_nav_seen = 0u;
+static uint32_t g_b82_action_seen = 0u;
+
+static uint32_t g_b82_result_samples = 0u;
+static uint32_t g_b82_sel_after = 0u;
+static int32_t  g_b82_sel_delta = 0;
+static uint32_t g_b82_last_result_update = 0u;
+
+
+/*
+ * ============================================================
+ * B83 - START exact au menu pour liberer l'objet FX
+ * ============================================================
+ *
+ * B82 a identifie le verrou :
+ *
+ *   BLOCK D/C4/FX/C5 = 0/0/1/0
+ *   FX flags          = 0x00F8
+ *
+ * Dans seed_80180390, tant que FX.flags & 0x40 != 0 :
+ *   - UP/DOWN et les boutons menu sont ignores ;
+ *   - seul DAT_8009C72C & 0x0800 est accepte ;
+ *   - ce bit correspond a START dans le format guest byte-swap.
+ *
+ * Le START titre B72 etait etire sur 10 frames hote, mais le menu
+ * ne tourne qu'environ toutes les 20-30 frames hote. Il peut donc
+ * rater l'impulsion.
+ *
+ * B83 ajoute START au latch B81 : un front START hote est conserve
+ * jusqu'a l'entree exacte de 80180390.
+ */
+static uint32_t g_b83_start_armed = 0u;
+static uint32_t g_b83_start_injected = 0u;
+static uint32_t g_b83_fx_cleared = 0u;
+static uint32_t g_b83_fx_flags_after = 0u;
+static uint32_t g_b83_c4_after = 0u;
+static uint32_t g_b83_c5_after = 0u;
+
+
+/*
+ * ============================================================
+ * B84 - vitesse guest + affichage stable
+ * ============================================================
+ *
+ * Deux causes distinctes expliquent le comportement actuel :
+ *
+ * 1) R3000A fallback volontairement bride par B16 :
+ *      128 instructions max par passage
+ *      ~5 ms de tranche guest
+ *      break immediat sur FM_INTERP_BUDGET
+ *
+ *    Les overlays 0x801xxxxx (dont SU) sont presque entierement
+ *    interpretes. Le jeu avance donc beaucoup plus lentement que
+ *    l'ecran 3DS : un seul update guest peut demander 10-20 frames.
+ *
+ * 2) La VRAM est presentee a CHAQUE frame 3DS pendant que le guest
+ *    construit encore son image. Avec le bridge direct B79, on voit
+ *    donc parfois une frame partiellement dessinee -> clignotement.
+ *
+ * B84 :
+ *   - augmente le budget de l'interpreteur ;
+ *   - continue apres FM_INTERP_BUDGET tant que la tranche temps
+ *     n'est pas consommee ;
+ *   - autorise ~12 ms de guest par frame 3DS ;
+ *   - latch le framebuffer uniquement apres une nouvelle transaction
+ *     DMA2 observee, puis affiche cette copie stable entre deux DMA.
+ */
+static uint32_t g_b84_latch_valid = 0u;
+static uint32_t g_b84_latch_count = 0u;
+static uint32_t g_b84_last_dma_sample = 0u;
+static uint32_t g_b84_latch_x = 0u;
+static uint32_t g_b84_latch_y = 0u;
+
+static uint32_t g_b84_budget_yields = 0u;
+static uint32_t g_b84_budget_continues = 0u;
+
+
+/*
+ * ============================================================
+ * B85 - vraie frontière de frame guest
+ * ============================================================
+ *
+ * B84 avait encore deux défauts :
+ *
+ * 1) Le code ARM recompilé s'arrêtait à FM_STOP_BUDGET et attendait
+ *    la frame hôte suivante. C'était encore un énorme multiplicateur
+ *    de lenteur, même si l'interpréteur R3000A avait été accéléré.
+ *
+ * 2) Le framebuffer était latché sur les attentes DMA2. Or plusieurs
+ *    DMA peuvent appartenir à UNE SEULE image : on capturait parfois
+ *    une image incomplète -> clignotement.
+ *
+ * En DIRECT-2DF, le retour à g_direct2df_sentinel marque au contraire
+ * la fin complète d'une itération de la vraie machine d'état.
+ *
+ * B85 :
+ *   - reprend immédiatement après FM_STOP_BUDGET ;
+ *   - augmente le budget natif direct ;
+ *   - garde une tranche temps bornée ;
+ *   - ne publie une nouvelle image qu'après un retour complet à la
+ *     sentinelle DIRECT-2DF.
+ */
+static uint32_t g_b85_probe_budget_continues = 0u;
+static uint32_t g_b85_guest_frames = 0u;
+static uint32_t g_b85_last_latched_guest_frame = 0u;
+static uint32_t g_b85_sentinel_hits = 0u;
+
+
+/*
+ * ============================================================
+ * B86 - presentation stable et moins couteuse
+ * ============================================================
+ *
+ * La capture B85 montre :
+ *
+ *   GFRAME done:0 / sentinel:0
+ *   LATCH n:105
+ *   DMA:186
+ *
+ * Donc, au logo Konami, DIRECT-2DF n'est PAS encore actif.
+ * B85 latchait encore l'image sur les DMA2 : plusieurs captures
+ * pouvaient donc avoir lieu pendant UNE seule image PS1.
+ *
+ * B86 change la politique :
+ *
+ *   AVANT DIRECT-2DF :
+ *      latch seulement quand GP1(05h) change la page affichee
+ *      (display_x / display_y), jamais sur chaque DMA.
+ *
+ *   APRES DIRECT-2DF :
+ *      latch uniquement a la fin d'une frame guest complete
+ *      (retour sentinelle B85).
+ *
+ * En plus, on ne reconvertit plus les 320x240 pixels vers le
+ * framebuffer 3DS a chaque VBlank. On ne fait le present que
+ * lorsqu'une nouvelle image stable a ete latchée.
+ *
+ * Le buffer composite contient bien 256 lignes, car le presenter
+ * historique peut lire y+8..247 en mode crop.
+ */
+static uint32_t g_b86_last_display_x = 0xFFFFFFFFu;
+static uint32_t g_b86_last_display_y = 0xFFFFFFFFu;
+static uint32_t g_b86_display_changes = 0u;
+static uint32_t g_b86_present_dirty = 0u;
+static uint32_t g_b86_present_count = 0u;
+static uint32_t g_b86_skipped_presents = 0u;
+
+
+/*
+ * ============================================================
+ * B87 - vitesse + double-buffer stable
+ * ============================================================
+ *
+ * B86 montre :
+ *   SCHED ~3 ms avec hand=256 -> plafond artificiel atteint.
+ *   DISPLAY x=0/320 change souvent -> double buffer PS1.
+ *
+ * B87 :
+ *   - porte la limite de handoffs a 4096 ; la vraie borne devient
+ *     la tranche temps de 14 ms ;
+ *   - avant DIRECT-2DF, capture la page qui vient d'ETRE QUITTEE
+ *     au lieu de la nouvelle page au moment du GP1(05) ;
+ *   - evite le scan complet VRAM du debug.
+ */
+static uint32_t g_b87_delayed_latches = 0u;
+static uint32_t g_b87_first_flip_waits = 0u;
+static uint32_t g_b87_last_source_x = 0u;
+static uint32_t g_b87_last_source_y = 0u;
+
+static void fm_b79_submit_new_menu_packets(
+    uint32_t begin,
+    uint32_t end
+)
+{
+    ++g_b79_direct_calls;
+
+    if (
+        begin < 0x80000000u
+        ||
+        begin >= 0x80200000u
+        ||
+        end <= begin
+        ||
+        end > 0x80200000u
+        ||
+        (begin & 3u) != 0u
+        ||
+        (end & 3u) != 0u
+    )
+    {
+        ++g_b79_direct_bad;
+        return;
+    }
+
+    uint32_t p = begin;
+
+    while (p < end)
+    {
+        if (p + 4u > end)
+        {
+            ++g_b79_direct_bad;
+            break;
+        }
+
+        uint32_t header =
+            fm_memory_read_word(p);
+
+        uint32_t count =
+            header >> 24;
+
+        uint32_t bytes =
+            4u + count * 4u;
+
+        /*
+         * Les packets observes ici sont petits.
+         * Garde-fou contre une RAM corrompue.
+         */
+        if (
+            count == 0u
+            ||
+            count > 32u
+            ||
+            p + bytes > end
+        )
+        {
+            ++g_b79_direct_bad;
+            break;
+        }
+
+        g_b79_last_header = header;
+        g_b79_last_packet = p;
+        g_b79_last_count = count;
+
+        g_b79_last_cmd0 =
+            count > 0u
+                ? fm_memory_read_word(p + 4u)
+                : 0u;
+
+        g_b79_last_cmd1 =
+            count > 1u
+                ? fm_memory_read_word(p + 8u)
+                : 0u;
+
+        g_b79_last_cmd2 =
+            count > 2u
+                ? fm_memory_read_word(p + 12u)
+                : 0u;
+
+        g_b79_last_cmd3 =
+            count > 3u
+                ? fm_memory_read_word(p + 16u)
+                : 0u;
+
+        g_b79_last_cmd4 =
+            count > 4u
+                ? fm_memory_read_word(p + 20u)
+                : 0u;
+
+        /*
+         * Le premier mot peut etre une commande d'environnement
+         * E1 suivie de la primitive sprite. On conserve exactement
+         * l'ordre produit par le guest.
+         */
+        for (uint32_t i = 0u; i < count; ++i)
+        {
+            uint32_t word =
+                fm_memory_read_word(
+                    p + 4u + i * 4u
+                );
+
+            fm_gpu_gp0_write(word);
+            ++g_b79_direct_words;
+
+            if (i == 0u)
+            {
+                g_b79_last_opcode =
+                    word >> 24;
+            }
+        }
+
+        ++g_b79_direct_packets;
+
+        p += bytes;
+    }
+}
 static uint32_t g_hit_delay_wait = 0;
 static uint32_t g_hit_intro_init = 0;
 static uint32_t g_hit_boot_loop = 0;
@@ -1579,6 +2196,87 @@ static void fm_capture_vsync_stack(
 }
 
 
+
+static uint32_t fm_b77_gpu_serial_now(void)
+{
+    uint32_t fill_hits = 0u;
+    uint32_t draw_hits = 0u;
+    uint32_t copy_hits = 0u;
+    uint32_t upload_hits = 0u;
+    uint32_t last_serial = 0u;
+    uint8_t last_type = 0u;
+    uint8_t last_opcode = 0u;
+    int x = 0;
+    int y = 0;
+    int w = 0;
+    int h = 0;
+    uint32_t cmd[4] = {0u, 0u, 0u, 0u};
+
+    fm_gpu_b44_watch_get(
+        &fill_hits,
+        &draw_hits,
+        &copy_hits,
+        &upload_hits,
+        &last_serial,
+        &last_type,
+        &last_opcode,
+        &x,
+        &y,
+        &w,
+        &h,
+        cmd
+    );
+
+    return last_serial;
+}
+
+
+static void fm_b77_capture_draw_tail(void)
+{
+    for (unsigned back = 0u; back < 3u; ++back)
+    {
+        uint8_t op = 0u;
+        unsigned words = 0u;
+        uint16_t tp = 0u;
+        int ox = 0;
+        int oy = 0;
+        int ax1 = 0;
+        int ay1 = 0;
+        int ax2 = 0;
+        int ay2 = 0;
+        uint32_t cmd[8] =
+        {
+            0u,0u,0u,0u,0u,0u,0u,0u
+        };
+
+        if (
+            fm_gpu_b29_draw_trace_get(
+                back,
+                &op,
+                &words,
+                &tp,
+                &ox,
+                &oy,
+                &ax1,
+                &ay1,
+                &ax2,
+                &ay2,
+                cmd
+            )
+        )
+        {
+            g_b77_op[back] = op;
+            g_b77_tp[back] = tp;
+            g_b77_offx[back] = ox;
+            g_b77_offy[back] = oy;
+            g_b77_cmd0[back] = cmd[0];
+            g_b77_cmd1[back] = cmd[1];
+            g_b77_cmd2[back] = cmd[2];
+        }
+    }
+}
+
+
 static void fm_trace_dispatch(
     CPUState *cpu,
     uint32_t dispatch_address,
@@ -1665,6 +2363,122 @@ static void fm_trace_dispatch(
                 g_b52_a1 = cpu->gpr[5];
                 g_b52_a2 = cpu->gpr[6];
 
+                /*
+                 * B76 - combien d'appels 418C0 concernent reellement
+                 * les 11 objets du menu SU ?
+                 */
+                for (unsigned i = 0u; i < 11u; ++i)
+                {
+                    if (
+                        g_b52_a0
+                        ==
+                        fm_memory_read_word(
+                            0x80184794u + i * 4u
+                        )
+                    )
+                    {
+                        ++g_b76_418c0_menu_hits;
+                        g_b76_last_menu_obj = g_b52_a0;
+
+                        /*
+                         * B78 : photographier l'etat du packet buffer
+                         * et du bucket OT AVANT FUN_800418C0.
+                         */
+                        g_b78_pending = 1u;
+                        g_b78_obj = g_b52_a0;
+                        g_b78_obj_index = i;
+                        ++g_b78_calls;
+
+                        g_b78_layer =
+                            fm_memory_read_byte(
+                                g_b52_a0 + 0x17u
+                            );
+
+                        g_b78_ctx =
+                            fm_memory_read_word(
+                                0x8009C858u
+                                +
+                                (
+                                    g_b78_layer
+                                    * 4u
+                                )
+                            );
+
+                        g_b78_z =
+                            fm_memory_read_half(
+                                g_b52_a0 + 0x14u
+                            );
+
+                        g_b78_ot_base = 0u;
+                        g_b78_zbase = 0;
+                        g_b78_bucket_index = -1;
+                        g_b78_bucket = 0u;
+                        g_b78_bucket_before = 0u;
+
+                        if (
+                            g_b78_ctx >= 0x80000000u
+                            &&
+                            g_b78_ctx < 0x80200000u
+                        )
+                        {
+                            g_b78_ot_base =
+                                fm_memory_read_word(
+                                    g_b78_ctx + 0x04u
+                                );
+
+                            g_b78_zbase =
+                                (int32_t)fm_memory_read_word(
+                                    g_b78_ctx + 0x08u
+                                );
+
+                            g_b78_bucket_index =
+                                (int32_t)(
+                                    g_b78_z & 0xFFFFu
+                                )
+                                -
+                                g_b78_zbase;
+
+                            if (
+                                g_b78_ot_base >= 0x80000000u
+                                &&
+                                g_b78_ot_base < 0x80200000u
+                                &&
+                                g_b78_bucket_index >= 0
+                                &&
+                                g_b78_bucket_index < 0x10000
+                            )
+                            {
+                                g_b78_bucket =
+                                    g_b78_ot_base
+                                    +
+                                    (
+                                        (uint32_t)g_b78_bucket_index
+                                        * 4u
+                                    );
+
+                                if (
+                                    g_b78_bucket >= 0x80000000u
+                                    &&
+                                    g_b78_bucket < 0x80200000u
+                                )
+                                {
+                                    g_b78_bucket_before =
+                                        fm_memory_read_word(
+                                            g_b78_bucket
+                                        );
+                                }
+                            }
+                        }
+
+                        g_b78_alloc_before =
+                            fm_memory_read_word(
+                                0x800FF5C4u
+                            );
+
+                        break;
+                    }
+                }
+
                 if (
                     g_b52_a0 >= 0x80000000u
                     && g_b52_a0 < 0x80200000u
@@ -1706,6 +2520,129 @@ static void fm_trace_dispatch(
          */
         case 0x00040BE0u:
             ++g_b52_418c0_returns;
+
+            if (g_b78_pending)
+            {
+                g_b78_alloc_after =
+                    fm_memory_read_word(
+                        0x800FF5C4u
+                    );
+
+                g_b78_alloc_delta = 0u;
+
+                if (
+                    g_b78_alloc_after >= g_b78_alloc_before
+                    &&
+                    g_b78_alloc_before >= 0x80000000u
+                    &&
+                    g_b78_alloc_after < 0x80200000u
+                )
+                {
+                    g_b78_alloc_delta =
+                        g_b78_alloc_after
+                        -
+                        g_b78_alloc_before;
+                }
+
+                if (g_b78_alloc_delta != 0u)
+                {
+                    ++g_b78_alloc_advanced;
+
+                    for (unsigned j = 0u; j < 8u; ++j)
+                    {
+                        uint32_t a =
+                            g_b78_alloc_before
+                            +
+                            j * 4u;
+
+                        if (
+                            a >= 0x80000000u
+                            &&
+                            a < 0x80200000u
+                        )
+                        {
+                            g_b78_packet[j] =
+                                fm_memory_read_word(a);
+                        }
+                        else
+                        {
+                            g_b78_packet[j] = 0u;
+                        }
+                    }
+                }
+
+                /*
+                 * B79 - test decisif :
+                 * les mots GP0 crees par CE rendu d'objet sont
+                 * envoyes directement au GPU.
+                 */
+                if (
+                    g_b78_alloc_delta != 0u
+                    &&
+                    g_b75_menu_entrance_bridge != 0u
+                    &&
+                    g_b73_hit_menu_destroy == 0u
+                )
+                {
+                    fm_b79_submit_new_menu_packets(
+                        g_b78_alloc_before,
+                        g_b78_alloc_after
+                    );
+                }
+
+
+                g_b78_bucket_after =
+                    g_b78_bucket_before;
+
+                if (
+                    g_b78_bucket >= 0x80000000u
+                    &&
+                    g_b78_bucket < 0x80200000u
+                )
+                {
+                    g_b78_bucket_after =
+                        fm_memory_read_word(
+                            g_b78_bucket
+                        );
+                }
+
+                if (
+                    g_b78_bucket_after
+                    !=
+                    g_b78_bucket_before
+                )
+                {
+                    ++g_b78_bucket_changed;
+                }
+
+                /*
+                 * Les pointeurs DMA PS1 sont sur 24 bits.
+                 * FUN_80084018 doit normalement placer l'adresse
+                 * du packet nouvellement alloue dans le bucket.
+                 */
+                if (
+                    g_b78_alloc_delta != 0u
+                    &&
+                    (
+                        g_b78_bucket_after
+                        &
+                        0x00FFFFFFu
+                    )
+                    ==
+                    (
+                        g_b78_alloc_before
+                        &
+                        0x00FFFFFFu
+                    )
+                )
+                {
+                    ++g_b78_bucket_points_packet;
+                }
+
+                ++g_b78_returns;
+                g_b78_pending = 0u;
+            }
+
             break;
 
         case 0x00041BB4u:
@@ -1727,6 +2664,36 @@ static void fm_trace_dispatch(
             ++g_b52_41f74_hits;
             g_b52_last_hot_pc = 0x80041F74u;
             break;
+
+        /*
+         * B78 - insertion primitive dans l'Ordering Table.
+         */
+        case 0x00084018u:
+            if (g_b78_pending && cpu)
+            {
+                ++g_b78_addprim_hits;
+                g_b78_addprim_packet = cpu->gpr[4];
+                g_b78_addprim_ctx = cpu->gpr[5];
+                g_b78_addprim_z = cpu->gpr[6];
+                g_b78_addprim_words = cpu->gpr[7];
+            }
+            break;
+
+        /*
+         * Psy-Q DrawOTag / DrawOTagEnv.
+         */
+        case 0x00080258u:
+            ++g_b78_drawotag_hits;
+            if (cpu)
+            {
+                g_b78_drawotag_last_a0 = cpu->gpr[4];
+            }
+            break;
+
+        case 0x00080388u:
+            ++g_b78_drawotagenv_hits;
+            break;
+
 
         case 0x00043E3Cu:
             ++g_hit_intro_init;
@@ -2010,6 +2977,319 @@ static void fm_trace_dispatch(
             break;
 
         case 0x00180390u:
+            /*
+             * B82 - le prochain passage marque la fin du menu update
+             * qui avait recu notre impulsion precedente.
+             */
+            if (g_b81_cleanup_mask != 0u)
+            {
+                uint32_t sel_now =
+                    fm_memory_read_byte(
+                        0x801847C0u
+                    );
+
+                g_b82_sel_after = sel_now;
+                g_b82_sel_delta =
+                    (int32_t)sel_now
+                    -
+                    (int32_t)g_b81_sel_before;
+
+                g_b82_last_result_update =
+                    g_b73_hit_menu_update;
+
+                ++g_b82_result_samples;
+
+                /*
+                 * B83 - resultat du START injecte au passage
+                 * precedent.
+                 */
+                if ((g_b81_cleanup_mask & 0x0800u) != 0u)
+                {
+                    uint32_t fx =
+                        fm_memory_read_word(
+                            0x8018478Cu
+                        );
+
+                    g_b83_fx_flags_after = 0u;
+
+                    if (
+                        fx >= 0x80000000u
+                        &&
+                        fx < 0x80200000u
+                    )
+                    {
+                        g_b83_fx_flags_after =
+                            fm_memory_read_half(
+                                fx + 0x08u
+                            );
+                    }
+
+                    g_b83_c4_after =
+                        fm_memory_read_byte(
+                            0x801847C4u
+                        );
+
+                    g_b83_c5_after =
+                        fm_memory_read_byte(
+                            0x801847C5u
+                        );
+
+                    if (
+                        (
+                            g_b83_fx_flags_after
+                            &
+                            0x0040u
+                        )
+                        == 0u
+                    )
+                    {
+                        ++g_b83_fx_cleared;
+                    }
+                }
+            }
+
+            /*
+             * B81 - nettoyage de l'impulsion precedente.
+             */
+            if (g_b81_cleanup_mask != 0u)
+            {
+                uint32_t mask =
+                    g_b81_cleanup_mask;
+
+                fm_memory_write_word(
+                    0x8009C710u,
+                    fm_memory_read_word(0x8009C710u)
+                    &
+                    ~mask
+                );
+
+                fm_memory_write_word(
+                    0x8009C72Cu,
+                    fm_memory_read_word(0x8009C72Cu)
+                    &
+                    ~mask
+                );
+
+                fm_memory_write_word(
+                    0x8009C728u,
+                    fm_memory_read_word(0x8009C728u)
+                    &
+                    ~mask
+                );
+
+                g_b81_cleanup_mask = 0u;
+                ++g_b81_cleaned;
+            }
+
+            /*
+             * B81 - injecter le front conserve EXACTEMENT ici,
+             * avant que le vrai seed_80180390 lise H/E/R.
+             */
+            if (g_b81_pending_mask != 0u)
+            {
+                uint32_t mask =
+                    g_b81_pending_mask;
+
+                /*
+                 * B82 - snapshot des gardes du pseudo-C 80180390.
+                 */
+                g_b82_c0 = fm_memory_read_byte(0x801847C0u);
+                g_b82_c1 = fm_memory_read_byte(0x801847C1u);
+                g_b82_c2 = fm_memory_read_byte(0x801847C2u);
+                g_b82_c3 = (int8_t)fm_memory_read_byte(0x801847C3u);
+                g_b82_c4 = (int8_t)fm_memory_read_byte(0x801847C4u);
+                g_b82_c5 = fm_memory_read_byte(0x801847C5u);
+                g_b82_c6 = fm_memory_read_byte(0x801847C6u);
+                g_b82_c7 = fm_memory_read_byte(0x801847C7u);
+                g_b82_c8 = fm_memory_read_byte(0x801847C8u);
+                g_b82_c9 = fm_memory_read_byte(0x801847C9u);
+
+                g_b82_fx_ptr =
+                    fm_memory_read_word(
+                        0x8018478Cu
+                    );
+
+                g_b82_fx_flags = 0u;
+                g_b82_fx_timer = 0;
+                g_b82_fx_pos = 0;
+                g_b82_fx_wait = 0u;
+                g_b82_fx_rgb = 0u;
+
+                if (
+                    g_b82_fx_ptr >= 0x80000000u
+                    &&
+                    g_b82_fx_ptr < 0x80200000u
+                )
+                {
+                    g_b82_fx_flags =
+                        fm_memory_read_half(
+                            g_b82_fx_ptr + 0x08u
+                        );
+
+                    g_b82_fx_timer =
+                        (int16_t)fm_memory_read_half(
+                            g_b82_fx_ptr + 0x60u
+                        );
+
+                    g_b82_fx_pos =
+                        (int16_t)fm_memory_read_half(
+                            g_b82_fx_ptr + 0x36u
+                        );
+
+                    g_b82_fx_wait =
+                        fm_memory_read_byte(
+                            g_b82_fx_ptr + 0x6Cu
+                        );
+
+                    g_b82_fx_rgb =
+                        (
+                            (uint32_t)fm_memory_read_byte(
+                                g_b82_fx_ptr + 0x0Cu
+                            )
+                            |
+                            (
+                                (uint32_t)fm_memory_read_byte(
+                                    g_b82_fx_ptr + 0x0Du
+                                )
+                                << 8
+                            )
+                            |
+                            (
+                                (uint32_t)fm_memory_read_byte(
+                                    g_b82_fx_ptr + 0x0Eu
+                                )
+                                << 16
+                            )
+                        );
+                }
+
+                g_b82_block_dialog =
+                    (
+                        g_b82_c6 != 0u
+                        ||
+                        g_b82_c7 != 0u
+                        ||
+                        g_b82_c8 != 0u
+                        ||
+                        g_b82_c9 != 0u
+                    );
+
+                g_b82_block_c4 =
+                    (g_b82_c4 != 0);
+
+                g_b82_block_fx =
+                    (
+                        g_b82_fx_ptr != 0u
+                        &&
+                        (
+                            g_b82_fx_flags
+                            &
+                            0x0040u
+                        )
+                        != 0u
+                    );
+
+                g_b82_block_c5 =
+                    (g_b82_c5 != 0u);
+
+                g_b82_nav_seen =
+                    (
+                        (
+                            fm_memory_read_word(
+                                0x8009C728u
+                            )
+                            |
+                            mask
+                        )
+                        &
+                        0x5000u
+                    );
+
+                g_b82_action_seen =
+                    (
+                        (
+                            fm_memory_read_word(
+                                0x8009C72Cu
+                            )
+                            |
+                            mask
+                        )
+                        &
+                        0x08E0u
+                    );
+
+                ++g_b82_gate_samples;
+
+                g_b81_held_before =
+                    fm_memory_read_word(
+                        0x8009C710u
+                    );
+
+                g_b81_edge_before =
+                    fm_memory_read_word(
+                        0x8009C72Cu
+                    );
+
+                g_b81_repeat_before =
+                    fm_memory_read_word(
+                        0x8009C728u
+                    );
+
+                g_b81_sel_before =
+                    fm_memory_read_byte(
+                        0x801847C0u
+                    );
+
+                fm_memory_write_word(
+                    0x8009C710u,
+                    g_b81_held_before
+                    |
+                    mask
+                );
+
+                fm_memory_write_word(
+                    0x8009C72Cu,
+                    g_b81_edge_before
+                    |
+                    mask
+                );
+
+                fm_memory_write_word(
+                    0x8009C728u,
+                    g_b81_repeat_before
+                    |
+                    mask
+                );
+
+                g_b81_held_after =
+                    fm_memory_read_word(
+                        0x8009C710u
+                    );
+
+                g_b81_edge_after =
+                    fm_memory_read_word(
+                        0x8009C72Cu
+                    );
+
+                g_b81_repeat_after =
+                    fm_memory_read_word(
+                        0x8009C728u
+                    );
+
+                g_b81_last_mask = mask;
+                g_b81_last_update =
+                    g_b73_hit_menu_update + 1u;
+
+                if ((mask & 0x0800u) != 0u)
+                {
+                    ++g_b83_start_injected;
+                }
+
+                g_b81_cleanup_mask = mask;
+                g_b81_pending_mask = 0u;
+                ++g_b81_injected;
+            }
+
             ++g_b73_hit_menu_update;
             ++g_hit_ov18;
             break;
@@ -6952,10 +8232,121 @@ int main(void)
                 held
             );
 
-        uint16_t psx_pressed =
+        /*
+         * fm_pad_bits() expose les bits dans l'ordre PS1 habituel.
+         * Le jeu, lui, reconstruit les deux octets avec CONCAT11()
+         * dans l'ordre oppose. Reproduire exactement ce format ici.
+         */
+        uint16_t psx_native =
             (uint16_t)(
                 ~pad
             );
+
+        uint16_t psx_pressed =
+            (uint16_t)(
+                (psx_native << 8)
+                |
+                (psx_native >> 8)
+            );
+
+        g_b80_last_native = psx_native;
+        g_b80_last_guest = psx_pressed;
+
+        if (down & KEY_DDOWN)
+        {
+            ++g_b80_down_hits;
+        }
+
+        if (down & KEY_DUP)
+        {
+            ++g_b80_up_hits;
+        }
+
+        if (down & KEY_B)
+        {
+            ++g_b80_cross_hits;
+        }
+
+        if (down & KEY_A)
+        {
+            ++g_b80_circle_hits;
+        }
+
+
+        /*
+         * B81 - convertir les fronts hote en format guest, puis
+         * les conserver jusqu'au prochain vrai 80180390.
+         *
+         * Format guest :
+         *   UP/DOWN/LEFT/RIGHT = 1000/4000/8000/2000
+         *   Cross/Circle       = 0040/0020
+         *   Triangle/Square    = 0010/0080
+         */
+        if (g_b73_hit_menu_init != 0u)
+        {
+            uint32_t b81_mask = 0u;
+
+            if (down & KEY_DUP)
+            {
+                b81_mask |= 0x1000u;
+            }
+
+            if (down & KEY_DRIGHT)
+            {
+                b81_mask |= 0x2000u;
+            }
+
+            if (down & KEY_DDOWN)
+            {
+                b81_mask |= 0x4000u;
+            }
+
+            if (down & KEY_DLEFT)
+            {
+                b81_mask |= 0x8000u;
+            }
+
+            /*
+             * Mapping 3DS -> PS1 deja utilise par fm_pad_bits :
+             * B = Cross, A = Circle, X = Triangle, Y = Square.
+             */
+            if (down & KEY_B)
+            {
+                b81_mask |= 0x0040u;
+            }
+
+            if (down & KEY_A)
+            {
+                b81_mask |= 0x0020u;
+            }
+
+            if (down & KEY_X)
+            {
+                b81_mask |= 0x0010u;
+            }
+
+            if (down & KEY_Y)
+            {
+                b81_mask |= 0x0080u;
+            }
+
+            /*
+             * B83 : START guest = 0x0800.
+             * C'est exactement le bit teste par le garde FX de
+             * seed_80180390.
+             */
+            if (down & KEY_START)
+            {
+                b81_mask |= 0x0800u;
+                ++g_b83_start_armed;
+            }
+
+            if (b81_mask != 0u)
+            {
+                g_b81_pending_mask |= b81_mask;
+                ++g_b81_armed;
+            }
+        }
 
 
         /*
@@ -7004,10 +8395,10 @@ int main(void)
         )
         {
             /*
-             * psx_pressed est actif-haut :
-             * bit 3 = START.
+             * Dans DAT_8009C70C, START est dans l'octet haut :
+             * bit PS1 0x0008 -> format guest 0x0800.
              */
-            psx_pressed |= 0x0008u;
+            psx_pressed |= 0x0800u;
 
             g_b72_start_last_psx =
                 psx_pressed;
@@ -7285,7 +8676,8 @@ int main(void)
          * ====================================================
          *
          * DAT_8009C70C est l'entree brute 32 bits consommee par
-         * FUN_8003CEA4. Lower 16 bits = pad joueur 1.
+         * FUN_8003CEA4. Lower 16 bits = pad joueur 1, avec les
+         * deux octets dans l'ordre reconstruit par FUN_8003CE34.
          *
          * Cela laisse le vrai code du jeu fabriquer :
          *   8009C710 = boutons maintenus
@@ -7620,6 +9012,199 @@ int main(void)
 
         /*
          * ====================================================
+         * B76 - charger le tail graphique SU manquant
+         * ====================================================
+         */
+        if (
+            game_running
+            &&
+            g_b73_hit_menu_init != 0u
+            &&
+            g_b75_menu_entrance_bridge != 0u
+            &&
+            g_b76_resource_attempt == 0u
+        )
+        {
+            ++g_b76_resource_attempt;
+
+            g_b76_pre_nonzero = 0u;
+
+            for (unsigned i = 0u; i < 64u; ++i)
+            {
+                if (
+                    fm_memory_read_byte(
+                        0x801AF800u + i
+                    )
+                    != 0u
+                )
+                {
+                    ++g_b76_pre_nonzero;
+                }
+            }
+
+            /*
+             * Ne rien toucher si la ressource est deja presente.
+             */
+            if (g_b76_pre_nonzero == 0u)
+            {
+                uint32_t su_lba = 0u;
+                uint32_t su_size = 0u;
+
+                int found =
+                    fm_disc_find_file(
+                        "\\DATA\\SU.MRG;1",
+                        &su_lba,
+                        &su_size
+                    );
+
+                if (!found)
+                {
+                    found =
+                        fm_disc_find_file(
+                            "\\SU.MRG;1",
+                            &su_lba,
+                            &su_size
+                        );
+                }
+
+                g_b76_su_lba = su_lba;
+                g_b76_su_size = su_size;
+
+                if (
+                    found
+                    &&
+                    su_size >= 0x39800u
+                )
+                {
+                    /*
+                     * 0x39000 / 0x800 = secteur relatif 0x72.
+                     */
+                    int rc =
+                        fm_disc_read_sector(
+                            su_lba + 0x72u,
+                            g_b76_sector
+                        );
+
+                    g_b76_resource_rc = rc;
+
+                    if (rc == 0)
+                    {
+                        for (unsigned i = 0u; i < 2048u; ++i)
+                        {
+                            fm_memory_write_byte(
+                                0x801AF800u + i,
+                                g_b76_sector[i]
+                            );
+                        }
+
+                        /*
+                         * Les objets ont ete initialises avant que la
+                         * ressource soit disponible. Enlever seulement
+                         * le bit 0x10 force le vrai FUN_80042090 puis
+                         * FUN_80041FBC a recalculer +0x50/+0x4C.
+                         */
+                        for (unsigned i = 0u; i < 11u; ++i)
+                        {
+                            uint32_t obj =
+                                fm_memory_read_word(
+                                    0x80184794u + i * 4u
+                                );
+
+                            if (
+                                obj < 0x80000000u
+                                ||
+                                obj >= 0x80200000u
+                            )
+                            {
+                                continue;
+                            }
+
+                            uint16_t flags =
+                                fm_memory_read_half(
+                                    obj + 0x08u
+                                );
+
+                            flags &=
+                                (uint16_t)~0x0010u;
+
+                            fm_memory_write_byte(
+                                obj + 0x08u,
+                                (uint8_t)(flags & 0xFFu)
+                            );
+
+                            fm_memory_write_byte(
+                                obj + 0x09u,
+                                (uint8_t)(flags >> 8)
+                            );
+
+                            ++g_b76_objects_rearmed;
+                        }
+
+                        g_b76_bridge_frame = frame;
+                        ++g_b76_resource_bridge;
+                    }
+                }
+                else
+                {
+                    g_b76_resource_rc = -2;
+                }
+            }
+
+            g_b76_post_nonzero = 0u;
+
+            for (unsigned i = 0u; i < 64u; ++i)
+            {
+                if (
+                    fm_memory_read_byte(
+                        0x801AF800u + i
+                    )
+                    != 0u
+                )
+                {
+                    ++g_b76_post_nonzero;
+                }
+            }
+        }
+
+
+        /*
+         * B80 - memoriser les changements reels de selection du menu.
+         */
+        if (
+            g_b73_hit_menu_init != 0u
+            &&
+            memory_status == 0
+        )
+        {
+            uint32_t sel =
+                fm_memory_read_byte(
+                    0x801847C0u
+                );
+
+            if (g_b80_last_sel == 0xFFFFFFFFu)
+            {
+                g_b80_last_sel = sel;
+            }
+            else if (sel != g_b80_last_sel)
+            {
+                g_b80_last_sel = sel;
+                g_b80_last_sel_frame = frame;
+                ++g_b80_sel_changes;
+            }
+
+            if (
+                g_b81_injected != 0u
+                &&
+                g_b81_last_frame == 0u
+            )
+            {
+                g_b81_last_frame = frame;
+            }
+        }
+
+
+        /*
+         * ====================================================
          * EXECUTION
          * ====================================================
          */
@@ -7656,8 +9241,16 @@ int main(void)
              */
             uint64_t b16_slice_start_ms = osGetTime();
             unsigned b16_handoff_count = 0u;
+            /*
+             * B84 : beaucoup plus de handoffs possibles.
+             * La vraie limite devient surtout la tranche temps de 12 ms.
+             */
+            /*
+             * B87 : B86 atteignait 256 handoffs en ~3 ms.
+             * Le plafond n'est plus le limiteur principal.
+             */
             unsigned b16_handoff_limit =
-                g_direct2df_active ? 16u : 128u;
+                4096u;
 
             for (
                 unsigned handoff = 0;
@@ -7668,13 +9261,20 @@ int main(void)
             {
                 b16_handoff_count = handoff + 1u;
 
+                /*
+                 * B84 : borne temps pour TOUS les modes.
+                 *
+                 * 12 ms laisse encore quelques ms au rendu/present avant
+                 * le VBlank 60 Hz, tout en donnant au fallback R3000A
+                 * assez de temps pour terminer un vrai update guest.
+                 */
                 if (
-                    g_direct2df_active
-                    && handoff != 0u
-                    && (osGetTime() - b16_slice_start_ms) >= 5u
+                    handoff != 0u
+                    && (osGetTime() - b16_slice_start_ms) >= 14u
                 )
                 {
                     ++g_b16_slice_yields;
+                    ++g_b84_budget_yields;
                     break;
                 }
                 uint32_t dispatch_address =
@@ -7708,6 +9308,16 @@ int main(void)
                         fm_memory_read_word(0x1F8010A8u);
 
                     g_b37_last_chcr_before = chcr;
+
+                    g_b78_dma_madr =
+                        fm_memory_read_word(0x1F8010A0u);
+
+                    g_b78_dma_bcr =
+                        fm_memory_read_word(0x1F8010A4u);
+
+                    g_b78_dma_chcr = chcr;
+                    ++g_b78_dma_wait_samples;
+
                     g_b37_last_gpustat =
                         fm_memory_read_word(0x1F801814u);
                     g_b37_ring_write =
@@ -7805,8 +9415,17 @@ int main(void)
                 )
                 {
                     ++g_direct2df_returns;
+                    ++g_b85_sentinel_hits;
+                    ++g_b85_guest_frames;
+
                     g_direct2df_last_pc = dispatch_address;
                     static_miss = 0;
+
+                    /*
+                     * Une frame logique guest vient d'etre terminee.
+                     * On rend la main au host : la presentation B85
+                     * publiera alors cette image complete.
+                     */
                     break;
                 }
 
@@ -10042,7 +11661,7 @@ int main(void)
                         cpu,
                         dispatch_address,
                         g_direct2df_active
-                            ? 16000u
+                            ? 64000u
                             : 250000u
                     );
 
@@ -10057,8 +11676,15 @@ int main(void)
                     == FM_STOP_BUDGET
                 )
                 {
+                    /*
+                     * B85 : psx_check_interrupts_at() a deja place
+                     * cpu->pc sur le resume_pc exact avant le longjmp.
+                     * On peut donc reprendre immediatement dans la meme
+                     * tranche host au lieu de perdre une frame 3DS.
+                     */
                     static_miss = 0;
-                    break;
+                    ++g_b85_probe_budget_continues;
+                    continue;
                 }
 
 
@@ -10109,12 +11735,17 @@ int main(void)
                      * R3000A fallback
                      * ========================================
                      */
+                    /*
+                     * B84 : les overlays dynamiques 0x801xxxxx passent
+                     * par cet interpreteur. 128 instructions/frame etait
+                     * la principale cause du ralenti massif.
+                     */
                     interp =
                         fm_interp_run_block(
                             cpu,
                             g_direct2df_active
-                                ? 128u
-                                : 1024u
+                                ? 8192u
+                                : 8192u
                         );
 
                     interp_ran = 1;
@@ -10133,8 +11764,17 @@ int main(void)
                         == FM_INTERP_BUDGET
                     )
                     {
+                        /*
+                         * B84 : le PC de l'interpreteur est deja avance.
+                         * Reprendre une nouvelle tranche au lieu d'attendre
+                         * obligatoirement la frame 3DS suivante.
+                         *
+                         * La garde 12 ms au debut du handoff empeche toute
+                         * monopolisation du thread.
+                         */
                         static_miss = 0;
-                        break;
+                        ++g_b84_budget_continues;
+                        continue;
                     }
 
                     /*
@@ -10163,7 +11803,11 @@ int main(void)
                 break;
             }
 
-            if (g_direct2df_active)
+            /*
+             * B86 : mesurer aussi le boot PRE-DIRECT-2DF.
+             * B85 affichait artificiellement 0 ms / 0 handoff avant
+             * l'activation de DIRECT-2DF, ce qui masquait le vrai cout.
+             */
             {
                 uint32_t elapsed_ms =
                     (uint32_t)(osGetTime() - b16_slice_start_ms);
@@ -10263,7 +11907,7 @@ int main(void)
          * image, un framebuffer ou meme un atlas de textures quelque part
          * dans la VRAM, on doit pouvoir le voir.
          */
-        if ((frame % 60u) == 0u)
+        if (!g_b42_native_video && (frame % 120u) == 0u)
         {
             static const unsigned xs[] = { 0u, 320u, 640u };
             static const unsigned ys[] = { 0u, 256u };
@@ -10318,6 +11962,156 @@ int main(void)
             g_vram_view_nonzero = best_nz;
         }
 
+        /*
+         * ====================================================
+         * B84 - framebuffer stable
+         * ====================================================
+         *
+         * B78/B79 ont deja un compteur de transactions DMA2. Une
+         * nouvelle transaction est un bien meilleur point de capture
+         * qu'une frame 3DS arbitraire : on evite de montrer une VRAM
+         * en plein milieu de la construction d'image.
+         */
+        /*
+         * ====================================================
+         * B87 - double-buffer PS1 avec une image de retard
+         * ====================================================
+         *
+         * PRE-DIRECT :
+         *   quand GP1(05) change de page, on capture l'ANCIENNE
+         *   page. Elle vient de rester affichee pendant toute une
+         *   frame et doit donc etre stable.
+         *
+         * DIRECT-2DF :
+         *   on conserve la frontiere "frame guest terminee" de B85.
+         */
+        if (
+            g_b42_native_video
+            &&
+            fm_gpu_has_frame()
+        )
+        {
+            unsigned current_x = fm_gpu_display_x();
+            unsigned current_y = fm_gpu_display_y();
+
+            if (current_x > 704u)
+            {
+                current_x = 0u;
+            }
+
+            if (current_y > 256u)
+            {
+                current_y = 0u;
+            }
+
+            unsigned previous_x = g_b86_last_display_x;
+            unsigned previous_y = g_b86_last_display_y;
+
+            int have_previous =
+                previous_x != 0xFFFFFFFFu
+                &&
+                previous_y != 0xFFFFFFFFu;
+
+            int display_changed =
+                !have_previous
+                ||
+                current_x != previous_x
+                ||
+                current_y != previous_y;
+
+            int complete_guest_frame =
+                g_direct2df_active
+                &&
+                g_b85_guest_frames
+                    !=
+                    g_b85_last_latched_guest_frame;
+
+            unsigned latch_x = current_x;
+            unsigned latch_y = current_y;
+            int need_latch = 0;
+
+            if (g_direct2df_active)
+            {
+                if (
+                    !g_b84_latch_valid
+                    ||
+                    complete_guest_frame
+                )
+                {
+                    need_latch = 1;
+                }
+            }
+            else if (display_changed)
+            {
+                if (have_previous)
+                {
+                    /*
+                     * Important : capturer la page QUITTEE,
+                     * pas celle que GP1 vient juste de selectionner.
+                     */
+                    latch_x = previous_x;
+                    latch_y = previous_y;
+                    need_latch = 1;
+                    ++g_b87_delayed_latches;
+                }
+                else
+                {
+                    ++g_b87_first_flip_waits;
+                }
+            }
+
+            if (display_changed)
+            {
+                g_b86_last_display_x = current_x;
+                g_b86_last_display_y = current_y;
+                ++g_b86_display_changes;
+            }
+
+            if (need_latch)
+            {
+                for (unsigned py = 0u; py < 256u; ++py)
+                {
+                    unsigned sy =
+                        (latch_y + py) & 511u;
+
+                    const uint16_t *src_row =
+                        vram
+                        +
+                        sy * 1024u
+                        +
+                        latch_x;
+
+                    uint16_t *dst_row =
+                        composite
+                        +
+                        py * 320u;
+
+                    memcpy(
+                        dst_row,
+                        src_row,
+                        320u * sizeof(uint16_t)
+                    );
+                }
+
+                g_b84_latch_x = latch_x;
+                g_b84_latch_y = latch_y;
+
+                g_b87_last_source_x = latch_x;
+                g_b87_last_source_y = latch_y;
+
+                g_b84_last_dma_sample =
+                    g_b78_dma_wait_samples;
+
+                g_b85_last_latched_guest_frame =
+                    g_b85_guest_frames;
+
+                g_b84_latch_valid = 1u;
+                g_b86_present_dirty = 1u;
+                ++g_b84_latch_count;
+            }
+        }
+
+
         if (
             g_b42_native_video
             && fm_gpu_has_frame()
@@ -10340,11 +12134,40 @@ int main(void)
                 display_y = 0u;
             }
 
-            fm_present_rgb555(
-                vram + display_y * 1024u + display_x,
-                1024,
-                crop
-            );
+            if (
+                g_b84_latch_valid
+                &&
+                g_b86_present_dirty
+            )
+            {
+                fm_present_rgb555(
+                    composite,
+                    320,
+                    crop
+                );
+
+                g_b86_present_dirty = 0u;
+                ++g_b86_present_count;
+            }
+            else if (!g_b84_latch_valid)
+            {
+                fm_present_rgb555(
+                    vram + display_y * 1024u + display_x,
+                    1024,
+                    crop
+                );
+
+                ++g_b86_present_count;
+            }
+            else
+            {
+                /*
+                 * Le framebuffer 3DS conserve son contenu.
+                 * Pas besoin de reconvertir 76 800 pixels si l'image
+                 * PS1 stable n'a pas change.
+                 */
+                ++g_b86_skipped_presents;
+            }
         }
         else if (
             !g_b42_native_video
@@ -10464,7 +12287,7 @@ int main(void)
          */
 
         if (
-            frame % 30 == 0
+            frame % 480 == 0
             || pad != old_pad
             || down
         )
@@ -10493,8 +12316,13 @@ int main(void)
             uint32_t clk438 = fm_memory_read_word(0x8009C438u);
             uint8_t clk425 = fm_memory_read_byte(0x8009C425u);
 
+            /*
+             * B87 : ne pas scanner les 1024x512 pixels pour le debug.
+             */
             FMGpuDebugStats gpu_debug;
-            fm_gpu_debug_stats(&gpu_debug);
+            memset(&gpu_debug, 0, sizeof(gpu_debug));
+            gpu_debug.gp0_words =
+                fm_gpu_gp0_count();
 
             /*
              * =================================================
@@ -10507,7 +12335,7 @@ int main(void)
              * donnees necessaires pour identifier l'opcode qui
              * bloque 801680F4.
              */
-            printf("BUILD B75-MENU-ENTRANCE-BRIDGE\n");
+            printf("BUILD B90-B87-RECOVERY\n");
 
             printf(
                 "RUN:%c CPU:%08lX RA:%08lX F:%lu I:%s\n",
@@ -10521,119 +12349,68 @@ int main(void)
             );
 
             printf(
-                "MENU I/U/D:%lu/%lu/%lu CB:%08lX draw:%lu\n",
-                (unsigned long)g_b73_hit_menu_init,
+                "SCHED ms:%lu max:%lu hand:%lu sliceY:%lu\n",
+                (unsigned long)g_b16_slice_last_ms,
+                (unsigned long)g_b16_slice_max_ms,
+                (unsigned long)g_b16_last_handoffs,
+                (unsigned long)g_b84_budget_yields
+            );
+
+            printf(
+                "BUDGET native:%lu interp:%lu direct:%lu\n",
+                (unsigned long)g_b85_probe_budget_continues,
+                (unsigned long)g_b84_budget_continues,
+                (unsigned long)g_direct2df_active
+            );
+
+            printf(
+                "FLIP now:%lu,%lu src:%lu,%lu changes:%lu\n",
+                (unsigned long)fm_gpu_display_x(),
+                (unsigned long)fm_gpu_display_y(),
+                (unsigned long)g_b87_last_source_x,
+                (unsigned long)g_b87_last_source_y,
+                (unsigned long)g_b86_display_changes
+            );
+
+            printf(
+                "DELAY latch/wait:%lu/%lu total:%lu\n",
+                (unsigned long)g_b87_delayed_latches,
+                (unsigned long)g_b87_first_flip_waits,
+                (unsigned long)g_b84_latch_count
+            );
+
+            printf(
+                "PRESENT done/skip/dirty:%lu/%lu/%lu\n",
+                (unsigned long)g_b86_present_count,
+                (unsigned long)g_b86_skipped_presents,
+                (unsigned long)g_b86_present_dirty
+            );
+
+            printf(
+                "GFRAME:%lu sentinel:%lu MENU U:%lu draw:%lu\n",
+                (unsigned long)g_b85_guest_frames,
+                (unsigned long)g_b85_sentinel_hits,
                 (unsigned long)g_b73_hit_menu_update,
-                (unsigned long)g_b73_hit_menu_destroy,
-                (unsigned long)fm_memory_read_word(0x8009C898u),
                 (unsigned long)g_b74_hit_menu_draw_cb
             );
 
             printf(
-                "ENT bridge:%lu frame:%lu objs:%lu C0:%lu C5:%lu>%lu\n",
-                (unsigned long)g_b75_menu_entrance_bridge,
-                (unsigned long)g_b75_menu_entrance_frame,
-                (unsigned long)g_b75_objects_settled,
-                (unsigned long)g_b75_last_c0,
-                (unsigned long)g_b75_last_c5_before,
-                (unsigned long)g_b75_last_c5_after
-            );
-
-            {
-                uint32_t p0 =
-                    fm_memory_read_word(0x80184794u);
-
-                uint32_t p4 =
-                    fm_memory_read_word(0x801847A4u);
-
-                uint32_t p5 =
-                    fm_memory_read_word(0x801847A8u);
-
-                if (
-                    p0 >= 0x80000000u
-                    &&
-                    p0 < 0x80200000u
-                )
-                {
-                    printf(
-                        "O0 %08lX fl:%04lX x:%ld to:%ld t:%ld\n",
-                        (unsigned long)p0,
-                        (unsigned long)fm_memory_read_half(p0 + 0x08u),
-                        (long)(int16_t)fm_memory_read_half(p0 + 0x30u),
-                        (long)(int16_t)fm_memory_read_half(p0 + 0x38u),
-                        (long)(int16_t)fm_memory_read_half(p0 + 0x60u)
-                    );
-                }
-
-                if (
-                    p4 >= 0x80000000u
-                    &&
-                    p4 < 0x80200000u
-                )
-                {
-                    printf(
-                        "O4 %08lX fl:%04lX x:%ld t:%ld  ",
-                        (unsigned long)p4,
-                        (unsigned long)fm_memory_read_half(p4 + 0x08u),
-                        (long)(int16_t)fm_memory_read_half(p4 + 0x30u),
-                        (long)(int16_t)fm_memory_read_half(p4 + 0x60u)
-                    );
-                }
-
-                if (
-                    p5 >= 0x80000000u
-                    &&
-                    p5 < 0x80200000u
-                )
-                {
-                    printf(
-                        "O5 fl:%04lX x:%ld t:%ld\n",
-                        (unsigned long)fm_memory_read_half(p5 + 0x08u),
-                        (long)(int16_t)fm_memory_read_half(p5 + 0x30u),
-                        (long)(int16_t)fm_memory_read_half(p5 + 0x60u)
-                    );
-                }
-                else
-                {
-                    printf("\n");
-                }
-            }
-
-            printf(
-                "SEL:%lu C1..C9:%02lX/%02lX/%02lX/%02lX/%02lX/%02lX/%02lX/%02lX/%02lX\n",
+                "MENU SEL:%lu D:%lu ENT:%lu DIRECTbad:%lu\n",
                 (unsigned long)fm_memory_read_byte(0x801847C0u),
-                (unsigned long)fm_memory_read_byte(0x801847C1u),
-                (unsigned long)fm_memory_read_byte(0x801847C2u),
-                (unsigned long)fm_memory_read_byte(0x801847C3u),
-                (unsigned long)fm_memory_read_byte(0x801847C4u),
-                (unsigned long)fm_memory_read_byte(0x801847C5u),
-                (unsigned long)fm_memory_read_byte(0x801847C6u),
-                (unsigned long)fm_memory_read_byte(0x801847C7u),
-                (unsigned long)fm_memory_read_byte(0x801847C8u),
-                (unsigned long)fm_memory_read_byte(0x801847C9u)
+                (unsigned long)g_b73_hit_menu_destroy,
+                (unsigned long)g_b75_menu_entrance_bridge,
+                (unsigned long)g_b79_direct_bad
             );
 
             printf(
-                "PAD H/E/R:%04lX/%04lX/%04lX START:%lu\n",
-                (unsigned long)(fm_memory_read_word(0x8009C710u) & 0xFFFFu),
-                (unsigned long)(fm_memory_read_word(0x8009C72Cu) & 0xFFFFu),
-                (unsigned long)(fm_memory_read_word(0x8009C728u) & 0xFFFFu),
-                (unsigned long)g_b72_start_down_count
-            );
-
-            printf(
-                "GPU gp0:%llu disp:%lu,%lu view:%lu,%lu nz:%lu\n",
+                "GPU words:%llu DMA2:%lu\n",
                 (unsigned long long)gpu_debug.gp0_words,
-                (unsigned long)fm_gpu_display_x(),
-                (unsigned long)fm_gpu_display_y(),
-                (unsigned long)g_vram_view_x,
-                (unsigned long)g_vram_view_y,
-                (unsigned long)g_vram_view_nonzero
+                (unsigned long)g_b78_dma_wait_samples
             );
 
             /*
              * Les anciens diagnostics restent dans le fichier pour
-             * pouvoir les reactiver, mais sont masques dans B75.
+             * pouvoir les reactiver, mais sont masques dans B87.
              */
             if (0)
             {
