@@ -284,6 +284,18 @@ static uint32_t g_b110_loop_max_ms = 0u;
 static uint32_t g_b110_loop_over20 = 0u;
 static uint32_t g_b110_loop_over33 = 0u;
 
+/*
+ * B111 - guest cadence probe.
+ * Updated only by the 2-second debug refresh, so it has no hot-path cost.
+ * It tells us whether the host really runs near 60 Hz while the guest
+ * completes far fewer logical frames.
+ */
+static uint32_t g_b111_prev_host_frame = 0u;
+static uint32_t g_b111_prev_guest_frame = 0u;
+static uint32_t g_b111_host_delta = 0u;
+static uint32_t g_b111_guest_delta = 0u;
+static uint32_t g_b111_guest_per_100_host = 0u;
+
 
 static void b110_profile_probe(
     uint32_t start_pc,
@@ -14037,6 +14049,33 @@ int main(void)
                 (unsigned long)g_b108_vsync_last_sync_frame,
                 (unsigned long)g_b108_vsync_last_target
             );
+
+            /*
+             * B111 - cadence guest vs host over the same debug window.
+             * 100 means one completed guest frame per host frame.
+             * A very low value with LOOP ~17 ms proves "slow motion"
+             * rather than a host framerate bottleneck.
+             */
+            g_b111_host_delta =
+                frame - g_b111_prev_host_frame;
+
+            g_b111_guest_delta =
+                g_b85_guest_frames - g_b111_prev_guest_frame;
+
+            g_b111_guest_per_100_host =
+                g_b111_host_delta
+                    ? (g_b111_guest_delta * 100u) / g_b111_host_delta
+                    : 0u;
+
+            printf(
+                "B111 CAD H/G:%lu/%lu ratio:%lu%%\n",
+                (unsigned long)g_b111_host_delta,
+                (unsigned long)g_b111_guest_delta,
+                (unsigned long)g_b111_guest_per_100_host
+            );
+
+            g_b111_prev_host_frame = frame;
+            g_b111_prev_guest_frame = g_b85_guest_frames;
 
             {
                 B110ProbeStat p0 = {0};

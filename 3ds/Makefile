@@ -1,6 +1,6 @@
 # ============================================================
 # Forbidden Memories - New Nintendo 3DS
-# B107 RELEASE/O3
+# B111 RELEASE/O3 - generated core rebuilt automatically
 # ============================================================
 
 ifeq ($(strip $(DEVKITARM)),)
@@ -101,9 +101,15 @@ OBJECTS := \
 	$(BUILD)/gpu_vram_dirty.o
 
 
-.PHONY: all clean
+.PHONY: all clean generated-release
 
 all: $(TARGET).3dsx
+
+# B111: the huge PSXRecomp object is prelinked and is NOT rebuilt by
+# the normal %.o rule below. A normal 3DS build must therefore refresh
+# it explicitly, otherwise an old O2/debug object may be linked.
+generated-release:
+	cd .. && bash rebuild_generated_release.sh
 
 
 $(BUILD):
@@ -122,7 +128,7 @@ $(BUILD)/gpu_vram_dirty.o: $(RUNTIME)/src/gpu_vram_dirty.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 
-$(TARGET).elf: $(OBJECTS) $(GENERATED_COMBINED)
+$(TARGET).elf: generated-release $(OBJECTS) $(GENERATED_COMBINED)
 	$(CC) \
 		$(LDFLAGS) \
 		$(OBJECTS) \
