@@ -297,6 +297,147 @@ static uint32_t g_b111_guest_delta = 0u;
 static uint32_t g_b111_guest_per_100_host = 0u;
 
 
+/*
+ * ============================================================
+ * B115 - GsSortOt phase profiler
+ * ============================================================
+ *
+ * B113/B114 mixed two independent changes: OT merge acceleration and
+ * early source-OT submission. B115 keeps the current rendering behavior
+ * unchanged and times the three phases independently:
+ *
+ *   R = OT sentinel repair
+ *   P = early source OT traversal + GP0 submission/rasterization
+ *   M = native GsSortOt merge
+ *
+ * Stats are bucketed in real one-second windows, independent of host FPS,
+ * so a 180-270 ms stall cannot be hidden by many short loops.
+ */
+static uint64_t g_b115_window_start_ms = 0u;
+
+static uint32_t g_b115_cur_calls = 0u;
+static uint64_t g_b115_cur_repair_ms = 0u;
+static uint64_t g_b115_cur_submit_ms = 0u;
+static uint64_t g_b115_cur_merge_ms = 0u;
+static uint32_t g_b115_cur_repair_max_ms = 0u;
+static uint32_t g_b115_cur_submit_max_ms = 0u;
+static uint32_t g_b115_cur_merge_max_ms = 0u;
+
+static uint32_t g_b115_last_calls = 0u;
+static uint64_t g_b115_last_repair_ms = 0u;
+static uint64_t g_b115_last_submit_ms = 0u;
+static uint64_t g_b115_last_merge_ms = 0u;
+static uint32_t g_b115_last_repair_max_ms = 0u;
+static uint32_t g_b115_last_submit_max_ms = 0u;
+static uint32_t g_b115_last_merge_max_ms = 0u;
+
+static uint32_t g_b115_slow_total_ms = 0u;
+static uint32_t g_b115_slow_repair_ms = 0u;
+static uint32_t g_b115_slow_submit_ms = 0u;
+static uint32_t g_b115_slow_merge_ms = 0u;
+static uint32_t g_b115_slow_src = 0u;
+static uint32_t g_b115_slow_dst = 0u;
+static uint32_t g_b115_slow_nodes = 0u;
+static uint32_t g_b115_slow_packets = 0u;
+static uint32_t g_b115_slow_words = 0u;
+static uint32_t g_b115_slow_draw = 0u;
+static uint32_t g_b115_slow_env = 0u;
+static uint32_t g_b115_slow_other = 0u;
+static int32_t g_b115_slow_native_code = 0;
+
+
+static void b115_roll_window(uint64_t now_ms)
+{
+    if (g_b115_window_start_ms == 0u)
+    {
+        g_b115_window_start_ms = now_ms;
+        return;
+    }
+
+    if ((now_ms - g_b115_window_start_ms) < 1000u)
+    {
+        return;
+    }
+
+    g_b115_last_calls = g_b115_cur_calls;
+    g_b115_last_repair_ms = g_b115_cur_repair_ms;
+    g_b115_last_submit_ms = g_b115_cur_submit_ms;
+    g_b115_last_merge_ms = g_b115_cur_merge_ms;
+    g_b115_last_repair_max_ms = g_b115_cur_repair_max_ms;
+    g_b115_last_submit_max_ms = g_b115_cur_submit_max_ms;
+    g_b115_last_merge_max_ms = g_b115_cur_merge_max_ms;
+
+    g_b115_cur_calls = 0u;
+    g_b115_cur_repair_ms = 0u;
+    g_b115_cur_submit_ms = 0u;
+    g_b115_cur_merge_ms = 0u;
+    g_b115_cur_repair_max_ms = 0u;
+    g_b115_cur_submit_max_ms = 0u;
+    g_b115_cur_merge_max_ms = 0u;
+
+    g_b115_window_start_ms = now_ms;
+}
+
+
+static void b115_record_sort(
+    uint64_t end_ms,
+    uint32_t repair_ms,
+    uint32_t submit_ms,
+    uint32_t merge_ms,
+    uint32_t src,
+    uint32_t dst,
+    uint32_t nodes,
+    uint32_t packets,
+    uint32_t words,
+    uint32_t draw_packets,
+    uint32_t env_packets,
+    uint32_t other_packets,
+    int32_t native_code
+)
+{
+    b115_roll_window(end_ms);
+
+    ++g_b115_cur_calls;
+    g_b115_cur_repair_ms += repair_ms;
+    g_b115_cur_submit_ms += submit_ms;
+    g_b115_cur_merge_ms += merge_ms;
+
+    if (repair_ms > g_b115_cur_repair_max_ms)
+    {
+        g_b115_cur_repair_max_ms = repair_ms;
+    }
+
+    if (submit_ms > g_b115_cur_submit_max_ms)
+    {
+        g_b115_cur_submit_max_ms = submit_ms;
+    }
+
+    if (merge_ms > g_b115_cur_merge_max_ms)
+    {
+        g_b115_cur_merge_max_ms = merge_ms;
+    }
+
+    uint32_t total_ms = repair_ms + submit_ms + merge_ms;
+
+    if (total_ms > g_b115_slow_total_ms)
+    {
+        g_b115_slow_total_ms = total_ms;
+        g_b115_slow_repair_ms = repair_ms;
+        g_b115_slow_submit_ms = submit_ms;
+        g_b115_slow_merge_ms = merge_ms;
+        g_b115_slow_src = src;
+        g_b115_slow_dst = dst;
+        g_b115_slow_nodes = nodes;
+        g_b115_slow_packets = packets;
+        g_b115_slow_words = words;
+        g_b115_slow_draw = draw_packets;
+        g_b115_slow_env = env_packets;
+        g_b115_slow_other = other_packets;
+        g_b115_slow_native_code = native_code;
+    }
+}
+
+
 static void b110_profile_probe(
     uint32_t start_pc,
     uint32_t end_pc,
@@ -12548,15 +12689,27 @@ int main(void)
                      * une chaine de buckets vides qui descendait bien au-dela
                      * de src->org, ce qui explique les boucles de GsSortOt.
                      */
+                    /*
+                     * B115: time repair, early submission and merge separately.
+                     * No rendering behavior is changed in this build.
+                     */
+                    uint64_t b115_t0 = osGetTime();
+
                     fm_repair_ot_sentinel(cpu, src_ot);
                     fm_repair_ot_sentinel(cpu, dst_ot);
 
+                    uint64_t b115_t1 = osGetTime();
+
+                    uint32_t b115_nodes = 0u;
+                    uint32_t b115_packets = 0u;
+                    uint32_t b115_words = 0u;
+                    uint32_t b115_draw = 0u;
+                    uint32_t b115_env = 0u;
+                    uint32_t b115_other = 0u;
+
                     /*
-                     * Soumettre AUSSI l'OT source telle que le jeu vient de
-                     * la construire, avant que GsSortOt ne la fusionne.
-                     * Cela vise directement les premiers pixels : si des
-                     * primitives existent, elles atteignent tout de suite
-                     * notre parser GP0, sans attendre la destination finale.
+                     * Preserve the B114 behavior exactly: submit the source OT
+                     * before merging it. B115 only measures its cost.
                      */
                     if (g_hle_85d98_src_tag != 0u)
                     {
@@ -12564,24 +12717,61 @@ int main(void)
                             cpu,
                             g_hle_85d98_src_tag
                         );
+
+                        b115_nodes = g_ot_direct_last_nodes;
+                        b115_packets = g_ot_direct_last_packets;
+                        b115_words = g_ot_direct_last_words;
+                        b115_draw = g_ot_direct_last_draw_packets;
+                        b115_env = g_ot_direct_last_env_packets;
+                        b115_other = g_ot_direct_last_other_packets;
                     }
 
-                    if (
+                    uint64_t b115_t2 = osGetTime();
+
+                    int b115_native_ok =
                         fm_try_native_gssortot(
                             cpu,
                             src_ot,
                             dst_ot,
                             &native_result
-                        )
-                    )
+                        );
+
+                    uint64_t b115_t3 = osGetTime();
+
+                    uint32_t b115_repair_ms =
+                        (uint32_t)(b115_t1 - b115_t0);
+
+                    uint32_t b115_submit_ms =
+                        (uint32_t)(b115_t2 - b115_t1);
+
+                    uint32_t b115_merge_ms =
+                        (uint32_t)(b115_t3 - b115_t2);
+
+                    b115_record_sort(
+                        b115_t3,
+                        b115_repair_ms,
+                        b115_submit_ms,
+                        b115_merge_ms,
+                        src_ot,
+                        dst_ot,
+                        b115_nodes,
+                        b115_packets,
+                        b115_words,
+                        b115_draw,
+                        b115_env,
+                        b115_other,
+                        g_sort_native_last_code
+                    );
+
+                    if (b115_native_ok)
                     {
                         cpu->gpr[2] = native_result;
                     }
                     else
                     {
                         /*
-                         * Pas de splice manuel : on a deja soumis l'OT source
-                         * de facon bornee. Le jeu continue sans corruption.
+                         * Same B114 fallback: source OT was already submitted
+                         * safely, then the guest continues without manual splice.
                          */
                         cpu->gpr[2] = dst_ot;
                     }
@@ -13858,7 +14048,7 @@ int main(void)
                 &b100_last_gp105
             );
 
-            printf("BUILD B111-RELEASE-HOTPATH\n");
+            printf("BUILD B115-OT-PHASE-PROFILE\n");
 
             printf(
                 "RUN:%c CPU:%08lX RA:%08lX F:%lu I:%s\n",
@@ -14167,6 +14357,42 @@ int main(void)
                 "GPU words:%llu DMA2:%lu\n",
                 (unsigned long long)gpu_debug.gp0_words,
                 (unsigned long)g_b78_dma_wait_samples
+            );
+
+            printf(
+                "B115 1s c:%lu sum R/P/M:%llu/%llu/%llu\n",
+                (unsigned long)g_b115_last_calls,
+                (unsigned long long)g_b115_last_repair_ms,
+                (unsigned long long)g_b115_last_submit_ms,
+                (unsigned long long)g_b115_last_merge_ms
+            );
+
+            printf(
+                "B115 max R/P/M:%lu/%lu/%lu slow:%lu\n",
+                (unsigned long)g_b115_last_repair_max_ms,
+                (unsigned long)g_b115_last_submit_max_ms,
+                (unsigned long)g_b115_last_merge_max_ms,
+                (unsigned long)g_b115_slow_total_ms
+            );
+
+            printf(
+                "B115 slow R/P/M:%lu/%lu/%lu N/P/W:%lu/%lu/%lu\n",
+                (unsigned long)g_b115_slow_repair_ms,
+                (unsigned long)g_b115_slow_submit_ms,
+                (unsigned long)g_b115_slow_merge_ms,
+                (unsigned long)g_b115_slow_nodes,
+                (unsigned long)g_b115_slow_packets,
+                (unsigned long)g_b115_slow_words
+            );
+
+            printf(
+                "B115 OT:%08lX>%08lX D/E/O:%lu/%lu/%lu C:%ld\n",
+                (unsigned long)g_b115_slow_src,
+                (unsigned long)g_b115_slow_dst,
+                (unsigned long)g_b115_slow_draw,
+                (unsigned long)g_b115_slow_env,
+                (unsigned long)g_b115_slow_other,
+                (long)g_b115_slow_native_code
             );
 
             /*
