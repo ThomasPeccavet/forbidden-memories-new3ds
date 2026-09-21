@@ -12729,24 +12729,18 @@ int main(void)
                     uint32_t b115_other = 0u;
 
                     /*
-                     * Preserve the B114 behavior exactly: submit the source OT
-                     * before merging it. B115 only measures its cost.
+                     * B117 - NORMAL OT PATH TEST
+                     *
+                     * Do NOT submit the source OT here. GsSortOt must splice
+                     * it into the destination and the existing
+                     * GsDrawOt/DrawOTag -> DMA2 path must be the single place
+                     * that reaches GP0.
+                     *
+                     * This is intentionally the only behavioral difference
+                     * from B116. If visuals remain complete while the long
+                     * P phase disappears, the direct source submission was
+                     * redundant and expensive.
                      */
-                    if (g_hle_85d98_src_tag != 0u)
-                    {
-                        fm_submit_ot_safe(
-                            cpu,
-                            g_hle_85d98_src_tag
-                        );
-
-                        b115_nodes = g_ot_direct_last_nodes;
-                        b115_packets = g_ot_direct_last_packets;
-                        b115_words = g_ot_direct_last_words;
-                        b115_draw = g_ot_direct_last_draw_packets;
-                        b115_env = g_ot_direct_last_env_packets;
-                        b115_other = g_ot_direct_last_other_packets;
-                    }
-
                     uint64_t b115_t2 = osGetTime();
 
                     int b115_native_ok =
@@ -14069,7 +14063,7 @@ int main(void)
                 &b100_last_gp105
             );
 
-            printf("BUILD B116-SAFE-OT-REPAIR\n");
+            printf("BUILD B117-NORMAL-OT-PATH\n");
 
             printf(
                 "RUN:%c CPU:%08lX RA:%08lX F:%lu I:%s\n",
