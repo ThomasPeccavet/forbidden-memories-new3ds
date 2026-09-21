@@ -213,6 +213,28 @@ static unsigned g_display_y = 0;
 
 static int g_display_disabled = 1;
 
+static uint32_t g_display_mode = 0u;
+static uint32_t g_b104_gp1_08_count = 0u;
+
+
+/*
+ * ============================================================
+ * B100 - trace legere des commandes de frame-buffer
+ * ============================================================
+ */
+static uint32_t g_b100_e3_count = 0u;
+static uint32_t g_b100_e4_count = 0u;
+static uint32_t g_b100_e5_count = 0u;
+static uint32_t g_b100_gp1_05_count = 0u;
+
+static uint32_t g_b100_last_e3 = 0u;
+static uint32_t g_b100_last_e4 = 0u;
+static uint32_t g_b100_last_e5 = 0u;
+static uint32_t g_b100_last_gp1_05 = 0u;
+
+/* B101: drawable GP0 packets seen with a non-zero draw offset. */
+static uint32_t g_b101_offset_draw_packets = 0u;
+
 
 /*
  * ============================================================
@@ -1089,6 +1111,17 @@ static void execute_command(void)
 
     b44_trace_current_packet(opcode);
 
+    if (
+        opcode >= 0x20u
+        &&
+        opcode <= 0x7Fu
+        &&
+        (g_offset_x != 0 || g_offset_y != 0)
+    )
+    {
+        ++g_b101_offset_draw_packets;
+    }
+
 
     /*
      * --------------------------------------------------------
@@ -1268,6 +1301,19 @@ static void execute_command(void)
      * Polygons
      * ========================================================
      */
+    /*
+     * B101 - IMPORTANT:
+     *
+     * GP0(E5h) is the PS1 drawing offset. The software rasterizer API
+     * receives final VRAM coordinates; merely calling sw_set_draw_offset()
+     * does not translate the primitive coordinates in this renderer.
+     *
+     * B100 proved Forbidden Memories alternates:
+     *   draw area/offset 0..319    <-> 320..639
+     * while P320 stayed empty.
+     *
+     * Apply g_offset_x/g_offset_y to ALL GP0 drawing primitives here.
+     */
 
     if (
         opcode >= 0x20
@@ -1339,22 +1385,22 @@ static void execute_command(void)
 
 
             int x0 =
-                coord_x(g_cmd[1]);
+                (coord_x(g_cmd[1]) + g_offset_x);
 
             int y0 =
-                coord_y(g_cmd[1]);
+                (coord_y(g_cmd[1]) + g_offset_y);
 
             int x1 =
-                coord_x(g_cmd[2]);
+                (coord_x(g_cmd[2]) + g_offset_x);
 
             int y1 =
-                coord_y(g_cmd[2]);
+                (coord_y(g_cmd[2]) + g_offset_y);
 
             int x2 =
-                coord_x(g_cmd[3]);
+                (coord_x(g_cmd[3]) + g_offset_x);
 
             int y2 =
-                coord_y(g_cmd[3]);
+                (coord_y(g_cmd[3]) + g_offset_y);
 
 
             sw_draw_flat_triangle(
@@ -1371,10 +1417,10 @@ static void execute_command(void)
             if (quad)
             {
                 int x3 =
-                    coord_x(g_cmd[4]);
+                    (coord_x(g_cmd[4]) + g_offset_x);
 
                 int y3 =
-                    coord_y(g_cmd[4]);
+                    (coord_y(g_cmd[4]) + g_offset_y);
 
 
                 sw_draw_flat_triangle(
@@ -1410,10 +1456,10 @@ static void execute_command(void)
         )
         {
             int x0 =
-                coord_x(g_cmd[1]);
+                (coord_x(g_cmd[1]) + g_offset_x);
 
             int y0 =
-                coord_y(g_cmd[1]);
+                (coord_y(g_cmd[1]) + g_offset_y);
 
             int u0 =
                 tex_u(g_cmd[2]);
@@ -1429,10 +1475,10 @@ static void execute_command(void)
 
 
             int x1 =
-                coord_x(g_cmd[3]);
+                (coord_x(g_cmd[3]) + g_offset_x);
 
             int y1 =
-                coord_y(g_cmd[3]);
+                (coord_y(g_cmd[3]) + g_offset_y);
 
             int u1 =
                 tex_u(g_cmd[4]);
@@ -1448,10 +1494,10 @@ static void execute_command(void)
 
 
             int x2 =
-                coord_x(g_cmd[5]);
+                (coord_x(g_cmd[5]) + g_offset_x);
 
             int y2 =
-                coord_y(g_cmd[5]);
+                (coord_y(g_cmd[5]) + g_offset_y);
 
             int u2 =
                 tex_u(g_cmd[6]);
@@ -1497,10 +1543,10 @@ static void execute_command(void)
             if (quad)
             {
                 int x3 =
-                    coord_x(g_cmd[7]);
+                    (coord_x(g_cmd[7]) + g_offset_x);
 
                 int y3 =
-                    coord_y(g_cmd[7]);
+                    (coord_y(g_cmd[7]) + g_offset_y);
 
                 int u3 =
                     tex_u(g_cmd[8]);
@@ -1560,10 +1606,10 @@ static void execute_command(void)
 
 
             int x0 =
-                coord_x(g_cmd[1]);
+                (coord_x(g_cmd[1]) + g_offset_x);
 
             int y0 =
-                coord_y(g_cmd[1]);
+                (coord_y(g_cmd[1]) + g_offset_y);
 
 
             uint16_t c1 =
@@ -1573,10 +1619,10 @@ static void execute_command(void)
 
 
             int x1 =
-                coord_x(g_cmd[3]);
+                (coord_x(g_cmd[3]) + g_offset_x);
 
             int y1 =
-                coord_y(g_cmd[3]);
+                (coord_y(g_cmd[3]) + g_offset_y);
 
 
             uint16_t c2 =
@@ -1586,10 +1632,10 @@ static void execute_command(void)
 
 
             int x2 =
-                coord_x(g_cmd[5]);
+                (coord_x(g_cmd[5]) + g_offset_x);
 
             int y2 =
-                coord_y(g_cmd[5]);
+                (coord_y(g_cmd[5]) + g_offset_y);
 
 
             sw_draw_gouraud_triangle(
@@ -1616,10 +1662,10 @@ static void execute_command(void)
 
 
                 int x3 =
-                    coord_x(g_cmd[7]);
+                    (coord_x(g_cmd[7]) + g_offset_x);
 
                 int y3 =
-                    coord_y(g_cmd[7]);
+                    (coord_y(g_cmd[7]) + g_offset_y);
 
 
                 sw_draw_gouraud_triangle(
@@ -1660,10 +1706,10 @@ static void execute_command(void)
 
 
             int x0 =
-                coord_x(g_cmd[1]);
+                (coord_x(g_cmd[1]) + g_offset_x);
 
             int y0 =
-                coord_y(g_cmd[1]);
+                (coord_y(g_cmd[1]) + g_offset_y);
 
             int u0 =
                 tex_u(g_cmd[2]);
@@ -1685,10 +1731,10 @@ static void execute_command(void)
 
 
             int x1 =
-                coord_x(g_cmd[4]);
+                (coord_x(g_cmd[4]) + g_offset_x);
 
             int y1 =
-                coord_y(g_cmd[4]);
+                (coord_y(g_cmd[4]) + g_offset_y);
 
             int u1 =
                 tex_u(g_cmd[5]);
@@ -1710,10 +1756,10 @@ static void execute_command(void)
 
 
             int x2 =
-                coord_x(g_cmd[7]);
+                (coord_x(g_cmd[7]) + g_offset_x);
 
             int y2 =
-                coord_y(g_cmd[7]);
+                (coord_y(g_cmd[7]) + g_offset_y);
 
             int u2 =
                 tex_u(g_cmd[8]);
@@ -1763,10 +1809,10 @@ static void execute_command(void)
 
 
                 int x3 =
-                    coord_x(g_cmd[10]);
+                    (coord_x(g_cmd[10]) + g_offset_x);
 
                 int y3 =
-                    coord_y(g_cmd[10]);
+                    (coord_y(g_cmd[10]) + g_offset_y);
 
                 int u3 =
                     tex_u(g_cmd[11]);
@@ -1830,11 +1876,11 @@ static void execute_command(void)
 
 
         sw_draw_line(
-            coord_x(g_cmd[1]),
-            coord_y(g_cmd[1]),
+            (coord_x(g_cmd[1]) + g_offset_x),
+            (coord_y(g_cmd[1]) + g_offset_y),
 
-            coord_x(g_cmd[2]),
-            coord_y(g_cmd[2]),
+            (coord_x(g_cmd[2]) + g_offset_x),
+            (coord_y(g_cmd[2]) + g_offset_y),
 
             rgb24_to_555(
                 g_cmd[0]
@@ -1868,11 +1914,11 @@ static void execute_command(void)
 
 
         sw_draw_line(
-            coord_x(g_cmd[1]),
-            coord_y(g_cmd[1]),
+            (coord_x(g_cmd[1]) + g_offset_x),
+            (coord_y(g_cmd[1]) + g_offset_y),
 
-            coord_x(g_cmd[2]),
-            coord_y(g_cmd[2]),
+            (coord_x(g_cmd[2]) + g_offset_x),
+            (coord_y(g_cmd[2]) + g_offset_y),
 
             rgb24_to_555(
                 g_cmd[0]
@@ -1910,12 +1956,12 @@ static void execute_command(void)
 
 
         sw_draw_shaded_line(
-            coord_x(g_cmd[1]),
-            coord_y(g_cmd[1]),
+            (coord_x(g_cmd[1]) + g_offset_x),
+            (coord_y(g_cmd[1]) + g_offset_y),
             rgb24_to_555(g_cmd[0]),
 
-            coord_x(g_cmd[3]),
-            coord_y(g_cmd[3]),
+            (coord_x(g_cmd[3]) + g_offset_x),
+            (coord_y(g_cmd[3]) + g_offset_y),
             rgb24_to_555(g_cmd[2])
         );
 
@@ -1940,12 +1986,12 @@ static void execute_command(void)
 
 
         sw_draw_shaded_line(
-            coord_x(g_cmd[1]),
-            coord_y(g_cmd[1]),
+            (coord_x(g_cmd[1]) + g_offset_x),
+            (coord_y(g_cmd[1]) + g_offset_y),
             rgb24_to_555(g_cmd[0]),
 
-            coord_x(g_cmd[3]),
-            coord_y(g_cmd[3]),
+            (coord_x(g_cmd[3]) + g_offset_x),
+            (coord_y(g_cmd[3]) + g_offset_y),
             rgb24_to_555(g_cmd[2])
         );
 
@@ -2005,10 +2051,10 @@ static void execute_command(void)
 
 
         int x =
-            coord_x(g_cmd[1]);
+            (coord_x(g_cmd[1]) + g_offset_x);
 
         int y =
-            coord_y(g_cmd[1]);
+            (coord_y(g_cmd[1]) + g_offset_y);
 
 
         int w;
@@ -2347,6 +2393,9 @@ static void execute_command(void)
 
     if (opcode == 0xE3)
     {
+        ++g_b100_e3_count;
+        g_b100_last_e3 = g_cmd[0];
+
         g_draw_x1 =
             g_cmd[0]
             &
@@ -2377,6 +2426,9 @@ static void execute_command(void)
 
     if (opcode == 0xE4)
     {
+        ++g_b100_e4_count;
+        g_b100_last_e4 = g_cmd[0];
+
         g_draw_x2 =
             g_cmd[0]
             &
@@ -2407,6 +2459,9 @@ static void execute_command(void)
 
     if (opcode == 0xE5)
     {
+        ++g_b100_e5_count;
+        g_b100_last_e5 = g_cmd[0];
+
         g_offset_x =
             sign11(
                 g_cmd[0]
@@ -2629,6 +2684,19 @@ void fm_gpu_init(
 
     g_display_disabled =
         1;
+
+    g_display_mode = 0u;
+    g_b104_gp1_08_count = 0u;
+
+    g_b100_e3_count = 0u;
+    g_b100_e4_count = 0u;
+    g_b100_e5_count = 0u;
+    g_b100_gp1_05_count = 0u;
+    g_b100_last_e3 = 0u;
+    g_b100_last_e4 = 0u;
+    g_b100_last_e5 = 0u;
+    g_b100_last_gp1_05 = 0u;
+    g_b101_offset_draw_packets = 0u;
 
 
     g_mask_set =
@@ -2937,6 +3005,9 @@ void fm_gpu_gp1_write(
             g_display_disabled =
                 1;
 
+            g_display_mode =
+                0u;
+
 
             g_texpage =
                 0;
@@ -3012,6 +3083,9 @@ void fm_gpu_gp1_write(
          */
         case 0x05:
         {
+            ++g_b100_gp1_05_count;
+            g_b100_last_gp1_05 = value;
+
             g_display_x =
                 value
                 &
@@ -3032,6 +3106,22 @@ void fm_gpu_gp1_write(
         }
 
 
+        /*
+         * Display mode.
+         * bit4 = 24-bit direct display.
+         */
+        case 0x08:
+        {
+            g_display_mode =
+                value
+                &
+                0xFFu;
+
+            ++g_b104_gp1_08_count;
+            break;
+        }
+
+
         default:
         {
             break;
@@ -3046,6 +3136,36 @@ void fm_gpu_gp1_write(
  * ============================================================
  */
 
+uint32_t fm_gpu_display_mode_raw(void)
+{
+    return g_display_mode;
+}
+
+
+int fm_gpu_display_24bit(void)
+{
+    return
+        (g_display_mode & 0x10u) != 0u;
+}
+
+
+unsigned fm_gpu_display_width(void)
+{
+    if ((g_display_mode & 0x40u) != 0u)
+    {
+        return 368u;
+    }
+
+    switch (g_display_mode & 3u)
+    {
+        case 0u: return 256u;
+        case 1u: return 320u;
+        case 2u: return 512u;
+        default: return 640u;
+    }
+}
+
+
 uint32_t fm_gpu_status(void)
 {
     /*
@@ -3058,6 +3178,30 @@ uint32_t fm_gpu_status(void)
     uint32_t status =
         0x1C802000u;
 
+
+    /*
+     * GP1(08) -> GPUSTAT display-mode fields.
+     */
+    status &= ~(
+        (1u << 16)
+        | (3u << 17)
+        | (1u << 19)
+        | (1u << 20)
+        | (1u << 21)
+        | (1u << 22)
+    );
+
+    if ((g_display_mode & 0x40u) != 0u)
+    {
+        status |= 1u << 16;
+    }
+
+    status |= (g_display_mode & 3u) << 17;
+
+    if ((g_display_mode & 0x04u) != 0u) status |= 1u << 19;
+    if ((g_display_mode & 0x08u) != 0u) status |= 1u << 20;
+    if ((g_display_mode & 0x10u) != 0u) status |= 1u << 21;
+    if ((g_display_mode & 0x20u) != 0u) status |= 1u << 22;
 
     if (g_display_disabled)
     {
@@ -3341,6 +3485,49 @@ static void bios_return(
         0;
 }
 
+
+
+uint32_t fm_gpu_b101_offset_draw_packets(void)
+{
+    return g_b101_offset_draw_packets;
+}
+
+
+/*
+ * B100 - getter sans scan VRAM.
+ */
+void fm_gpu_b100_env_get(
+    int *off_x, int *off_y,
+    int *area_x1, int *area_y1,
+    int *area_x2, int *area_y2,
+    uint32_t *e3_count,
+    uint32_t *e4_count,
+    uint32_t *e5_count,
+    uint32_t *gp1_05_count,
+    uint32_t *last_e3,
+    uint32_t *last_e4,
+    uint32_t *last_e5,
+    uint32_t *last_gp1_05
+)
+{
+    if (off_x) *off_x = g_offset_x;
+    if (off_y) *off_y = g_offset_y;
+
+    if (area_x1) *area_x1 = g_draw_x1;
+    if (area_y1) *area_y1 = g_draw_y1;
+    if (area_x2) *area_x2 = g_draw_x2;
+    if (area_y2) *area_y2 = g_draw_y2;
+
+    if (e3_count) *e3_count = g_b100_e3_count;
+    if (e4_count) *e4_count = g_b100_e4_count;
+    if (e5_count) *e5_count = g_b100_e5_count;
+    if (gp1_05_count) *gp1_05_count = g_b100_gp1_05_count;
+
+    if (last_e3) *last_e3 = g_b100_last_e3;
+    if (last_e4) *last_e4 = g_b100_last_e4;
+    if (last_e5) *last_e5 = g_b100_last_e5;
+    if (last_gp1_05) *last_gp1_05 = g_b100_last_gp1_05;
+}
 
 
 /*

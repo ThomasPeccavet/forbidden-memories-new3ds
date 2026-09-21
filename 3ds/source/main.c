@@ -27,6 +27,32 @@ extern void fm_gpu_b42_set_preserve_background_clears(int enabled);
 extern int fm_gpu_b42_get_preserve_background_clears(void);
 
 
+/*
+ * B100 - diagnostic leger de l'environnement de dessin PS1.
+ * Aucun scan VRAM supplementaire : on lit uniquement les registres
+ * E3/E4/E5 deja suivis par fm_gpu.c.
+ */
+extern uint32_t fm_gpu_b101_offset_draw_packets(void);
+
+extern uint32_t fm_gpu_display_mode_raw(void);
+extern int fm_gpu_display_24bit(void);
+extern unsigned fm_gpu_display_width(void);
+
+extern void fm_gpu_b100_env_get(
+    int *off_x, int *off_y,
+    int *area_x1, int *area_y1,
+    int *area_x2, int *area_y2,
+    uint32_t *e3_count,
+    uint32_t *e4_count,
+    uint32_t *e5_count,
+    uint32_t *gp1_05_count,
+    uint32_t *last_e3,
+    uint32_t *last_e4,
+    uint32_t *last_e5,
+    uint32_t *last_gp1_05
+);
+
+
 /* B29 - API de trace ajoutee proprement au GPU B28. */
 extern unsigned fm_gpu_b29_draw_trace_count(void);
 extern int fm_gpu_b29_draw_trace_get(
@@ -191,6 +217,205 @@ static uint32_t g_vsync_hle_mode1_last = 0;
 static uint32_t g_vsync_hle_mode1_max = 0;
 static uint64_t g_vsync_host_epoch_ms = 0;
 static int32_t g_vsync_hle_last_mode = 0;
+
+
+/*
+ * ============================================================
+ * B108 - correct Psy-Q VSync(n>=2) scheduling
+ * ============================================================
+ *
+ * Real Psy-Q semantics:
+ *   VSync(0)  -> next VBlank from NOW
+ *   VSync(n)  -> wait until LAST_SYNCED_VBLANK + n, n >= 2
+ *
+ * The old HLE incorrectly used NOW + n for every VSync(n), which
+ * adds extra VBlanks whenever some time has already elapsed since
+ * the previous synchronized VSync. This can make gameplay/menu
+ * cadence visibly too slow.
+ */
+static uint32_t g_b108_vsync_last_sync_frame = 0u;
+static uint32_t g_b108_vsync_sync_valid = 0u;
+static uint32_t g_b108_vsync_mode0 = 0u;
+static uint32_t g_b108_vsync_modeN = 0u;
+static uint32_t g_b108_vsync_immediate = 0u;
+static uint32_t g_b108_vsync_waited = 0u;
+static uint32_t g_b108_vsync_last_target = 0u;
+
+
+/*
+ * ============================================================
+ * B110 - profiler du vrai code ARM recompile
+ * ============================================================
+ *
+ * B109 a montre qu'on ne doit plus deviner : on mesure maintenant
+ * directement chaque fm_runtime_probe() du dispatcher principal.
+ *
+ * Pour chaque gros appel on garde :
+ *   start = PC avec lequel le probe a ete lance
+ *   end   = PC de reprise/retour du probe
+ *   hits
+ *   temps cumule
+ *   pire duree
+ *
+ * On conserve les 12 entrees ayant le plus de temps cumule.
+ */
+#define B110_PROF_SLOTS 12u
+
+typedef struct
+{
+    uint32_t start_pc;
+    uint32_t end_pc;
+    uint32_t hits;
+    uint32_t max_us;
+    uint64_t total_us;
+} B110ProbeStat;
+
+static B110ProbeStat g_b110_prof[B110_PROF_SLOTS];
+
+static uint64_t g_b110_probe_total_us = 0u;
+static uint32_t g_b110_probe_calls = 0u;
+static uint32_t g_b110_probe_max_us = 0u;
+static uint32_t g_b110_probe_max_start = 0u;
+static uint32_t g_b110_probe_max_end = 0u;
+
+static uint64_t g_b110_loop_sum_ms = 0u;
+static uint32_t g_b110_loop_samples = 0u;
+static uint32_t g_b110_loop_max_ms = 0u;
+static uint32_t g_b110_loop_over20 = 0u;
+static uint32_t g_b110_loop_over33 = 0u;
+
+
+static void b110_profile_probe(
+    uint32_t start_pc,
+    uint32_t end_pc,
+    uint32_t elapsed_us
+)
+{
+    ++g_b110_probe_calls;
+    g_b110_probe_total_us += elapsed_us;
+
+    if (elapsed_us > g_b110_probe_max_us)
+    {
+        g_b110_probe_max_us = elapsed_us;
+        g_b110_probe_max_start = start_pc;
+        g_b110_probe_max_end = end_pc;
+    }
+
+    int slot = -1;
+
+    for (unsigned i = 0u; i < B110_PROF_SLOTS; ++i)
+    {
+        if (g_b110_prof[i].hits != 0u
+            && g_b110_prof[i].start_pc == start_pc)
+        {
+            slot = (int)i;
+            break;
+        }
+    }
+
+    if (slot < 0)
+    {
+        for (unsigned i = 0u; i < B110_PROF_SLOTS; ++i)
+        {
+            if (g_b110_prof[i].hits == 0u)
+            {
+                slot = (int)i;
+                break;
+            }
+        }
+    }
+
+    if (slot < 0)
+    {
+        unsigned smallest = 0u;
+
+        for (unsigned i = 1u; i < B110_PROF_SLOTS; ++i)
+        {
+            if (g_b110_prof[i].total_us
+                < g_b110_prof[smallest].total_us)
+            {
+                smallest = i;
+            }
+        }
+
+        /*
+         * Une nouvelle entree ne remplace une entree chaude que si
+         * ce probe individuel est deja significatif.
+         */
+        if ((uint64_t)elapsed_us <= g_b110_prof[smallest].total_us)
+        {
+            return;
+        }
+
+        slot = (int)smallest;
+        memset(&g_b110_prof[slot], 0, sizeof(g_b110_prof[slot]));
+    }
+
+    B110ProbeStat *s = &g_b110_prof[slot];
+
+    if (s->hits == 0u)
+    {
+        s->start_pc = start_pc;
+    }
+
+    s->end_pc = end_pc;
+    ++s->hits;
+    s->total_us += elapsed_us;
+
+    if (elapsed_us > s->max_us)
+    {
+        s->max_us = elapsed_us;
+    }
+}
+
+
+static int b110_get_rank(
+    unsigned rank,
+    B110ProbeStat *out
+)
+{
+    uint8_t used[B110_PROF_SLOTS];
+    memset(used, 0, sizeof(used));
+
+    for (unsigned r = 0u; r <= rank; ++r)
+    {
+        int best = -1;
+
+        for (unsigned i = 0u; i < B110_PROF_SLOTS; ++i)
+        {
+            if (used[i] || g_b110_prof[i].hits == 0u)
+            {
+                continue;
+            }
+
+            if (best < 0
+                || g_b110_prof[i].total_us
+                    > g_b110_prof[(unsigned)best].total_us)
+            {
+                best = (int)i;
+            }
+        }
+
+        if (best < 0)
+        {
+            return 0;
+        }
+
+        used[(unsigned)best] = 1u;
+
+        if (r == rank)
+        {
+            if (out)
+            {
+                *out = g_b110_prof[(unsigned)best];
+            }
+
+            return 1;
+        }
+    }
+
+    return 0;
+}
 
 
 /*
@@ -1414,6 +1639,205 @@ static uint32_t g_b87_delayed_latches = 0u;
 static uint32_t g_b87_first_flip_waits = 0u;
 static uint32_t g_b87_last_source_x = 0u;
 static uint32_t g_b87_last_source_y = 0u;
+
+/*
+ * ============================================================
+ * B97 - diagnostic framebuffer NON INVASIF
+ * ============================================================
+ *
+ * B95/B96 ont modifie le moment/la page de capture et ont degrade
+ * le menu. B97 revient strictement au rendu B94 et ne change plus
+ * la logique video. On observe seulement, a chaque GP1(05), un
+ * echantillon des pages x=0 et x=320 afin d'identifier laquelle
+ * contient reellement l'image complete/stable.
+ */
+static uint32_t g_b97_p0_nonzero = 0u;
+static uint32_t g_b97_p320_nonzero = 0u;
+static uint32_t g_b97_p0_hash = 0u;
+static uint32_t g_b97_p320_hash = 0u;
+static uint32_t g_b97_flip_samples = 0u;
+
+/*
+ * ============================================================
+ * B98 - selection anti-page-vide
+ * ============================================================
+ *
+ * B97 a montre que le jeu alterne GP1(05) entre x=0 et x=320
+ * alors qu'une des deux pages peut etre totalement vide dans
+ * notre VRAM logicielle. Dans ce cas uniquement, on refuse de
+ * latcher la page vide et on conserve la page framebuffer qui
+ * contient reellement l'image.
+ *
+ * Si les deux pages contiennent une image significative, on
+ * retombe strictement sur le comportement B94/B97 (page quittee).
+ */
+static uint32_t g_b98_force_p0 = 0u;
+static uint32_t g_b98_force_p320 = 0u;
+static uint32_t g_b98_normal_latch = 0u;
+
+/*
+ * ============================================================
+ * B102 - presenter le VRAI frontbuffer GP1
+ * ============================================================
+ *
+ * B101 a corrige GP0(E5): les deux pages x=0/x=320 sont enfin
+ * reellement dessinees. Le vieux comportement B87/B98, qui
+ * presentait la page PRECEDENTE, affiche maintenant le backbuffer
+ * pendant qu'il est en train d'etre redessine.
+ *
+ * B102 prend donc fm_gpu_display_x/y comme source normale.
+ * Un fallback n'est utilise que si la page demandee par GP1 est
+ * pratiquement vide alors que l'autre contient clairement l'image.
+ */
+static uint32_t g_b102_front_latches = 0u;
+static uint32_t g_b102_fallback_latches = 0u;
+
+/*
+ * B102 - etat reel du bridge menu B81.
+ * L'ancien test "menu init deja vu" restait vrai pour toujours,
+ * meme apres avoir quitte SU. On borne maintenant le bridge a la
+ * duree de vie reelle du menu.
+ */
+static uint32_t g_b102_menu_bridge_active = 0u;
+static uint32_t g_b102_menu_bridge_cleanup = 0u;
+
+
+/*
+ * ============================================================
+ * B103 - reconstruire l'image depuis les 2 pages VRAM
+ * ============================================================
+ *
+ * B101/B102 ont montre un cas tres clair :
+ *   - une page porte surtout le decor (beaucoup de pixels non noirs)
+ *   - l'autre porte surtout les elements de premier plan / UI
+ *
+ * Quand les densites sont tres differentes, on prend la page la
+ * plus dense comme fond et on superpose les pixels non noirs de la
+ * page la plus sparse. Si les deux pages ont une densite voisine,
+ * on garde le vrai frontbuffer GP1 de B102.
+ */
+static uint32_t g_b103_merge_count = 0u;
+static uint32_t g_b103_plain_count = 0u;
+static uint32_t g_b103_last_base_x = 0u;
+static uint32_t g_b103_last_overlay_x = 0u;
+static uint32_t g_b103_last_base_nz = 0u;
+static uint32_t g_b103_last_overlay_nz = 0u;
+
+/*
+ * ============================================================
+ * B103 - bridge clavier de saisie du nom
+ * ============================================================
+ *
+ * FUN_800304D0 est la routine de navigation du clavier de nom dans
+ * l'EXE FR. Elle consomme DAT_8009C728 / DAT_8009C72C.
+ *
+ * Le pad brut 70C continue d'etre injecte normalement, mais si le
+ * timing guest rate le front hote, on conserve aussi une impulsion
+ * jusqu'a l'entree de 800304D0, comme B81 le faisait pour le menu SU.
+ */
+static uint32_t g_b103_name_hits = 0u;
+static uint32_t g_b103_name_active_frames = 0u;
+static uint32_t g_b103_name_pending_mask = 0u;
+static uint32_t g_b103_name_cleanup_mask = 0u;
+static uint32_t g_b103_name_injected = 0u;
+static uint32_t g_b103_name_cleanups = 0u;
+
+
+/*
+ * ============================================================
+ * B104 - diagnostic / support affichage cine
+ * ============================================================
+ */
+static uint32_t g_b104_mdec_reset = 0u;
+static uint32_t g_b104_mdec_in = 0u;
+static uint32_t g_b104_mdec_out = 0u;
+static uint32_t g_b104_mdec_in_sync = 0u;
+static uint32_t g_b104_mdec_out_sync = 0u;
+
+static uint64_t g_b104_last_gp0 = 0u;
+static uint32_t g_b104_last_mode = 0xFFFFFFFFu;
+static uint32_t g_b104_rgb24_latches = 0u;
+
+
+/*
+ * ============================================================
+ * B105 - performance / cadence
+ * ============================================================
+ *
+ * Objectif :
+ *   - empecher une grosse tranche native de monopoliser une frame ;
+ *   - laisser davantage de marge au present 3DS ;
+ *   - mesurer le cout hors scheduler.
+ */
+static uint32_t g_b105_render_ms = 0u;
+static uint32_t g_b105_vblank_ms = 0u;
+static uint32_t g_b105_work_ms = 0u;
+static uint32_t g_b105_loop_ms = 0u;
+static uint32_t g_b105_probe_budget = 64000u;
+static uint32_t g_b105_slice_budget_ms = 8u;
+
+static uint32_t g_b106_pre_gfx_ms = 0u;
+static uint32_t g_b106_gfx_ms = 0u;
+static uint32_t g_b106_wait_ms = 0u;
+
+
+/*
+ * ============================================================
+ * B91 - fast path d'execution des overlays SU
+ * ============================================================
+ *
+ * B90 confirme que l'affichage B87 est revenu, mais le scheduler
+ * peut encore depasser largement le budget pendant le menu SU.
+ *
+ * Jusqu'ici chaque basic block dynamique 0x801xxxxx faisait :
+ *
+ *   fm_runtime_probe() -> miss -> fm_interp_run_block()
+ *
+ * puis revenait au dispatcher principal au premier branchement.
+ * L'overlay SU contient beaucoup de petits basic blocks : on paye
+ * donc le cout du probe/dispatcher encore et encore.
+ *
+ * B91 execute directement une rafale de basic blocks tant que le PC
+ * reste dans la fenetre overlay 0x80100000..0x801FFFFF. Des qu'un
+ * JAL/JR ressort vers le resident 0x800xxxxx, on rend immediatement
+ * la main au dispatcher natif. Aucun pixel ni etat de menu n'est
+ * fabrique ici : c'est toujours le vrai code MIPS de SU qui tourne.
+ */
+static uint32_t g_b91_fast_entries = 0u;
+static uint32_t g_b91_fast_blocks = 0u;
+static uint64_t g_b91_fast_instructions = 0u;
+static uint32_t g_b91_fast_time_yields = 0u;
+static uint32_t g_b91_fast_block_cap = 0u;
+static uint32_t g_b91_fast_exits_resident = 0u;
+static uint32_t g_b91_last_block_ms = 0u;
+static uint32_t g_b91_max_block_ms = 0u;
+static uint32_t g_b91_last_entry_pc = 0u;
+static uint32_t g_b91_last_exit_pc = 0u;
+
+/* Petit profiler du handoff qui depasse le plus. */
+static uint32_t g_b91_slow_handoff_ms = 0u;
+static uint32_t g_b91_slow_handoff_pc = 0u;
+
+
+/*
+ * ============================================================
+ * B93 - HLE natif du decodeur resident 800917F8
+ * ============================================================
+ *
+ * Le profiler B91/B92 a isole 800917F8 comme le plus gros handoff
+ * resident (79-90 ms). Le pseudo-C Ghidra montre un decodeur LZ
+ * tres simple suivi d'un filtre XOR sur 0x8800 demi-mots.
+ *
+ * B93 execute exactement cette routine directement sur les 2 Mio
+ * de RAM PS1 host, sans passer par des dizaines de milliers de
+ * load/store du code MIPS recompile.
+ */
+static uint32_t g_b93_917f8_hle_calls = 0u;
+static uint32_t g_b93_917f8_fallbacks = 0u;
+static uint32_t g_b93_917f8_last_ms = 0u;
+static uint32_t g_b93_917f8_max_ms = 0u;
+static uint32_t g_b93_917f8_last_out = 0u;
+
 
 static void fm_b79_submit_new_menu_packets(
     uint32_t begin,
@@ -2963,6 +3387,88 @@ static void fm_trace_dispatch(
         /*
          * B73 - chemin exact du menu SU.
          */
+        /*
+         * B104 - fonctions MDEC du PsyQ presentes dans l'EXE FR.
+         * On ne modifie rien ici : on compte uniquement les passages.
+         */
+        case 0x000910A8u:
+            ++g_b104_mdec_reset;
+            break;
+
+        case 0x00091198u:
+            ++g_b104_mdec_in;
+            break;
+
+        case 0x00091228u:
+            ++g_b104_mdec_out;
+            break;
+
+        case 0x000912B4u:
+            ++g_b104_mdec_in_sync;
+            break;
+
+        case 0x00091348u:
+            ++g_b104_mdec_out_sync;
+            break;
+
+
+        case 0x000304D0u:
+            /*
+             * B103 - entree de la routine de navigation du clavier.
+             * Nettoyer l'impulsion precedente, puis injecter celle
+             * capturee cote 3DS.
+             */
+            ++g_b103_name_hits;
+            g_b103_name_active_frames = 12u;
+
+            if (g_b103_name_cleanup_mask != 0u)
+            {
+                uint32_t mask = g_b103_name_cleanup_mask;
+
+                fm_memory_write_word(
+                    0x8009C710u,
+                    fm_memory_read_word(0x8009C710u) & ~mask
+                );
+
+                fm_memory_write_word(
+                    0x8009C72Cu,
+                    fm_memory_read_word(0x8009C72Cu) & ~mask
+                );
+
+                fm_memory_write_word(
+                    0x8009C728u,
+                    fm_memory_read_word(0x8009C728u) & ~mask
+                );
+
+                g_b103_name_cleanup_mask = 0u;
+                ++g_b103_name_cleanups;
+            }
+
+            if (g_b103_name_pending_mask != 0u)
+            {
+                uint32_t mask = g_b103_name_pending_mask;
+
+                fm_memory_write_word(
+                    0x8009C710u,
+                    fm_memory_read_word(0x8009C710u) | mask
+                );
+
+                fm_memory_write_word(
+                    0x8009C72Cu,
+                    fm_memory_read_word(0x8009C72Cu) | mask
+                );
+
+                fm_memory_write_word(
+                    0x8009C728u,
+                    fm_memory_read_word(0x8009C728u) | mask
+                );
+
+                g_b103_name_cleanup_mask = mask;
+                g_b103_name_pending_mask = 0u;
+                ++g_b103_name_injected;
+            }
+            break;
+
         case 0x0002D75Cu:
             ++g_b73_hit_state8;
             break;
@@ -2974,6 +3480,7 @@ static void fm_trace_dispatch(
         case 0x0018001Cu:
             ++g_b73_hit_menu_init;
             ++g_hit_ov18;
+            g_b102_menu_bridge_active = 1u;
             break;
 
         case 0x00180390u:
@@ -3297,6 +3804,38 @@ static void fm_trace_dispatch(
         case 0x00180E48u:
             ++g_b73_hit_menu_destroy;
             ++g_hit_ov18;
+
+            /*
+             * B102 : le bridge B81 etait specifique au menu SU.
+             * Ne laisser ni impulsion en attente ni bit injecte
+             * apres la destruction de l'overlay menu.
+             */
+            g_b102_menu_bridge_active = 0u;
+            g_b81_pending_mask = 0u;
+
+            if (g_b81_cleanup_mask != 0u)
+            {
+                uint32_t mask = g_b81_cleanup_mask;
+
+                fm_memory_write_word(
+                    0x8009C710u,
+                    fm_memory_read_word(0x8009C710u) & ~mask
+                );
+
+                fm_memory_write_word(
+                    0x8009C72Cu,
+                    fm_memory_read_word(0x8009C72Cu) & ~mask
+                );
+
+                fm_memory_write_word(
+                    0x8009C728u,
+                    fm_memory_read_word(0x8009C728u) & ~mask
+                );
+
+                g_b81_cleanup_mask = 0u;
+                ++g_b102_menu_bridge_cleanup;
+            }
+
             break;
 
 
@@ -5019,6 +5558,14 @@ static void fm_cd_hle_reset(void)
     g_vsync_hle_mode1_max = 0;
     g_vsync_host_epoch_ms = osGetTime();
     g_vsync_hle_last_mode = 0;
+
+    g_b108_vsync_last_sync_frame = 0u;
+    g_b108_vsync_sync_valid = 0u;
+    g_b108_vsync_mode0 = 0u;
+    g_b108_vsync_modeN = 0u;
+    g_b108_vsync_immediate = 0u;
+    g_b108_vsync_waited = 0u;
+    g_b108_vsync_last_target = 0u;
 
     g_str_intro_skip_pending = 1;
     g_str_intro_skip_count = 0;
@@ -7934,6 +8481,269 @@ static int fm_b62_try_gte_helper(
 }
 
 
+/*
+ * ============================================================
+ * B93 - traduction native exacte de FUN_800917F8
+ * ============================================================
+ *
+ * Ghidra :
+ *   - source compressee fixe : DAT_8009B488
+ *   - a0 = buffer destination
+ *   - commandes 00..EF : longueur = opcode + 1
+ *       distance == 0 -> litteraux
+ *       distance != 0 -> copie LZ depuis dst[-distance]
+ *   - F0 : repasse en mode litteral
+ *   - F1..FF + octet : distance = word - F0FF
+ *   - distance F00 : fin du flux
+ *   - puis dst16[i] ^= dst16[i - 4], i=4..87FF
+ *
+ * Retour 1 si le HLE a ete applique. En cas de garde invalide,
+ * retour 0 et le code ARM recompile original reste disponible.
+ */
+static int fm_b93_hle_800917f8(
+    CPUState *cpu,
+    uint8_t *ram,
+    size_t ram_size,
+    uint32_t *out_bytes
+)
+{
+    if (!cpu || !ram || ram_size < (2u * 1024u * 1024u))
+    {
+        return 0;
+    }
+
+    const uint32_t src_off = 0x0009B488u;
+    const uint32_t dst_off = cpu->gpr[4] & 0x001FFFFFu;
+    const size_t post_size = 0x11000u;
+
+    if (
+        src_off >= ram_size
+        ||
+        dst_off > ram_size
+        ||
+        post_size > ram_size - dst_off
+    )
+    {
+        return 0;
+    }
+
+    const uint8_t *src0 = ram + src_off;
+    const uint8_t *src_end = ram + ram_size;
+    const uint8_t *src = src0;
+
+    size_t produced = 0u;
+    uint32_t distance = 0u;
+
+    /*
+     * Premier passage : valider le flux sans modifier la RAM.
+     * Cela permet de retomber proprement sur le code original si
+     * le buffer source n'est pas celui attendu.
+     */
+    for (;;)
+    {
+        if (src >= src_end)
+        {
+            return 0;
+        }
+
+        uint32_t code = *src++;
+
+        if (code < 0xF0u)
+        {
+            size_t count = (size_t)code + 1u;
+
+            if (produced + count > post_size)
+            {
+                return 0;
+            }
+
+            if (distance == 0u)
+            {
+                if ((size_t)(src_end - src) < count)
+                {
+                    return 0;
+                }
+
+                src += count;
+            }
+            else
+            {
+                if ((size_t)distance > produced)
+                {
+                    return 0;
+                }
+            }
+
+            produced += count;
+        }
+        else
+        {
+            distance = 0u;
+
+            if (code != 0xF0u)
+            {
+                if (src >= src_end)
+                {
+                    return 0;
+                }
+
+                uint32_t packed =
+                    (code << 8)
+                    |
+                    (uint32_t)(*src++);
+
+                distance =
+                    packed
+                    -
+                    0xF0FFu;
+            }
+        }
+
+        if (distance == 0x0F00u)
+        {
+            break;
+        }
+    }
+
+    const uint8_t *src_after = src;
+    uint8_t *dst0 = ram + dst_off;
+    uint8_t *dst_end = dst0 + post_size;
+
+    /*
+     * Le flux compresse et la destination ne doivent pas se recouvrir.
+     * Ce n'est pas le cas normal du jeu ; si cela arrivait, garder le
+     * chemin original plutot que de risquer de changer la semantique.
+     */
+    if (
+        dst0 < src_after
+        &&
+        src0 < dst_end
+    )
+    {
+        return 0;
+    }
+
+    /* Deuxieme passage : decode natif. */
+    src = src0;
+    uint8_t *dst = dst0;
+    distance = 0u;
+
+    for (;;)
+    {
+        uint32_t code = *src++;
+
+        if (code < 0xF0u)
+        {
+            uint32_t count = code + 1u;
+
+            if (distance == 0u)
+            {
+                /*
+                 * Pas de recouvrement source/destination d'apres la
+                 * validation ci-dessus : memcpy est correct et rapide.
+                 */
+                memcpy(
+                    dst,
+                    src,
+                    count
+                );
+
+                src += count;
+                dst += count;
+            }
+            else
+            {
+                /*
+                 * Copie volontairement en avant : les backrefs LZ
+                 * peuvent reutiliser les octets tout juste produits.
+                 */
+                for (uint32_t i = 0u; i < count; ++i)
+                {
+                    *dst = dst[-(int32_t)distance];
+                    ++dst;
+                }
+            }
+        }
+        else
+        {
+            distance = 0u;
+
+            if (code != 0xF0u)
+            {
+                uint32_t packed =
+                    (code << 8)
+                    |
+                    (uint32_t)(*src++);
+
+                distance =
+                    packed
+                    -
+                    0xF0FFu;
+            }
+        }
+
+        if (distance == 0x0F00u)
+        {
+            break;
+        }
+    }
+
+    /*
+     * Filtre XOR final exact du pseudo-C : 0x8800 demi-mots,
+     * avec dependance sur la valeur deja reconstruite 4 mots avant.
+     */
+    if ((dst_off & 1u) == 0u)
+    {
+        uint16_t *p16 =
+            (uint16_t *)dst0;
+
+        for (uint32_t i = 4u; i < 0x8800u; ++i)
+        {
+            p16[i] =
+                (uint16_t)(
+                    p16[i]
+                    ^
+                    p16[i - 4u]
+                );
+        }
+    }
+    else
+    {
+        for (uint32_t i = 4u; i < 0x8800u; ++i)
+        {
+            size_t o = (size_t)i * 2u;
+            size_t p = (size_t)(i - 4u) * 2u;
+
+            uint16_t cur =
+                (uint16_t)dst0[o]
+                |
+                ((uint16_t)dst0[o + 1u] << 8);
+
+            uint16_t prev =
+                (uint16_t)dst0[p]
+                |
+                ((uint16_t)dst0[p + 1u] << 8);
+
+            cur ^= prev;
+
+            dst0[o] = (uint8_t)cur;
+            dst0[o + 1u] = (uint8_t)(cur >> 8);
+        }
+    }
+
+    if (out_bytes)
+    {
+        *out_bytes = (uint32_t)(dst - dst0);
+    }
+
+    /* Equivalent du JR $ra. */
+    cpu->pc = cpu->gpr[31];
+    cpu->gpr[0] = 0u;
+
+    return 1;
+}
+
+
 int main(void)
 {
     gfxInitDefault();
@@ -8210,6 +9020,26 @@ int main(void)
 
     while (aptMainLoop())
     {
+        uint64_t b105_loop_start_ms = osGetTime();
+
+        /*
+         * B93 : le vieux maximum B91 masquait les hotspots recurrents
+         * avec une grosse fonction de chargement vue une seule fois.
+         * Une fois le menu atteint, afficher un maximum glissant simple
+         * en remettant la valeur a zero toutes les ~4 secondes.
+         */
+        if (
+            frame != 0u
+            &&
+            (frame % 240u) == 0u
+            &&
+            g_b73_hit_menu_update != 0u
+        )
+        {
+            g_b91_slow_handoff_ms = 0u;
+            g_b91_slow_handoff_pc = 0u;
+        }
+
         hidScanInput();
 
         uint32_t held =
@@ -8282,7 +9112,7 @@ int main(void)
          *   Cross/Circle       = 0040/0020
          *   Triangle/Square    = 0010/0080
          */
-        if (g_b73_hit_menu_init != 0u)
+        if (g_b102_menu_bridge_active != 0u)
         {
             uint32_t b81_mask = 0u;
 
@@ -8346,6 +9176,47 @@ int main(void)
                 g_b81_pending_mask |= b81_mask;
                 ++g_b81_armed;
             }
+        }
+
+
+
+        /*
+         * ====================================================
+         * B103 - fronts hote pour le clavier du nom
+         * ====================================================
+         *
+         * FUN_800304D0 rafraichit g_b103_name_active_frames a
+         * chaque passage. Hors de cet ecran, ce bridge s'eteint
+         * tout seul et ne pollue pas le reste du jeu.
+         */
+        if (g_b103_name_active_frames != 0u)
+        {
+            uint32_t b103_mask = 0u;
+
+            if (down & KEY_DUP)    b103_mask |= 0x1000u;
+            if (down & KEY_DRIGHT) b103_mask |= 0x2000u;
+            if (down & KEY_DDOWN)  b103_mask |= 0x4000u;
+            if (down & KEY_DLEFT)  b103_mask |= 0x8000u;
+
+            if (down & KEY_B) b103_mask |= 0x0040u; /* Cross */
+            if (down & KEY_A) b103_mask |= 0x0020u; /* Circle */
+            if (down & KEY_X) b103_mask |= 0x0010u; /* Triangle */
+            if (down & KEY_Y) b103_mask |= 0x0080u; /* Square */
+
+            if (b103_mask != 0u)
+            {
+                g_b103_name_pending_mask |= b103_mask;
+            }
+
+            --g_b103_name_active_frames;
+        }
+        else
+        {
+            /*
+             * Aucun passage recent par le clavier : jeter une
+             * eventuelle impulsion jamais consommee.
+             */
+            g_b103_name_pending_mask = 0u;
         }
 
 
@@ -9270,7 +10141,7 @@ int main(void)
                  */
                 if (
                     handoff != 0u
-                    && (osGetTime() - b16_slice_start_ms) >= 14u
+                    && (osGetTime() - b16_slice_start_ms) >= g_b105_slice_budget_ms
                 )
                 {
                     ++g_b16_slice_yields;
@@ -9283,6 +10154,9 @@ int main(void)
                 uint32_t phys =
                     dispatch_address
                     & 0x1FFFFFFFu;
+
+                /* B91 : mesurer le cout reel du handoff courant. */
+                uint64_t b91_handoff_start_ms = osGetTime();
 
 
                 /*
@@ -10262,32 +11136,80 @@ int main(void)
 
 
                     /*
-                     * VSync(0) = prochain VBlank.
-                     * VSync(n) = n VBlanks.
+                     * B108 - Psy-Q VSync timing exact.
+                     *
+                     * VSync(0):
+                     *   target = current_vblank + 1
+                     *
+                     * VSync(n>=2):
+                     *   target = last_synchronized_vblank + n
+                     *
+                     * C'est une difference importante : l'ancien code
+                     * faisait toujours "frame + n", donc rajoutait des
+                     * VBlanks deja ecoules et ralentissait le jeu.
                      */
-                    uint32_t wait_frames =
-                        mode <= 0
-                            ? 1u
-                            : (uint32_t)mode;
-
-
                     if (!g_vsync_wait_active)
                     {
-                        g_vsync_wait_active =
-                            1;
+                        uint32_t target_frame;
 
+                        if (mode <= 0)
+                        {
+                            ++g_b108_vsync_mode0;
 
-                        g_vsync_wait_mode =
-                            mode;
+                            target_frame =
+                                frame
+                                +
+                                1u;
+                        }
+                        else
+                        {
+                            ++g_b108_vsync_modeN;
 
+                            /*
+                             * Premier VSync(n) observe : aligner le
+                             * compteur logiciel sur le VBlank courant,
+                             * comme apres l'initialisation Psy-Q.
+                             */
+                            if (!g_b108_vsync_sync_valid)
+                            {
+                                g_b108_vsync_last_sync_frame =
+                                    frame;
 
-                        g_vsync_wait_until_frame =
-                            frame
-                            +
-                            wait_frames;
+                                g_b108_vsync_sync_valid =
+                                    1u;
+                            }
 
+                            target_frame =
+                                g_b108_vsync_last_sync_frame
+                                +
+                                (uint32_t)mode;
+                        }
 
-                        ++g_vsync_hle_wait_calls;
+                        g_b108_vsync_last_target =
+                            target_frame;
+
+                        /*
+                         * Si le target est deja passe, le vrai Psy-Q
+                         * ne dort pas : la boucle while est deja finie.
+                         */
+                        if (frame >= target_frame)
+                        {
+                            ++g_b108_vsync_immediate;
+                        }
+                        else
+                        {
+                            g_vsync_wait_active =
+                                1;
+
+                            g_vsync_wait_mode =
+                                mode;
+
+                            g_vsync_wait_until_frame =
+                                target_frame;
+
+                            ++g_vsync_hle_wait_calls;
+                            ++g_b108_vsync_waited;
+                        }
                     }
 
 
@@ -10299,6 +11221,8 @@ int main(void)
                      * suivant, la même entrée sera retestée.
                      */
                     if (
+                        g_vsync_wait_active
+                        &&
                         frame
                         <
                         g_vsync_wait_until_frame
@@ -10338,6 +11262,12 @@ int main(void)
                         0x80092DB8u,
                         timer_now
                     );
+
+                    g_b108_vsync_last_sync_frame =
+                        frame;
+
+                    g_b108_vsync_sync_valid =
+                        1u;
 
 
                     /*
@@ -11653,19 +12583,255 @@ int main(void)
 
                 /*
                  * ============================================
+                 * B91 - SU OVERLAY FAST PATH
+                 * ============================================
+                 *
+                 * Les overlays charges en 0x801xxxxx ne font pas
+                 * partie du gros objet ARM resident. Eviter le probe
+                 * natif rate pour chaque basic block et enchainer
+                 * directement plusieurs blocks MIPS.
+                 *
+                 * Des que le PC ressort de 0x801xxxxx (appel d'une
+                 * fonction residente, BIOS, etc.), on revient au
+                 * dispatcher normal afin de reutiliser le code ARM/HLE.
+                 */
+                if (
+                    phys >= 0x00100000u
+                    &&
+                    phys < 0x00200000u
+                )
+                {
+                    const uint32_t b91_block_limit = 512u;
+                    uint32_t b91_blocks = 0u;
+                    int b91_time_yield = 0;
+
+                    ++g_b91_fast_entries;
+                    g_b91_last_entry_pc = dispatch_address;
+
+                    while (
+                        game_running
+                        &&
+                        b91_blocks < b91_block_limit
+                    )
+                    {
+                        uint32_t fast_phys =
+                            cpu->pc & 0x1FFFFFFFu;
+
+                        if (
+                            fast_phys < 0x00100000u
+                            ||
+                            fast_phys >= 0x00200000u
+                        )
+                        {
+                            ++g_b91_fast_exits_resident;
+                            break;
+                        }
+
+                        /*
+                         * Meme budget global de 14 ms que B87, mais
+                         * verifie entre basic blocks de l'overlay.
+                         */
+                        if (
+                            b91_blocks != 0u
+                            &&
+                            (osGetTime() - b16_slice_start_ms) >= g_b105_slice_budget_ms
+                        )
+                        {
+                            ++g_b91_fast_time_yields;
+                            b91_time_yield = 1;
+                            break;
+                        }
+
+                        uint64_t b91_block_start_ms = osGetTime();
+
+                        interp =
+                            fm_interp_run_block(
+                                cpu,
+                                8192u
+                            );
+
+                        uint32_t b91_block_ms =
+                            (uint32_t)(
+                                osGetTime() - b91_block_start_ms
+                            );
+
+                        g_b91_last_block_ms = b91_block_ms;
+                        if (b91_block_ms > g_b91_max_block_ms)
+                        {
+                            g_b91_max_block_ms = b91_block_ms;
+                        }
+
+                        interp_ran = 1;
+                        ++b91_blocks;
+                        ++g_b91_fast_blocks;
+                        g_b91_fast_instructions +=
+                            (uint64_t)interp.instructions;
+
+                        if (
+                            interp.reason == FM_INTERP_BLOCK_DONE
+                        )
+                        {
+                            static_miss = 0;
+                            continue;
+                        }
+
+                        if (
+                            interp.reason == FM_INTERP_BUDGET
+                        )
+                        {
+                            static_miss = 0;
+                            ++g_b84_budget_continues;
+                            continue;
+                        }
+
+                        /* Meme politique d'erreur que le fallback B84. */
+                        g_b65_stop_code = 4u;
+                        g_b65_stop_pc = interp.pc;
+                        g_b65_stop_ra = cpu->gpr[31];
+                        g_b65_stop_detail = interp.instruction;
+
+                        static_miss = 0;
+                        game_running = 0;
+                        break;
+                    }
+
+                    g_b91_last_exit_pc = cpu->pc;
+
+                    if (
+                        b91_blocks >= b91_block_limit
+                        &&
+                        (cpu->pc & 0x1FFFFFFFu) >= 0x00100000u
+                        &&
+                        (cpu->pc & 0x1FFFFFFFu) < 0x00200000u
+                    )
+                    {
+                        ++g_b91_fast_block_cap;
+                    }
+
+                    {
+                        uint32_t b91_handoff_ms =
+                            (uint32_t)(osGetTime() - b91_handoff_start_ms);
+
+                        if (b91_handoff_ms > g_b91_slow_handoff_ms)
+                        {
+                            g_b91_slow_handoff_ms = b91_handoff_ms;
+                            g_b91_slow_handoff_pc = dispatch_address;
+                        }
+                    }
+
+                    if (!game_running)
+                    {
+                        break;
+                    }
+
+                    if (b91_time_yield)
+                    {
+                        ++g_b16_slice_yields;
+                        ++g_b84_budget_yields;
+                        break;
+                    }
+
+                    continue;
+                }
+
+
+                /*
+                 * ============================================
+                 * B93 - 800917F8 natif
+                 * ============================================
+                 *
+                 * B92 descendait le scheduler moyen, mais le profil
+                 * montrait encore ~79 ms dans cette routine precise.
+                 * Elle est maintenant remplacee par sa traduction C
+                 * directe sur la RAM PS1.
+                 */
+                if (phys == 0x000917F8u)
+                {
+                    uint64_t b93_start_ms =
+                        osGetTime();
+
+                    uint32_t b93_out = 0u;
+
+                    if (
+                        fm_b93_hle_800917f8(
+                            cpu,
+                            ram,
+                            2u * 1024u * 1024u,
+                            &b93_out
+                        )
+                    )
+                    {
+                        uint32_t elapsed =
+                            (uint32_t)(
+                                osGetTime()
+                                -
+                                b93_start_ms
+                            );
+
+                        ++g_b93_917f8_hle_calls;
+                        g_b93_917f8_last_ms = elapsed;
+                        g_b93_917f8_last_out = b93_out;
+
+                        if (elapsed > g_b93_917f8_max_ms)
+                        {
+                            g_b93_917f8_max_ms = elapsed;
+                        }
+
+                        static_miss = 0;
+                        continue;
+                    }
+
+                    ++g_b93_917f8_fallbacks;
+                }
+
+
+                /*
+                 * ============================================
                  * ARM recompiled code
                  * ============================================
                  */
-                probe =
-                    fm_runtime_probe(
-                        cpu,
+                {
+                    uint64_t b110_probe_start_tick =
+                        svcGetSystemTick();
+
+                    probe =
+                        fm_runtime_probe(
+                            cpu,
+                            dispatch_address,
+                            g_b105_probe_budget
+                        );
+
+                    uint64_t b110_probe_ticks =
+                        svcGetSystemTick()
+                        -
+                        b110_probe_start_tick;
+
+                    uint32_t b110_probe_us =
+                        (uint32_t)(
+                            b110_probe_ticks
+                            /
+                            (SYSCLOCK_ARM11 / 1000000u)
+                        );
+
+                    b110_profile_probe(
                         dispatch_address,
-                        g_direct2df_active
-                            ? 64000u
-                            : 250000u
+                        probe.pc,
+                        b110_probe_us
                     );
+                }
 
                 probe_ran = 1;
+
+                {
+                    uint32_t b91_handoff_ms =
+                        (uint32_t)(osGetTime() - b91_handoff_start_ms);
+
+                    if (b91_handoff_ms > g_b91_slow_handoff_ms)
+                    {
+                        g_b91_slow_handoff_ms = b91_handoff_ms;
+                        g_b91_slow_handoff_pc = dispatch_address;
+                    }
+                }
 
 
                 /*
@@ -11897,6 +13063,9 @@ int main(void)
         uint64_t render_start =
             svcGetSystemTick();
 
+        uint64_t b105_render_start_ms =
+            osGetTime();
+
         /*
          * B15 FIRST IMAGE :
          * scanner periodiquement plusieurs pages VRAM et afficher la
@@ -11994,6 +13163,10 @@ int main(void)
             unsigned current_x = fm_gpu_display_x();
             unsigned current_y = fm_gpu_display_y();
 
+            uint32_t b104_mode = fm_gpu_display_mode_raw();
+            int b104_24bit = fm_gpu_display_24bit();
+            uint64_t b104_gp0 = fm_gpu_gp0_count();
+
             if (current_x > 704u)
             {
                 current_x = 0u;
@@ -12026,11 +13199,90 @@ int main(void)
                     !=
                     g_b85_last_latched_guest_frame;
 
+            /*
+             * B98 : mesurer les deux pages AU MOMENT OU main.c
+             * observe un changement GP1(05). B97 a montre un cas
+             * tres net : P0 presque pleine, P320 totalement vide.
+             *
+             * On garde aussi les hashes B97 pour le diagnostic.
+             */
+            uint32_t p0_nz = g_b97_p0_nonzero;
+            uint32_t p320_nz = g_b97_p320_nonzero;
+
+            if (display_changed)
+            {
+                p0_nz = 0u;
+                p320_nz = 0u;
+
+                uint32_t p0_hash = 2166136261u;
+                uint32_t p320_hash = 2166136261u;
+
+                for (unsigned py = 0u; py < 240u; py += 4u)
+                {
+                    const uint16_t *row0 = vram + py * 1024u;
+                    const uint16_t *row320 = row0 + 320u;
+
+                    for (unsigned px = 0u; px < 320u; px += 4u)
+                    {
+                        uint16_t a = row0[px];
+                        uint16_t b = row320[px];
+
+                        if ((a & 0x7FFFu) != 0u) ++p0_nz;
+                        if ((b & 0x7FFFu) != 0u) ++p320_nz;
+
+                        p0_hash ^= (uint32_t)a;
+                        p0_hash *= 16777619u;
+
+                        p320_hash ^= (uint32_t)b;
+                        p320_hash *= 16777619u;
+                    }
+                }
+
+                g_b97_p0_nonzero = p0_nz;
+                g_b97_p320_nonzero = p320_nz;
+                g_b97_p0_hash = p0_hash;
+                g_b97_p320_hash = p320_hash;
+                ++g_b97_flip_samples;
+            }
+
             unsigned latch_x = current_x;
             unsigned latch_y = current_y;
             int need_latch = 0;
 
-            if (g_direct2df_active)
+            int b103_merge = 0;
+            unsigned b103_base_x = current_x;
+            unsigned b103_overlay_x = current_x;
+
+            int b104_decode24 = 0;
+
+            /*
+             * B104 : GP1(08) bit4 = affichage 24-bit.
+             * Dans ce mode le framebuffer est un flux RGB888 compact
+             * de 3 octets/pixel dans la VRAM, pas du BGR555.
+             *
+             * Refaire un latch lorsque le flux GP0 bouge, le mode change,
+             * la page change, ou au premier affichage.
+             */
+            if (
+                b104_24bit
+                &&
+                (
+                    !g_b84_latch_valid
+                    ||
+                    display_changed
+                    ||
+                    b104_gp0 != g_b104_last_gp0
+                    ||
+                    b104_mode != g_b104_last_mode
+                )
+            )
+            {
+                latch_x = current_x;
+                latch_y = current_y;
+                need_latch = 1;
+                b104_decode24 = 1;
+            }
+            else if (g_direct2df_active)
             {
                 if (
                     !g_b84_latch_valid
@@ -12043,20 +13295,100 @@ int main(void)
             }
             else if (display_changed)
             {
-                if (have_previous)
+                uint32_t current_nz =
+                    current_x == 320u
+                        ? p320_nz
+                        : p0_nz;
+
+                uint32_t other_nz =
+                    current_x == 320u
+                        ? p0_nz
+                        : p320_nz;
+
+                /*
+                 * B103 :
+                 * si une page est beaucoup plus dense que l'autre,
+                 * le jeu se retrouve actuellement separe en deux
+                 * "couches" dans notre VRAM :
+                 *
+                 *   dense  = decor / fond
+                 *   sparse = UI / texte / curseur
+                 *
+                 * On reconstruit temporairement l'image complete.
+                 *
+                 * Le seuil 3/4 evite le merge quand les deux pages
+                 * sont de vrais framebuffers complets.
+                 */
+                if (
+                    p0_nz >= 512u
+                    &&
+                    p320_nz >= 64u
+                    &&
+                    (
+                        p0_nz * 4u < p320_nz * 3u
+                        ||
+                        p320_nz * 4u < p0_nz * 3u
+                    )
+                )
                 {
-                    /*
-                     * Important : capturer la page QUITTEE,
-                     * pas celle que GP1 vient juste de selectionner.
-                     */
-                    latch_x = previous_x;
-                    latch_y = previous_y;
+                    if (p0_nz > p320_nz)
+                    {
+                        b103_base_x = 0u;
+                        b103_overlay_x = 320u;
+                        g_b103_last_base_nz = p0_nz;
+                        g_b103_last_overlay_nz = p320_nz;
+                    }
+                    else
+                    {
+                        b103_base_x = 320u;
+                        b103_overlay_x = 0u;
+                        g_b103_last_base_nz = p320_nz;
+                        g_b103_last_overlay_nz = p0_nz;
+                    }
+
+                    b103_merge = 1;
+                    latch_x = b103_base_x;
+                    latch_y = current_y;
                     need_latch = 1;
-                    ++g_b87_delayed_latches;
+
+                    g_b103_last_base_x = b103_base_x;
+                    g_b103_last_overlay_x = b103_overlay_x;
+                    ++g_b103_merge_count;
                 }
                 else
                 {
-                    ++g_b87_first_flip_waits;
+                    /*
+                     * Vrai double-buffer classique : presenter GP1.
+                     */
+                    latch_x = current_x;
+                    latch_y = current_y;
+
+                    if (current_nz > 64u)
+                    {
+                        need_latch = 1;
+                        ++g_b102_front_latches;
+                    }
+                    else if (other_nz >= 512u)
+                    {
+                        latch_x =
+                            current_x == 320u
+                                ? 0u
+                                : 320u;
+
+                        latch_y = 0u;
+                        need_latch = 1;
+                        ++g_b102_fallback_latches;
+                    }
+                    else if (!g_b84_latch_valid)
+                    {
+                        need_latch = 1;
+                        ++g_b102_front_latches;
+                    }
+
+                    if (need_latch)
+                    {
+                        ++g_b103_plain_count;
+                    }
                 }
             }
 
@@ -12086,11 +13418,84 @@ int main(void)
                         +
                         py * 320u;
 
-                    memcpy(
-                        dst_row,
-                        src_row,
-                        320u * sizeof(uint16_t)
-                    );
+                    if (b104_decode24)
+                    {
+                        /*
+                         * PS1 24-bit display :
+                         * R,G,B bytes packed back-to-back, 3 bytes/pixel.
+                         * X is still expressed in 16-bit VRAM words.
+                         */
+                        unsigned safe_x = latch_x;
+                        if (safe_x > 544u)
+                        {
+                            safe_x = 0u;
+                        }
+
+                        const uint8_t *row_bytes =
+                            ((const uint8_t *)vram)
+                            +
+                            sy * 2048u
+                            +
+                            safe_x * 2u;
+
+                        for (unsigned px = 0u; px < 320u; ++px)
+                        {
+                            const uint8_t *p =
+                                row_bytes
+                                +
+                                px * 3u;
+
+                            uint16_t r5 = (uint16_t)(p[0] >> 3);
+                            uint16_t g5 = (uint16_t)(p[1] >> 3);
+                            uint16_t b5 = (uint16_t)(p[2] >> 3);
+
+                            dst_row[px] =
+                                r5
+                                |
+                                (uint16_t)(g5 << 5)
+                                |
+                                (uint16_t)(b5 << 10);
+                        }
+                    }
+                    else if (!b103_merge)
+                    {
+                        memcpy(
+                            dst_row,
+                            src_row,
+                            320u * sizeof(uint16_t)
+                        );
+                    }
+                    else
+                    {
+                        const uint16_t *base_row =
+                            vram
+                            +
+                            sy * 1024u
+                            +
+                            b103_base_x;
+
+                        const uint16_t *overlay_row =
+                            vram
+                            +
+                            sy * 1024u
+                            +
+                            b103_overlay_x;
+
+                        /*
+                         * Noir = transparent uniquement pour ce merge
+                         * de bring-up. Les elements utiles vus en B101
+                         * (texte, cadres, curseur) sont non noirs.
+                         */
+                        for (unsigned px = 0u; px < 320u; ++px)
+                        {
+                            uint16_t over = overlay_row[px];
+
+                            dst_row[px] =
+                                (over & 0x7FFFu) != 0u
+                                    ? over
+                                    : base_row[px];
+                        }
+                    }
                 }
 
                 g_b84_latch_x = latch_x;
@@ -12108,7 +13513,15 @@ int main(void)
                 g_b84_latch_valid = 1u;
                 g_b86_present_dirty = 1u;
                 ++g_b84_latch_count;
+
+                if (b104_decode24)
+                {
+                    ++g_b104_rgb24_latches;
+                }
             }
+
+            g_b104_last_gp0 = b104_gp0;
+            g_b104_last_mode = b104_mode;
         }
 
 
@@ -12134,11 +13547,25 @@ int main(void)
                 display_y = 0u;
             }
 
-            if (
-                g_b84_latch_valid
-                &&
-                g_b86_present_dirty
-            )
+            /*
+             * ========================================================
+             * B94 - coherence du double-buffer 3DS
+             * ========================================================
+             *
+             * B86/B87 sautait fm_present_rgb555() lorsque l'image PS1
+             * n'avait pas change, MAIS la boucle fait quand meme ensuite
+             * gfxSwapBuffers(). Sur 3DS cela alterne alors entre deux
+             * framebuffers host, dont un seul vient d'etre rafraichi :
+             * resultat = image correcte / ancienne image / correcte / ...
+             * donc clignotement visible.
+             *
+             * Tant que nous utilisons gfxSwapBuffers() a chaque VBlank,
+             * il faut alimenter LE backbuffer courant a chaque frame host.
+             * On reutilise le composite PS1 deja latche : aucune logique
+             * du jeu n'est rejouee, on ne fait que recopier l'image stable
+             * dans le framebuffer 3DS qui va devenir visible.
+             */
+            if (g_b84_latch_valid)
             {
                 fm_present_rgb555(
                     composite,
@@ -12146,11 +13573,19 @@ int main(void)
                     crop
                 );
 
-                g_b86_present_dirty = 0u;
+                if (g_b86_present_dirty)
+                {
+                    g_b86_present_dirty = 0u;
+                }
+
                 ++g_b86_present_count;
             }
-            else if (!g_b84_latch_valid)
+            else
             {
+                /*
+                 * Avant le premier latch stable, garder le comportement
+                 * historique afin que le boot reste visible.
+                 */
                 fm_present_rgb555(
                     vram + display_y * 1024u + display_x,
                     1024,
@@ -12158,15 +13593,6 @@ int main(void)
                 );
 
                 ++g_b86_present_count;
-            }
-            else
-            {
-                /*
-                 * Le framebuffer 3DS conserve son contenu.
-                 * Pas besoin de reconvertir 76 800 pixels si l'image
-                 * PS1 stable n'a pas change.
-                 */
-                ++g_b86_skipped_presents;
             }
         }
         else if (
@@ -12266,6 +13692,9 @@ int main(void)
             svcGetSystemTick()
             - render_start;
 
+        g_b105_render_ms =
+            (uint32_t)(osGetTime() - b105_render_start_ms);
+
         ++render_count;
 
 
@@ -12287,9 +13716,7 @@ int main(void)
          */
 
         if (
-            frame % 480 == 0
-            || pad != old_pad
-            || down
+            frame % 120u == 0u
         )
         {
             printf(
@@ -12335,7 +13762,39 @@ int main(void)
              * donnees necessaires pour identifier l'opcode qui
              * bloque 801680F4.
              */
-            printf("BUILD B90-B87-RECOVERY\n");
+            int b100_off_x = 0;
+            int b100_off_y = 0;
+            int b100_area_x1 = 0;
+            int b100_area_y1 = 0;
+            int b100_area_x2 = 0;
+            int b100_area_y2 = 0;
+            uint32_t b100_e3 = 0u;
+            uint32_t b100_e4 = 0u;
+            uint32_t b100_e5 = 0u;
+            uint32_t b100_gp105 = 0u;
+            uint32_t b100_last_e3 = 0u;
+            uint32_t b100_last_e4 = 0u;
+            uint32_t b100_last_e5 = 0u;
+            uint32_t b100_last_gp105 = 0u;
+
+            fm_gpu_b100_env_get(
+                &b100_off_x,
+                &b100_off_y,
+                &b100_area_x1,
+                &b100_area_y1,
+                &b100_area_x2,
+                &b100_area_y2,
+                &b100_e3,
+                &b100_e4,
+                &b100_e5,
+                &b100_gp105,
+                &b100_last_e3,
+                &b100_last_e4,
+                &b100_last_e5,
+                &b100_last_gp105
+            );
+
+            printf("BUILD B110-PROBE-PROFILE\n");
 
             printf(
                 "RUN:%c CPU:%08lX RA:%08lX F:%lu I:%s\n",
@@ -12364,6 +13823,33 @@ int main(void)
             );
 
             printf(
+                "B91 E/B:%lu/%lu I:%llu Y/C:%lu/%lu\n",
+                (unsigned long)g_b91_fast_entries,
+                (unsigned long)g_b91_fast_blocks,
+                (unsigned long long)g_b91_fast_instructions,
+                (unsigned long)g_b91_fast_time_yields,
+                (unsigned long)g_b91_fast_block_cap
+            );
+
+            printf(
+                "B91 blk:%lu max:%lu slow:%lu@%08lX out:%lu\n",
+                (unsigned long)g_b91_last_block_ms,
+                (unsigned long)g_b91_max_block_ms,
+                (unsigned long)g_b91_slow_handoff_ms,
+                (unsigned long)g_b91_slow_handoff_pc,
+                (unsigned long)g_b91_fast_exits_resident
+            );
+
+            printf(
+                "B93 HLE917:%lu fb:%lu last/max:%lu/%lu out:%lu\n",
+                (unsigned long)g_b93_917f8_hle_calls,
+                (unsigned long)g_b93_917f8_fallbacks,
+                (unsigned long)g_b93_917f8_last_ms,
+                (unsigned long)g_b93_917f8_max_ms,
+                (unsigned long)g_b93_917f8_last_out
+            );
+
+            printf(
                 "FLIP now:%lu,%lu src:%lu,%lu changes:%lu\n",
                 (unsigned long)fm_gpu_display_x(),
                 (unsigned long)fm_gpu_display_y(),
@@ -12371,6 +13857,190 @@ int main(void)
                 (unsigned long)g_b87_last_source_y,
                 (unsigned long)g_b86_display_changes
             );
+
+            printf(
+                "B97 P0:%lu/%08lX P320:%lu/%08lX S:%lu\n",
+                (unsigned long)g_b97_p0_nonzero,
+                (unsigned long)g_b97_p0_hash,
+                (unsigned long)g_b97_p320_nonzero,
+                (unsigned long)g_b97_p320_hash,
+                (unsigned long)g_b97_flip_samples
+            );
+
+            printf(
+                "B98 F0:%lu F320:%lu normal:%lu\n",
+                (unsigned long)g_b98_force_p0,
+                (unsigned long)g_b98_force_p320,
+                (unsigned long)g_b98_normal_latch
+            );
+
+            printf(
+                "B100 O:%d,%d A:%d,%d-%d,%d E:%lu/%lu/%lu G:%lu\n",
+                b100_off_x,
+                b100_off_y,
+                b100_area_x1,
+                b100_area_y1,
+                b100_area_x2,
+                b100_area_y2,
+                (unsigned long)b100_e3,
+                (unsigned long)b100_e4,
+                (unsigned long)b100_e5,
+                (unsigned long)b100_gp105
+            );
+
+            printf(
+                "B100 RAW %08lX %08lX %08lX %08lX\n",
+                (unsigned long)b100_last_e3,
+                (unsigned long)b100_last_e4,
+                (unsigned long)b100_last_e5,
+                (unsigned long)b100_last_gp105
+            );
+
+            printf(
+                "B101 OFSDRAW:%lu\n",
+                (unsigned long)fm_gpu_b101_offset_draw_packets()
+            );
+
+            printf(
+                "B102 FRONT/FALL:%lu/%lu MB:%lu/%lu\n",
+                (unsigned long)g_b102_front_latches,
+                (unsigned long)g_b102_fallback_latches,
+                (unsigned long)g_b102_menu_bridge_active,
+                (unsigned long)g_b102_menu_bridge_cleanup
+            );
+
+            printf(
+                "B102 PAD R/H/E/P:%04lX/%04lX/%04lX/%04lX K:%u/%u\n",
+                (unsigned long)(fm_memory_read_word(0x8009C70Cu) & 0xFFFFu),
+                (unsigned long)(fm_memory_read_word(0x8009C710u) & 0xFFFFu),
+                (unsigned long)(fm_memory_read_word(0x8009C72Cu) & 0xFFFFu),
+                (unsigned long)(fm_memory_read_word(0x8009C728u) & 0xFFFFu),
+                (unsigned)fm_memory_read_byte(0x8009C66Cu),
+                (unsigned)fm_memory_read_byte(0x8009C670u)
+            );
+
+            printf(
+                "B103 MIX/P:%lu/%lu X:%lu+%lu NZ:%lu/%lu\n",
+                (unsigned long)g_b103_merge_count,
+                (unsigned long)g_b103_plain_count,
+                (unsigned long)g_b103_last_base_x,
+                (unsigned long)g_b103_last_overlay_x,
+                (unsigned long)g_b103_last_base_nz,
+                (unsigned long)g_b103_last_overlay_nz
+            );
+
+            printf(
+                "B103 NAME h/i/c/p:%lu/%lu/%lu/%08lX\n",
+                (unsigned long)g_b103_name_hits,
+                (unsigned long)g_b103_name_injected,
+                (unsigned long)g_b103_name_cleanups,
+                (unsigned long)g_b103_name_pending_mask
+            );
+
+            printf(
+                "B104 MODE:%02lX 24:%u W:%u L:%lu\n",
+                (unsigned long)fm_gpu_display_mode_raw(),
+                (unsigned)fm_gpu_display_24bit(),
+                (unsigned)fm_gpu_display_width(),
+                (unsigned long)g_b104_rgb24_latches
+            );
+
+            printf(
+                "B104 MDEC R/I/O/IS/OS:%lu/%lu/%lu/%lu/%lu\n",
+                (unsigned long)g_b104_mdec_reset,
+                (unsigned long)g_b104_mdec_in,
+                (unsigned long)g_b104_mdec_out,
+                (unsigned long)g_b104_mdec_in_sync,
+                (unsigned long)g_b104_mdec_out_sync
+            );
+
+            printf(
+                "B105 PERF S/R/V/W/L:%lu/%lu/%lu/%lu/%lu\n",
+                (unsigned long)g_b16_slice_last_ms,
+                (unsigned long)g_b105_render_ms,
+                (unsigned long)g_b105_vblank_ms,
+                (unsigned long)g_b105_work_ms,
+                (unsigned long)g_b105_loop_ms
+            );
+
+            printf(
+                "B105 BUD ms/op:%lu/%lu\n",
+                (unsigned long)g_b105_slice_budget_ms,
+                (unsigned long)g_b105_probe_budget
+            );
+
+            printf(
+                "B106 PRE/GFX/WAIT:%lu/%lu/%lu\n",
+                (unsigned long)g_b106_pre_gfx_ms,
+                (unsigned long)g_b106_gfx_ms,
+                (unsigned long)g_b106_wait_ms
+            );
+
+            printf(
+                "B108 VS 0/N/I/W:%lu/%lu/%lu/%lu L/T:%lu/%lu\n",
+                (unsigned long)g_b108_vsync_mode0,
+                (unsigned long)g_b108_vsync_modeN,
+                (unsigned long)g_b108_vsync_immediate,
+                (unsigned long)g_b108_vsync_waited,
+                (unsigned long)g_b108_vsync_last_sync_frame,
+                (unsigned long)g_b108_vsync_last_target
+            );
+
+            {
+                B110ProbeStat p0 = {0};
+                B110ProbeStat p1 = {0};
+                B110ProbeStat p2 = {0};
+
+                b110_get_rank(0u, &p0);
+                b110_get_rank(1u, &p1);
+                b110_get_rank(2u, &p2);
+
+                printf(
+                    "B110 LOOP A/M/>20/>33:%lu/%lu/%lu/%lu\n",
+                    (unsigned long)(
+                        g_b110_loop_samples
+                            ? (g_b110_loop_sum_ms / g_b110_loop_samples)
+                            : 0u
+                    ),
+                    (unsigned long)g_b110_loop_max_ms,
+                    (unsigned long)g_b110_loop_over20,
+                    (unsigned long)g_b110_loop_over33
+                );
+
+                printf(
+                    "B110 MAX %luus %08lX>%08lX\n",
+                    (unsigned long)g_b110_probe_max_us,
+                    (unsigned long)g_b110_probe_max_start,
+                    (unsigned long)g_b110_probe_max_end
+                );
+
+                printf(
+                    "B110 P0 %08lX>%08lX h:%lu t:%lluus m:%lu\n",
+                    (unsigned long)p0.start_pc,
+                    (unsigned long)p0.end_pc,
+                    (unsigned long)p0.hits,
+                    (unsigned long long)p0.total_us,
+                    (unsigned long)p0.max_us
+                );
+
+                printf(
+                    "B110 P1 %08lX>%08lX h:%lu t:%lluus m:%lu\n",
+                    (unsigned long)p1.start_pc,
+                    (unsigned long)p1.end_pc,
+                    (unsigned long)p1.hits,
+                    (unsigned long long)p1.total_us,
+                    (unsigned long)p1.max_us
+                );
+
+                printf(
+                    "B110 P2 %08lX>%08lX h:%lu t:%lluus m:%lu\n",
+                    (unsigned long)p2.start_pc,
+                    (unsigned long)p2.end_pc,
+                    (unsigned long)p2.hits,
+                    (unsigned long long)p2.total_us,
+                    (unsigned long)p2.max_us
+                );
+            }
 
             printf(
                 "DELAY latch/wait:%lu/%lu total:%lu\n",
@@ -13430,10 +15100,22 @@ int main(void)
              */
             if (game_running)
             {
-                fm_execute_guest_vblank_callback(
-                    cpu,
-                    frame
-                );
+                {
+                    uint64_t b105_vblank_start_ms =
+                        osGetTime();
+
+                    fm_execute_guest_vblank_callback(
+                        cpu,
+                        frame
+                    );
+
+                    g_b105_vblank_ms =
+                        (uint32_t)(
+                            osGetTime()
+                            -
+                            b105_vblank_start_ms
+                        );
+                }
 
                 /*
                  * B72 - conserver le dernier etat input guest non nul.
@@ -13678,9 +15360,119 @@ int main(void)
         }
 
 
-        gfxFlushBuffers();
-        gfxSwapBuffers();
-        gspWaitForVBlank();
+        /*
+         * ====================================================
+         * B106 - PRESENT TOP ONLY
+         * ====================================================
+         *
+         * consoleInit(GFX_BOTTOM) met l'ecran bas en simple-buffer.
+         * Il n'a donc aucune raison d'etre flush + presente a chaque
+         * frame de jeu. L'ancien gfxFlushBuffers()/gfxSwapBuffers()
+         * traitait TOP + BOTTOM systematiquement.
+         *
+         * On ne flush/presente maintenant que le framebuffer TOP.
+         * Les printf de la console continuent a flush le bottom quand
+         * le texte change.
+         */
+        g_b106_pre_gfx_ms =
+            (uint32_t)(
+                osGetTime()
+                -
+                b105_loop_start_ms
+            );
+
+        {
+            uint64_t b106_gfx_start_ms =
+                osGetTime();
+
+            uint8_t *top_fb =
+                gfxGetFramebuffer(
+                    GFX_TOP,
+                    GFX_LEFT,
+                    NULL,
+                    NULL
+                );
+
+            unsigned top_bpp =
+                gspGetBytesPerPixel(
+                    gfxGetScreenFormat(
+                        GFX_TOP
+                    )
+                );
+
+            GSPGPU_FlushDataCache(
+                top_fb,
+                (u32)(
+                    GSP_SCREEN_WIDTH
+                    *
+                    GSP_SCREEN_HEIGHT_TOP
+                    *
+                    top_bpp
+                )
+            );
+
+            gfxScreenSwapBuffers(
+                GFX_TOP,
+                false
+            );
+
+            g_b106_gfx_ms =
+                (uint32_t)(
+                    osGetTime()
+                    -
+                    b106_gfx_start_ms
+                );
+        }
+
+        g_b105_work_ms =
+            (uint32_t)(
+                osGetTime()
+                -
+                b105_loop_start_ms
+            );
+
+        {
+            uint64_t b106_wait_start_ms =
+                osGetTime();
+
+            gspWaitForVBlank();
+
+            g_b106_wait_ms =
+                (uint32_t)(
+                    osGetTime()
+                    -
+                    b106_wait_start_ms
+                );
+        }
+
+        g_b105_loop_ms =
+            (uint32_t)(
+                osGetTime()
+                -
+                b105_loop_start_ms
+            );
+
+
+        g_b110_loop_sum_ms +=
+            g_b105_loop_ms;
+
+        ++g_b110_loop_samples;
+
+        if (g_b105_loop_ms > g_b110_loop_max_ms)
+        {
+            g_b110_loop_max_ms =
+                g_b105_loop_ms;
+        }
+
+        if (g_b105_loop_ms > 20u)
+        {
+            ++g_b110_loop_over20;
+        }
+
+        if (g_b105_loop_ms > 33u)
+        {
+            ++g_b110_loop_over33;
+        }
     }
 
 

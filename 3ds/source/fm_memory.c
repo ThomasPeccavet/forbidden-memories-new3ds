@@ -2534,6 +2534,33 @@ uint8_t fm_memory_read_byte(
         );
 
     /*
+     * ========================================================
+     * B92 - hot RAM fast path
+     * ========================================================
+     *
+     * La RAM PS1 et les MMIO ne se chevauchent pas. Les fonctions
+     * recompilees (notamment 0x800917F8) font des milliers de petits
+     * acces RAM ; eviter fm_ram_ptr() + tous les tests MMIO sur ce
+     * chemin reduit fortement le cout sans changer la semantique.
+     */
+    if (
+        g_ram
+        &&
+        g_ram_size != 0u
+        &&
+        phys < PSX_RAM_MIRROR_END
+    )
+    {
+        uint32_t offset =
+            phys & 0x001FFFFFu;
+
+        if (offset < g_ram_size)
+        {
+            return g_ram[offset];
+        }
+    }
+
+    /*
      * --------------------------------------------------------
      * RAM
      * --------------------------------------------------------
@@ -2672,6 +2699,25 @@ void fm_memory_write_byte(
             addr
         );
 
+    /* B92 - hot RAM fast path. */
+    if (
+        g_ram
+        &&
+        g_ram_size != 0u
+        &&
+        phys < PSX_RAM_MIRROR_END
+    )
+    {
+        uint32_t offset =
+            phys & 0x001FFFFFu;
+
+        if (offset < g_ram_size)
+        {
+            g_ram[offset] = value;
+            return;
+        }
+    }
+
     /*
      * --------------------------------------------------------
      * RAM
@@ -2786,6 +2832,27 @@ uint16_t fm_memory_read_half(
         fm_phys(
             addr
         );
+
+    /* B92 - hot RAM fast path before timer/DMA decoding. */
+    if (
+        g_ram
+        &&
+        g_ram_size >= 2u
+        &&
+        phys < PSX_RAM_MIRROR_END
+    )
+    {
+        uint32_t offset =
+            phys & 0x001FFFFFu;
+
+        if (offset <= g_ram_size - 2u)
+        {
+            return
+                (uint16_t)g_ram[offset + 0u]
+                |
+                ((uint16_t)g_ram[offset + 1u] << 8);
+        }
+    }
 
     /*
      * --------------------------------------------------------
@@ -2998,6 +3065,26 @@ void fm_memory_write_half(
             addr
         );
 
+    /* B92 - hot RAM fast path before timer/DMA decoding. */
+    if (
+        g_ram
+        &&
+        g_ram_size >= 2u
+        &&
+        phys < PSX_RAM_MIRROR_END
+    )
+    {
+        uint32_t offset =
+            phys & 0x001FFFFFu;
+
+        if (offset <= g_ram_size - 2u)
+        {
+            g_ram[offset + 0u] = (uint8_t)value;
+            g_ram[offset + 1u] = (uint8_t)(value >> 8);
+            return;
+        }
+    }
+
     /*
      * --------------------------------------------------------
      * I_STAT
@@ -3193,6 +3280,31 @@ uint32_t fm_memory_read_word(
         fm_phys(
             addr
         );
+
+    /* B92 - hot RAM fast path before all MMIO tests. */
+    if (
+        g_ram
+        &&
+        g_ram_size >= 4u
+        &&
+        phys < PSX_RAM_MIRROR_END
+    )
+    {
+        uint32_t offset =
+            phys & 0x001FFFFFu;
+
+        if (offset <= g_ram_size - 4u)
+        {
+            return
+                (uint32_t)g_ram[offset + 0u]
+                |
+                ((uint32_t)g_ram[offset + 1u] << 8)
+                |
+                ((uint32_t)g_ram[offset + 2u] << 16)
+                |
+                ((uint32_t)g_ram[offset + 3u] << 24);
+        }
+    }
 
     /*
      * --------------------------------------------------------
@@ -3432,6 +3544,28 @@ void fm_memory_write_word(
         fm_phys(
             addr
         );
+
+    /* B92 - hot RAM fast path before all MMIO tests. */
+    if (
+        g_ram
+        &&
+        g_ram_size >= 4u
+        &&
+        phys < PSX_RAM_MIRROR_END
+    )
+    {
+        uint32_t offset =
+            phys & 0x001FFFFFu;
+
+        if (offset <= g_ram_size - 4u)
+        {
+            g_ram[offset + 0u] = (uint8_t)value;
+            g_ram[offset + 1u] = (uint8_t)(value >> 8);
+            g_ram[offset + 2u] = (uint8_t)(value >> 16);
+            g_ram[offset + 3u] = (uint8_t)(value >> 24);
+            return;
+        }
+    }
 
     /*
      * --------------------------------------------------------

@@ -1,14 +1,13 @@
 # ============================================================
 # Forbidden Memories - New Nintendo 3DS
+# B107 RELEASE/O3
 # ============================================================
 
 ifeq ($(strip $(DEVKITARM)),)
 $(error Set DEVKITARM to the devkitPro devkitARM directory)
 endif
 
-
 include $(DEVKITARM)/3ds_rules
-
 
 .DEFAULT_GOAL := all
 
@@ -18,9 +17,7 @@ include $(DEVKITARM)/3ds_rules
 # ============================================================
 
 PSXRECOMP_ROOT ?= ../work/upstream-psxrecomp
-
 RUNTIME := $(PSXRECOMP_ROOT)/runtime
-
 
 GENERATED_COMBINED := \
 	../work/arm-generated-objects/fm-generated-combined.o
@@ -31,7 +28,6 @@ GENERATED_COMBINED := \
 # ============================================================
 
 TARGET := fm-new3ds
-
 BUILD := build
 
 
@@ -47,13 +43,27 @@ ARCH := \
 
 
 # ============================================================
-# Compiler
+# Compiler - B107 release profile
 # ============================================================
+#
+# Previous project profile:
+#   -O2 -g
+#
+# B107:
+#   -O3
+#   -DNDEBUG
+#   -DPSX_NO_DEBUG_TOOLS
+#   -fomit-frame-pointer
+#
+# No -ffast-math: the PS1/GTE arithmetic must remain conservative.
+#
 
 CFLAGS := \
 	-std=gnu11 \
-	-O2 \
-	-g \
+	-O3 \
+	-DNDEBUG \
+	-DPSX_NO_DEBUG_TOOLS \
+	-fomit-frame-pointer \
 	-Wall \
 	-Wextra \
 	-mword-relocations \
@@ -92,7 +102,6 @@ OBJECTS := \
 
 
 .PHONY: all clean
-
 
 all: $(TARGET).3dsx
 
