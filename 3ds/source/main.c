@@ -4780,12 +4780,33 @@ static int fm_repair_ot_sentinel(
     g_ot_fix_last_before = before;
 
     /*
-     * Un bucket OT pur ne contient aucun mot GP0 : top byte = 0.
-     * On garde cette convention et fixe uniquement son lien 24 bits.
+     * B116 - IMPORTANT: do not erase a valid bucket-0 primitive chain.
+     *
+     * The old bring-up repair replaced ANY org[0] != 00FFFFFF with the
+     * terminator. That is destructive: after AddPrim(), bucket 0 may
+     * legitimately point at a packet and must survive GsSortOt.
+     *
+     * The corruption originally observed was much narrower: the OTC
+     * chain continued one word below the OT, i.e. org[0] pointed to
+     * org-4 instead of terminating. Repair ONLY that exact stale OTC
+     * link, and only when the header byte is zero (pure OT bucket).
      */
-    if (before != 0x00FFFFFFu)
+    uint32_t before_count = before >> 24;
+    uint32_t before_next24 = before & 0x00FFFFFFu;
+    uint32_t stale_next24 =
+        (org_phys - 4u) & 0x00FFFFFFu;
+
+    if (
+        before_count == 0u
+        &&
+        before_next24 == stale_next24
+    )
     {
-        after = 0x00FFFFFFu;
+        after =
+            (before & 0xFF000000u)
+            |
+            0x00FFFFFFu;
+
         cpu->write_word(org, after);
         ++g_ot_fix_changed;
     }
@@ -14048,7 +14069,7 @@ int main(void)
                 &b100_last_gp105
             );
 
-            printf("BUILD B115-OT-PHASE-PROFILE\n");
+            printf("BUILD B116-SAFE-OT-REPAIR\n");
 
             printf(
                 "RUN:%c CPU:%08lX RA:%08lX F:%lu I:%s\n",
