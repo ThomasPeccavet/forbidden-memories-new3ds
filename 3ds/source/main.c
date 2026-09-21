@@ -14299,7 +14299,7 @@ int main(void)
                 &b100_last_gp105
             );
 
-            printf("BUILD B120-DMA2-FASTPATH\n");
+            printf("BUILD B121-EMPTY-OT-RUN-SKIP\n");
 
             printf(
                 "RUN:%c CPU:%08lX RA:%08lX F:%lu I:%s\n",
@@ -14695,6 +14695,14 @@ int main(void)
                     (unsigned long)b118_dma.dma2_last_empty_ot_nodes,
                     (unsigned long)b118_dma.dma2_max_empty_ot_nodes,
                     (unsigned long)b118_dma.dma2_visit_wrap_clears
+                );
+
+                printf(
+                    "B121 skip runs:%lu nodes:%llu last/max:%lu/%lu\n",
+                    (unsigned long)b118_dma.dma2_empty_fast_runs,
+                    (unsigned long long)b118_dma.dma2_empty_fast_nodes,
+                    (unsigned long)b118_dma.dma2_empty_fast_last,
+                    (unsigned long)b118_dma.dma2_empty_fast_max
                 );
             }
 

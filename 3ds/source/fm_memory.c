@@ -194,6 +194,15 @@ static uint64_t g_dma2_linked_total_ms = 0u;
 static uint32_t g_dma2_linked_over20 = 0u;
 static uint32_t g_dma2_linked_over33 = 0u;
 
+/*
+ * B121 - collapse canonical empty ordering-table runs.
+ * These nodes carry no GP0 words and simply point to addr-4.
+ */
+static uint32_t g_dma2_empty_fast_runs = 0u;
+static uint64_t g_dma2_empty_fast_nodes = 0u;
+static uint32_t g_dma2_empty_fast_last = 0u;
+static uint32_t g_dma2_empty_fast_max = 0u;
+
 static uint32_t g_dma6_transfer_count = 0;
 static uint64_t g_dma6_word_count = 0;
 
@@ -1381,6 +1390,14 @@ static int fm_dma2_linked_list(void)
 {
     uint64_t b120_start_ms = osGetTime();
 
+    /*
+     * Skipped canonical ranges are remembered so a later malformed link
+     * back into one of them is still detected as a cycle.
+     */
+    uint32_t b121_skip_lo[16];
+    uint32_t b121_skip_hi[16];
+    uint32_t b121_skip_ranges = 0u;
+
     uint32_t addr =
         g_dma2_madr
         &
@@ -1433,6 +1450,35 @@ static int fm_dma2_linked_list(void)
         ++node
     )
     {
+        for (uint32_t r = 0u; r < b121_skip_ranges; ++r)
+        {
+            if (
+                addr >= b121_skip_lo[r]
+                &&
+                addr <= b121_skip_hi[r]
+            )
+            {
+                ++g_dma2_cycle_abort_count;
+                g_dma2_last_cycle_addr = addr;
+
+                if (g_dma2_last_nodes > g_dma2_max_nodes)
+                {
+                    g_dma2_max_nodes = g_dma2_last_nodes;
+                }
+
+                if (g_dma2_last_words > g_dma2_max_words)
+                {
+                    g_dma2_max_words = g_dma2_last_words;
+                }
+
+                fm_dma2_linked_profile_finish(
+                    b120_start_ms
+                );
+
+                return 1;
+            }
+        }
+
         uint32_t visit_index = addr >> 2;
 
         if (
@@ -1492,6 +1538,116 @@ static int fm_dma2_linked_list(void)
         )
         {
             ++g_dma2_last_empty_ot_nodes;
+
+            /*
+             * B121 fast path.
+             *
+             * Once an empty OT bucket points exactly to addr-4, consume
+             * the following identical buckets in a tight loop. They have
+             * no GPU payload, so there is no observable GPU work to do.
+             *
+             * We leave the first non-canonical node for the normal loop,
+             * preserving packet ordering and terminator handling exactly.
+             */
+            if (b121_skip_ranges < 16u)
+            {
+                uint32_t scan_addr =
+                    next
+                    &
+                    0x001FFFFCu;
+
+                uint32_t first_skipped =
+                    scan_addr;
+
+                uint32_t last_skipped =
+                    scan_addr;
+
+                uint32_t extra =
+                    0u;
+
+                while (
+                    (node + 1u + extra) < 65536u
+                )
+                {
+                    uint32_t scan_header =
+                        fm_dma_ram_read_word(
+                            scan_addr
+                        );
+
+                    uint32_t scan_count =
+                        scan_header
+                        >>
+                        24;
+
+                    uint32_t scan_next =
+                        scan_header
+                        &
+                        0x00FFFFFFu;
+
+                    if (
+                        scan_count != 0u
+                        ||
+                        scan_next
+                        !=
+                        ((scan_addr - 4u) & 0x00FFFFFFu)
+                    )
+                    {
+                        break;
+                    }
+
+                    last_skipped =
+                        scan_addr;
+
+                    ++extra;
+
+                    scan_addr =
+                        scan_next
+                        &
+                        0x001FFFFCu;
+                }
+
+                if (extra != 0u)
+                {
+                    b121_skip_lo[b121_skip_ranges] =
+                        last_skipped;
+
+                    b121_skip_hi[b121_skip_ranges] =
+                        first_skipped;
+
+                    ++b121_skip_ranges;
+
+                    g_dma2_last_nodes +=
+                        extra;
+
+                    g_dma2_last_empty_ot_nodes +=
+                        extra;
+
+                    ++g_dma2_empty_fast_runs;
+
+                    g_dma2_empty_fast_nodes +=
+                        extra;
+
+                    g_dma2_empty_fast_last =
+                        extra;
+
+                    if (extra > g_dma2_empty_fast_max)
+                    {
+                        g_dma2_empty_fast_max =
+                            extra;
+                    }
+
+                    node +=
+                        extra;
+
+                    addr =
+                        scan_addr;
+
+                    g_dma2_madr =
+                        addr;
+
+                    continue;
+                }
+            }
         }
 
         uint32_t command_addr =
@@ -2681,6 +2837,18 @@ void fm_memory_init(
         0u;
 
     g_dma2_linked_over33 =
+        0u;
+
+    g_dma2_empty_fast_runs =
+        0u;
+
+    g_dma2_empty_fast_nodes =
+        0u;
+
+    g_dma2_empty_fast_last =
+        0u;
+
+    g_dma2_empty_fast_max =
         0u;
 
     g_dma6_transfer_count =
@@ -4334,6 +4502,18 @@ void fm_memory_dma_debug(
 
     out->dma2_linked_over33 =
         g_dma2_linked_over33;
+
+    out->dma2_empty_fast_runs =
+        g_dma2_empty_fast_runs;
+
+    out->dma2_empty_fast_nodes =
+        g_dma2_empty_fast_nodes;
+
+    out->dma2_empty_fast_last =
+        g_dma2_empty_fast_last;
+
+    out->dma2_empty_fast_max =
+        g_dma2_empty_fast_max;
 
 
     out->dma6_transfer_count =
