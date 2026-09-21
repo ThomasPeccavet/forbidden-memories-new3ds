@@ -1774,7 +1774,7 @@ static uint32_t g_b105_vblank_ms = 0u;
 static uint32_t g_b105_work_ms = 0u;
 static uint32_t g_b105_loop_ms = 0u;
 static uint32_t g_b105_probe_budget = 64000u;
-static uint32_t g_b105_slice_budget_ms = 8u;
+static uint32_t g_b105_slice_budget_ms = 12u;
 
 static uint32_t g_b106_pre_gfx_ms = 0u;
 static uint32_t g_b106_gfx_ms = 0u;
@@ -12631,6 +12631,35 @@ int main(void)
                          * Meme budget global de 14 ms que B87, mais
                          * verifie entre basic blocks de l'overlay.
                          */
+                        /*
+                         * B111 - le test temporel par basic block etait
+                         * inutilement couteux dans le fast path. Les
+                         * blocks overlay sont courts; en release on ne
+                         * relit l'horloge qu'une fois tous les 16 blocks.
+                         * Les builds de diagnostic gardent la mesure fine.
+                         */
+#if defined(NDEBUG)
+                        if (
+                            b91_blocks != 0u
+                            &&
+                            (b91_blocks & 15u) == 0u
+                            &&
+                            (osGetTime() - b16_slice_start_ms) >= g_b105_slice_budget_ms
+                        )
+                        {
+                            ++g_b91_fast_time_yields;
+                            b91_time_yield = 1;
+                            break;
+                        }
+
+                        interp =
+                            fm_interp_run_block(
+                                cpu,
+                                8192u
+                            );
+
+                        g_b91_last_block_ms = 0u;
+#else
                         if (
                             b91_blocks != 0u
                             &&
@@ -12660,6 +12689,7 @@ int main(void)
                         {
                             g_b91_max_block_ms = b91_block_ms;
                         }
+#endif
 
                         interp_ran = 1;
                         ++b91_blocks;
@@ -12790,6 +12820,27 @@ int main(void)
                  * ARM recompiled code
                  * ============================================
                  */
+                /*
+                 * B111 - release hot path.
+                 *
+                 * B110 etait encore actif meme avec -DNDEBUG : chaque
+                 * passage natif lisait le timer deux fois et mettait a
+                 * jour le classement du profiler. Sur un dispatcher qui
+                 * peut faire des milliers de handoffs, le diagnostic
+                 * devenait lui-meme une charge permanente.
+                 *
+                 * En release on execute donc directement le probe.
+                 * Le profiler complet reste disponible dans un build
+                 * sans NDEBUG.
+                 */
+#if defined(NDEBUG)
+                probe =
+                    fm_runtime_probe(
+                        cpu,
+                        dispatch_address,
+                        g_b105_probe_budget
+                    );
+#else
                 {
                     uint64_t b110_probe_start_tick =
                         svcGetSystemTick();
@@ -12819,6 +12870,7 @@ int main(void)
                         b110_probe_us
                     );
                 }
+#endif
 
                 probe_ran = 1;
 
@@ -13794,7 +13846,7 @@ int main(void)
                 &b100_last_gp105
             );
 
-            printf("BUILD B110-PROBE-PROFILE\n");
+            printf("BUILD B111-RELEASE-HOTPATH\n");
 
             printf(
                 "RUN:%c CPU:%08lX RA:%08lX F:%lu I:%s\n",
