@@ -14299,7 +14299,7 @@ int main(void)
                 &b100_last_gp105
             );
 
-            printf("BUILD B119-C-GSSORTOT\n");
+            printf("BUILD B120-DMA2-FASTPATH\n");
 
             printf(
                 "RUN:%c CPU:%08lX RA:%08lX F:%lu I:%s\n",
@@ -14674,6 +14674,27 @@ int main(void)
                     (unsigned long)b118_dma.dma2_cycle_abort_count,
                     (unsigned long)b118_dma.dma2_last_cycle_addr,
                     (unsigned long)b118_dma.dma2_chcr
+                );
+
+                printf(
+                    "B120 DMA ms L/M:%lu/%lu avg:%llu >20/>33:%lu/%lu\n",
+                    (unsigned long)b118_dma.dma2_linked_last_ms,
+                    (unsigned long)b118_dma.dma2_linked_max_ms,
+                    (unsigned long long)(
+                        b118_dma.dma2_linked_transfer_count
+                            ? b118_dma.dma2_linked_total_ms
+                                / b118_dma.dma2_linked_transfer_count
+                            : 0u
+                    ),
+                    (unsigned long)b118_dma.dma2_linked_over20,
+                    (unsigned long)b118_dma.dma2_linked_over33
+                );
+
+                printf(
+                    "B120 empty OT:%lu/%lu wraps:%lu\n",
+                    (unsigned long)b118_dma.dma2_last_empty_ot_nodes,
+                    (unsigned long)b118_dma.dma2_max_empty_ot_nodes,
+                    (unsigned long)b118_dma.dma2_visit_wrap_clears
                 );
             }
 

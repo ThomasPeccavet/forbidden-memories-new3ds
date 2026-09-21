@@ -1,6 +1,7 @@
 #include "fm_memory.h"
 #include "fm_gpu.h"
 
+#include <3ds.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -164,19 +165,34 @@ static uint32_t g_dma2_last_words = 0;
 static uint32_t g_dma2_last_first_header = 0;
 
 /*
- * B118 - O(1) cycle guard for DMA2 linked lists.
+ * B120 - DMA2 hot path.
  *
- * PS1 RAM contains 2 MiB / 4 = 524288 aligned word addresses.
- * One bit per possible node costs 64 KiB and avoids the pathological
- * 65536-node re-walk when a corrupted OT forms a cycle.
+ * B119 captures show ~4300 linked-list nodes for only ~400-500 GP0
+ * words. B118 used a 64 KiB memset before EVERY list just for cycle
+ * detection. Replace that with a generation table: no per-list clear,
+ * O(1) cycle lookup, and only one byte touched per visited RAM word.
+ *
+ * The table is 2 MiB / 4 = 524288 bytes. It is cleared only when the
+ * 8-bit generation wraps (once every 255 linked-list transfers).
  */
-#define FM_DMA2_VISIT_WORDS (((PSX_RAM_SIZE / 4u) + 31u) / 32u)
-static uint32_t g_dma2_visit_bits[FM_DMA2_VISIT_WORDS];
+#define FM_DMA2_VISIT_SLOTS (PSX_RAM_SIZE / 4u)
+static uint8_t g_dma2_visit_epoch[FM_DMA2_VISIT_SLOTS];
+static uint8_t g_dma2_visit_generation = 1u;
+static uint32_t g_dma2_visit_wrap_clears = 0u;
 
 static uint32_t g_dma2_cycle_abort_count = 0;
 static uint32_t g_dma2_last_cycle_addr = 0;
 static uint32_t g_dma2_max_nodes = 0;
 static uint32_t g_dma2_max_words = 0;
+
+static uint32_t g_dma2_last_empty_ot_nodes = 0u;
+static uint32_t g_dma2_max_empty_ot_nodes = 0u;
+
+static uint32_t g_dma2_linked_last_ms = 0u;
+static uint32_t g_dma2_linked_max_ms = 0u;
+static uint64_t g_dma2_linked_total_ms = 0u;
+static uint32_t g_dma2_linked_over20 = 0u;
+static uint32_t g_dma2_linked_over33 = 0u;
 
 static uint32_t g_dma6_transfer_count = 0;
 static uint64_t g_dma6_word_count = 0;
@@ -1140,14 +1156,12 @@ static uint32_t fm_dma_ram_read_word(
         return 0;
     }
 
-    return
-        (uint32_t)g_ram[offset + 0]
-        |
-        ((uint32_t)g_ram[offset + 1] << 8)
-        |
-        ((uint32_t)g_ram[offset + 2] << 16)
-        |
-        ((uint32_t)g_ram[offset + 3] << 24);
+    /*
+     * B120: alias-safe native 32-bit load after -O3.
+     */
+    uint32_t value;
+    memcpy(&value, g_ram + offset, sizeof(value));
+    return value;
 }
 
 
@@ -1173,29 +1187,10 @@ static void fm_dma_ram_write_word(
         return;
     }
 
-    g_ram[offset + 0] =
-        (uint8_t)value;
-
-    g_ram[offset + 1] =
-        (uint8_t)(
-            value
-            >>
-            8
-        );
-
-    g_ram[offset + 2] =
-        (uint8_t)(
-            value
-            >>
-            16
-        );
-
-    g_ram[offset + 3] =
-        (uint8_t)(
-            value
-            >>
-            24
-        );
+    /*
+     * B120: alias-safe native 32-bit store after -O3.
+     */
+    memcpy(g_ram + offset, &value, sizeof(value));
 }
 
 
@@ -1352,8 +1347,40 @@ static void fm_dma2_complete(void)
  * 0x00FFFFFF est la valeur de fin la plus classique.
  */
 
+static void fm_dma2_linked_profile_finish(uint64_t start_ms)
+{
+    uint32_t elapsed_ms =
+        (uint32_t)(osGetTime() - start_ms);
+
+    g_dma2_linked_last_ms = elapsed_ms;
+    g_dma2_linked_total_ms += elapsed_ms;
+
+    if (elapsed_ms > g_dma2_linked_max_ms)
+    {
+        g_dma2_linked_max_ms = elapsed_ms;
+    }
+
+    if (elapsed_ms > 20u)
+    {
+        ++g_dma2_linked_over20;
+    }
+
+    if (elapsed_ms > 33u)
+    {
+        ++g_dma2_linked_over33;
+    }
+
+    if (g_dma2_last_empty_ot_nodes > g_dma2_max_empty_ot_nodes)
+    {
+        g_dma2_max_empty_ot_nodes = g_dma2_last_empty_ot_nodes;
+    }
+}
+
+
 static int fm_dma2_linked_list(void)
 {
+    uint64_t b120_start_ms = osGetTime();
+
     uint32_t addr =
         g_dma2_madr
         &
@@ -1372,6 +1399,9 @@ static int fm_dma2_linked_list(void)
     g_dma2_last_words =
         0;
 
+    g_dma2_last_empty_ot_nodes =
+        0;
+
     g_dma2_last_first_header =
         fm_dma_ram_read_word(
             addr
@@ -1380,15 +1410,21 @@ static int fm_dma2_linked_list(void)
     ++g_dma2_linked_transfer_count;
 
     /*
-     * 64 KiB clear once per DMA2 list is bounded and dramatically cheaper
-     * than accidentally walking/rasterizing tens of thousands of repeated
-     * nodes. Valid OTs are unaffected.
+     * B120: advance the visit generation instead of clearing 64 KiB.
      */
-    memset(
-        g_dma2_visit_bits,
-        0,
-        sizeof(g_dma2_visit_bits)
-    );
+    ++g_dma2_visit_generation;
+
+    if (g_dma2_visit_generation == 0u)
+    {
+        memset(
+            g_dma2_visit_epoch,
+            0,
+            sizeof(g_dma2_visit_epoch)
+        );
+
+        g_dma2_visit_generation = 1u;
+        ++g_dma2_visit_wrap_clears;
+    }
 
 
     for (
@@ -1398,10 +1434,12 @@ static int fm_dma2_linked_list(void)
     )
     {
         uint32_t visit_index = addr >> 2;
-        uint32_t visit_word = visit_index >> 5;
-        uint32_t visit_mask = 1u << (visit_index & 31u);
 
-        if (g_dma2_visit_bits[visit_word] & visit_mask)
+        if (
+            g_dma2_visit_epoch[visit_index]
+            ==
+            g_dma2_visit_generation
+        )
         {
             ++g_dma2_cycle_abort_count;
             g_dma2_last_cycle_addr = addr;
@@ -1416,15 +1454,15 @@ static int fm_dma2_linked_list(void)
                 g_dma2_max_words = g_dma2_last_words;
             }
 
-            /*
-             * A cyclic GPU linked list is invalid. Complete the emulated DMA
-             * after the unique prefix instead of leaving CHCR busy forever.
-             * This changes only corrupted-list behavior.
-             */
+            fm_dma2_linked_profile_finish(
+                b120_start_ms
+            );
+
             return 1;
         }
 
-        g_dma2_visit_bits[visit_word] |= visit_mask;
+        g_dma2_visit_epoch[visit_index] =
+            g_dma2_visit_generation;
 
         uint32_t header =
             fm_dma_ram_read_word(
@@ -1444,6 +1482,17 @@ static int fm_dma2_linked_list(void)
             header
             &
             0x00FFFFFFu;
+
+        if (
+            count == 0u
+            &&
+            next
+            ==
+            ((addr - 4u) & 0x00FFFFFFu)
+        )
+        {
+            ++g_dma2_last_empty_ot_nodes;
+        }
 
         uint32_t command_addr =
             (
@@ -1508,6 +1557,10 @@ static int fm_dma2_linked_list(void)
                 g_dma2_max_words = g_dma2_last_words;
             }
 
+            fm_dma2_linked_profile_finish(
+                b120_start_ms
+            );
+
             return 1;
         }
 
@@ -1537,6 +1590,10 @@ static int fm_dma2_linked_list(void)
 
     ++g_dma2_cycle_abort_count;
     g_dma2_last_cycle_addr = addr;
+
+    fm_dma2_linked_profile_finish(
+        b120_start_ms
+    );
 
     return 1;
 }
@@ -2582,10 +2639,16 @@ void fm_memory_init(
         0;
 
     memset(
-        g_dma2_visit_bits,
+        g_dma2_visit_epoch,
         0,
-        sizeof(g_dma2_visit_bits)
+        sizeof(g_dma2_visit_epoch)
     );
+
+    g_dma2_visit_generation =
+        1u;
+
+    g_dma2_visit_wrap_clears =
+        0u;
 
     g_dma2_cycle_abort_count =
         0;
@@ -2598,6 +2661,27 @@ void fm_memory_init(
 
     g_dma2_max_words =
         0;
+
+    g_dma2_last_empty_ot_nodes =
+        0u;
+
+    g_dma2_max_empty_ot_nodes =
+        0u;
+
+    g_dma2_linked_last_ms =
+        0u;
+
+    g_dma2_linked_max_ms =
+        0u;
+
+    g_dma2_linked_total_ms =
+        0u;
+
+    g_dma2_linked_over20 =
+        0u;
+
+    g_dma2_linked_over33 =
+        0u;
 
     g_dma6_transfer_count =
         0;
@@ -4226,6 +4310,30 @@ void fm_memory_dma_debug(
 
     out->dma2_max_words =
         g_dma2_max_words;
+
+    out->dma2_visit_wrap_clears =
+        g_dma2_visit_wrap_clears;
+
+    out->dma2_last_empty_ot_nodes =
+        g_dma2_last_empty_ot_nodes;
+
+    out->dma2_max_empty_ot_nodes =
+        g_dma2_max_empty_ot_nodes;
+
+    out->dma2_linked_last_ms =
+        g_dma2_linked_last_ms;
+
+    out->dma2_linked_max_ms =
+        g_dma2_linked_max_ms;
+
+    out->dma2_linked_total_ms =
+        g_dma2_linked_total_ms;
+
+    out->dma2_linked_over20 =
+        g_dma2_linked_over20;
+
+    out->dma2_linked_over33 =
+        g_dma2_linked_over33;
 
 
     out->dma6_transfer_count =
