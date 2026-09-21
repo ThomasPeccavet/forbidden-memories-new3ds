@@ -78,6 +78,16 @@ static uint64_t g_b122_exec_ticks = 0u;
 static uint64_t g_b122_upload_ticks = 0u;
 static uint64_t g_b122_upload_words = 0u;
 
+/*
+ * B124 - native 3DS fast path for variable-size textured rectangles
+ * (GP0 64h..67h). This bypasses the generic multi-target renderer when
+ * scale=1, no wide mirror and nearest filtering are active.
+ */
+static uint32_t g_b124_rect_hits = 0u;
+static uint32_t g_b124_rect_fallbacks = 0u;
+static uint64_t g_b124_rect_pixels = 0u;
+static uint64_t g_b124_rect_texels = 0u;
+
 static uint64_t b122_ticks_to_us(uint64_t ticks)
 {
     return
@@ -547,6 +557,390 @@ static void set_primitive_state(
         g_mask_set,
         g_mask_check
     );
+}
+
+
+/*
+ * ============================================================
+ * B124 - fast textured rectangle for native 3DS mode
+ * ============================================================
+ */
+static inline uint16_t b124_vram_get(int x, int y)
+{
+    return
+        g_vram[
+            ((unsigned)y & 511u) * 1024u
+            +
+            ((unsigned)x & 1023u)
+        ];
+}
+
+
+static inline uint16_t b124_blend(
+    uint16_t back,
+    uint16_t front,
+    int mode
+)
+{
+    int br = (back >> 0) & 31;
+    int bg = (back >> 5) & 31;
+    int bb = (back >> 10) & 31;
+    int fr = (front >> 0) & 31;
+    int fg = (front >> 5) & 31;
+    int fb = (front >> 10) & 31;
+    int r, g, b;
+
+    switch (mode & 3)
+    {
+        case 0:
+            r = (br + fr) >> 1;
+            g = (bg + fg) >> 1;
+            b = (bb + fb) >> 1;
+            break;
+
+        case 1:
+            r = br + fr; if (r > 31) r = 31;
+            g = bg + fg; if (g > 31) g = 31;
+            b = bb + fb; if (b > 31) b = 31;
+            break;
+
+        case 2:
+            r = br - fr; if (r < 0) r = 0;
+            g = bg - fg; if (g < 0) g = 0;
+            b = bb - fb; if (b < 0) b = 0;
+            break;
+
+        default:
+            r = br + (fr >> 2); if (r > 31) r = 31;
+            g = bg + (fg >> 2); if (g > 31) g = 31;
+            b = bb + (fb >> 2); if (b > 31) b = 31;
+            break;
+    }
+
+    return
+        (uint16_t)(
+            r
+            |
+            (g << 5)
+            |
+            (b << 10)
+        );
+}
+
+
+static inline uint16_t b124_fetch_texel(
+    int u,
+    int v,
+    int clx,
+    int cly,
+    uint16_t texpage
+)
+{
+    unsigned mask_x =
+        g_texture_window
+        &
+        0x1Fu;
+
+    unsigned mask_y =
+        (g_texture_window >> 5)
+        &
+        0x1Fu;
+
+    unsigned off_x =
+        (g_texture_window >> 10)
+        &
+        0x1Fu;
+
+    unsigned off_y =
+        (g_texture_window >> 15)
+        &
+        0x1Fu;
+
+    if (mask_x | mask_y)
+    {
+        u =
+            (u & ~(int)(mask_x * 8u))
+            |
+            (int)((off_x & mask_x) * 8u);
+
+        v =
+            (v & ~(int)(mask_y * 8u))
+            |
+            (int)((off_y & mask_y) * 8u);
+    }
+
+    u &= 0xFF;
+    v &= 0xFF;
+
+    int tpx =
+        (texpage & 0x0Fu)
+        *
+        64;
+
+    int tpy =
+        ((texpage >> 4) & 1u)
+        *
+        256;
+
+    int depth =
+        (texpage >> 7)
+        &
+        3u;
+
+    if (depth == 0)
+    {
+        uint16_t packed =
+            b124_vram_get(
+                tpx + (u >> 2),
+                tpy + v
+            );
+
+        int index =
+            (packed >> ((u & 3) * 4))
+            &
+            0x0F;
+
+        return
+            b124_vram_get(
+                clx + index,
+                cly
+            );
+    }
+
+    if (depth == 1)
+    {
+        uint16_t packed =
+            b124_vram_get(
+                tpx + (u >> 1),
+                tpy + v
+            );
+
+        int index =
+            (packed >> ((u & 1) * 8))
+            &
+            0xFF;
+
+        return
+            b124_vram_get(
+                clx + index,
+                cly
+            );
+    }
+
+    return
+        b124_vram_get(
+            tpx + u,
+            tpy + v
+        );
+}
+
+
+static int b124_try_textured_rect(
+    uint8_t opcode,
+    int x,
+    int y,
+    int w,
+    int h,
+    int u,
+    int v,
+    int clx,
+    int cly,
+    uint16_t texpage,
+    uint32_t command,
+    int raw_texture
+)
+{
+    if (
+        !g_vram
+        ||
+        sw_renderer_scale() != 1
+        ||
+        sw_wide_width() != 0
+        ||
+        sw_texture_filter() != 0
+    )
+    {
+        ++g_b124_rect_fallbacks;
+        return 0;
+    }
+
+    /*
+     * First B124 intentionally targets only the measured hot family
+     * 64h..67h (variable-size textured rectangle).
+     */
+    if ((opcode & 0xFCu) != 0x64u)
+    {
+        ++g_b124_rect_fallbacks;
+        return 0;
+    }
+
+    ++g_b124_rect_hits;
+
+    if (w <= 0 || h <= 0)
+    {
+        return 1;
+    }
+
+    int x0 = x;
+    int y0 = y;
+    int x1 = x + w;
+    int y1 = y + h;
+
+    if (x0 < g_draw_x1) x0 = g_draw_x1;
+    if (y0 < g_draw_y1) y0 = g_draw_y1;
+    if (x1 > g_draw_x2 + 1) x1 = g_draw_x2 + 1;
+    if (y1 > g_draw_y2 + 1) y1 = g_draw_y2 + 1;
+
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > 1024) x1 = 1024;
+    if (y1 > 512) y1 = 512;
+
+    if (x0 >= x1 || y0 >= y1)
+    {
+        return 1;
+    }
+
+    int mod_r =
+        (command & 0xFFu)
+        >>
+        3;
+
+    int mod_g =
+        ((command >> 8) & 0xFFu)
+        >>
+        3;
+
+    int mod_b =
+        ((command >> 16) & 0xFFu)
+        >>
+        3;
+
+    int semi =
+        (opcode & 0x02u)
+        !=
+        0;
+
+    int semi_mode =
+        (texpage >> 5)
+        &
+        3u;
+
+    g_b124_rect_pixels +=
+        (uint64_t)(x1 - x0)
+        *
+        (uint64_t)(y1 - y0);
+
+    for (int py = y0; py < y1; ++py)
+    {
+        int tv =
+            (v + (py - y))
+            &
+            0xFF;
+
+        uint16_t *dst =
+            g_vram
+            +
+            (size_t)py * 1024u
+            +
+            (size_t)x0;
+
+        int tu =
+            (u + (x0 - x))
+            &
+            0xFF;
+
+        for (int px = x0; px < x1; ++px, ++dst)
+        {
+            uint16_t texel =
+                b124_fetch_texel(
+                    tu,
+                    tv,
+                    clx,
+                    cly,
+                    texpage
+                );
+
+            tu =
+                (tu + 1)
+                &
+                0xFF;
+
+            ++g_b124_rect_texels;
+
+            if (texel == 0u)
+            {
+                continue;
+            }
+
+            if (
+                g_mask_check
+                &&
+                (*dst & 0x8000u)
+            )
+            {
+                continue;
+            }
+
+            uint16_t color;
+
+            if (raw_texture)
+            {
+                color =
+                    texel
+                    &
+                    0x7FFFu;
+            }
+            else
+            {
+                int tr = (texel >> 0) & 31;
+                int tg = (texel >> 5) & 31;
+                int tb = (texel >> 10) & 31;
+
+                int r = (tr * mod_r) >> 4;
+                int g = (tg * mod_g) >> 4;
+                int b = (tb * mod_b) >> 4;
+
+                if (r > 31) r = 31;
+                if (g > 31) g = 31;
+                if (b > 31) b = 31;
+
+                color =
+                    (uint16_t)(
+                        r
+                        |
+                        (g << 5)
+                        |
+                        (b << 10)
+                    );
+            }
+
+            if (
+                semi
+                &&
+                (texel & 0x8000u)
+            )
+            {
+                color =
+                    b124_blend(
+                        *dst,
+                        color,
+                        semi_mode
+                    );
+            }
+
+            if (g_mask_set)
+            {
+                color |=
+                    0x8000u;
+            }
+
+            *dst =
+                color;
+        }
+    }
+
+    return 1;
 }
 
 
@@ -2220,20 +2614,38 @@ static void execute_command(void)
             );
 
 
-            sw_draw_textured_rect(
-                x,
-                y,
-                w,
-                h,
+            if (
+                !b124_try_textured_rect(
+                    opcode,
+                    x,
+                    y,
+                    w,
+                    h,
+                    u,
+                    v,
+                    clut_x(clut),
+                    clut_y(clut),
+                    g_texpage,
+                    g_cmd[0],
+                    raw
+                )
+            )
+            {
+                sw_draw_textured_rect(
+                    x,
+                    y,
+                    w,
+                    h,
 
-                u,
-                v,
+                    u,
+                    v,
 
-                clut_x(clut),
-                clut_y(clut),
+                    clut_x(clut),
+                    clut_y(clut),
 
-                g_texpage
-            );
+                    g_texpage
+                );
+            }
         }
 
 
@@ -2646,6 +3058,18 @@ void fm_gpu_init(
         0u;
 
     g_b122_upload_words =
+        0u;
+
+    g_b124_rect_hits =
+        0u;
+
+    g_b124_rect_fallbacks =
+        0u;
+
+    g_b124_rect_pixels =
+        0u;
+
+    g_b124_rect_texels =
         0u;
 
     g_fill_suppressed = 0;
@@ -3878,6 +4302,18 @@ void fm_gpu_debug_stats(
 
     out->display_disabled =
         g_display_disabled;
+
+    out->b124_rect_hits =
+        g_b124_rect_hits;
+
+    out->b124_rect_fallbacks =
+        g_b124_rect_fallbacks;
+
+    out->b124_rect_pixels =
+        g_b124_rect_pixels;
+
+    out->b124_rect_texels =
+        g_b124_rect_texels;
 
 
     /*

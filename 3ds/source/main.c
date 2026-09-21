@@ -14299,7 +14299,7 @@ int main(void)
                 &b100_last_gp105
             );
 
-            printf("BUILD B123-RENDERER-FASTMATH\n");
+            printf("BUILD B124-FAST-TEXTURED-RECT\n");
 
             printf(
                 "RUN:%c CPU:%08lX RA:%08lX F:%lu I:%s\n",
@@ -14752,6 +14752,14 @@ int main(void)
                         (unsigned long)b122_p2.calls,
                         (unsigned long long)(b122_p2.total_us / 1000u),
                         (unsigned long)b122_p2.max_us
+                    );
+
+                    printf(
+                        "B124 rect h/f:%lu/%lu px:%llu tex:%llu\n",
+                        (unsigned long)gpu_debug.b124_rect_hits,
+                        (unsigned long)gpu_debug.b124_rect_fallbacks,
+                        (unsigned long long)gpu_debug.b124_rect_pixels,
+                        (unsigned long long)gpu_debug.b124_rect_texels
                     );
                 }
             }

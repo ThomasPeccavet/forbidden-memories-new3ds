@@ -129,6 +129,11 @@ typedef struct FMGpuDebugStats
     unsigned display_y;
 
     int display_disabled;
+
+    uint32_t b124_rect_hits;
+    uint32_t b124_rect_fallbacks;
+    uint64_t b124_rect_pixels;
+    uint64_t b124_rect_texels;
 } FMGpuDebugStats;
 
 
