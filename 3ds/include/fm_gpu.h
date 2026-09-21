@@ -134,6 +134,11 @@ typedef struct FMGpuDebugStats
     uint32_t b124_rect_fallbacks;
     uint64_t b124_rect_pixels;
     uint64_t b124_rect_texels;
+
+    uint32_t b125_texquad_hits;
+    uint32_t b125_gouraud_hits;
+    uint32_t b125_fallbacks;
+    uint64_t b125_pixels;
 } FMGpuDebugStats;
 
 

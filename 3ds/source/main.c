@@ -14299,7 +14299,7 @@ int main(void)
                 &b100_last_gp105
             );
 
-            printf("BUILD B124-FAST-TEXTURED-RECT\n");
+            printf("BUILD B125-FAST-HOT-QUADS\n");
 
             printf(
                 "RUN:%c CPU:%08lX RA:%08lX F:%lu I:%s\n",
@@ -14760,6 +14760,14 @@ int main(void)
                         (unsigned long)gpu_debug.b124_rect_fallbacks,
                         (unsigned long long)gpu_debug.b124_rect_pixels,
                         (unsigned long long)gpu_debug.b124_rect_texels
+                    );
+
+                    printf(
+                        "B125 quad T/G/f:%lu/%lu/%lu px:%llu\n",
+                        (unsigned long)gpu_debug.b125_texquad_hits,
+                        (unsigned long)gpu_debug.b125_gouraud_hits,
+                        (unsigned long)gpu_debug.b125_fallbacks,
+                        (unsigned long long)gpu_debug.b125_pixels
                     );
                 }
             }
