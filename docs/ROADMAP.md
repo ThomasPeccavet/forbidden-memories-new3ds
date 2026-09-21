@@ -1,60 +1,72 @@
 # Feuille de route
 
-Objectif final : jeu complet sur New Nintendo 3DS, avec preuves reproductibles à chaque étape. Aucun pourcentage global de portage n'est utilisé.
+Objectif final : jeu complet sur New Nintendo 3DS, avec preuves reproductibles à
+chaque étape.
 
 ## 1 — Base française et analyse
 
-- [x] Identifier le disque SLES-03948 et ses empreintes.
+- [x] Identifier SLES-03948 et ses empreintes.
 - [x] Extraire et analyser le PS-X EXE.
 - [x] Exécuter plusieurs passes Ghidra.
-- [x] Identifier le chemin de démarrage résident.
-- [x] Étudier SU.MRG et plusieurs overlays candidats.
-- [x] Valider un runtime PC jusqu'au menu puis au premier duel.
+- [x] Étudier le chemin résident.
+- [x] Étudier SU.MRG et plusieurs overlays.
+- [x] Valider le runtime PC jusqu'au premier duel.
 
 ## 2 — Backend natif New 3DS
 
-- [x] Construire une application libctru native.
-- [x] Lire le BIN depuis SD et charger le PS-X EXE.
-- [x] Initialiser RAM PS1, CPUState et registres.
-- [x] Recompiler le code résident en ARM11.
-- [x] Lier le dispatcher statique.
-- [x] Ajouter un fallback R3000A pour les blocs inconnus.
-- [x] Ajouter un HLE BIOS minimal nécessaire au boot.
-- [x] Brancher GP0/GP1 et le rasteriseur logiciel.
-- [ ] Obtenir la première écriture VRAM réellement produite par le jeu.
-- [ ] Afficher cette VRAM sur l'écran supérieur.
+- [x] Application libctru native.
+- [x] Lecture BIN depuis SD.
+- [x] RAM PS1 / CPUState.
+- [x] Code résident recompilé ARM11.
+- [x] Dispatcher statique.
+- [x] Fallback R3000A.
+- [x] HLE BIOS nécessaire au boot.
+- [x] GP0/GP1 + rasteriseur logiciel.
+- [x] Première VRAM réellement produite par le jeu.
+- [x] Première image réelle affichée : logo Konami.
+- [x] Écran titre affiché.
 
-## 3 — Interruptions et GPU
+## 3 — Kernel / CD / GPU nécessaires au chemin actuel
 
-- [ ] Implémenter A0:44 `FlushCache` et les prochains appels BIOS simples.
-- [ ] Implémenter `I_STAT` / `I_MASK`.
-- [ ] Ajouter un VBlank minimal.
-- [ ] Fiabiliser DMA2 / linked-list GPU.
-- [ ] Valider le display start et le mode vidéo.
-- [ ] Atteindre l'écran titre / menu sur Azahar.
+- [x] Pad START transmis au guest.
+- [x] VBlank / IRQ suffisants pour atteindre le titre.
+- [x] Lectures CD suffisantes pour atteindre SU.
+- [x] File CD async suffisante pour le chemin observé.
+- [x] DMA2 / waits GPU bridgés pour le boot observé.
+- [x] Helpers GTE nécessaires au boot observé.
+- [ ] Remplacer les bridges de bring-up par des modèles généraux.
 
-## 4 — CD-ROM et overlays
+## 4 — Overlay SU et menu principal
 
-- [ ] Tracer les accès CD-ROM réels du boot 3DS.
-- [ ] Implémenter les commandes asynchrones nécessaires.
-- [ ] Gérer les IRQ CD.
-- [ ] Identifier chaque image overlay chargée à `0x801xxxxx`.
-- [ ] Exécuter immédiatement les overlays via R3000A.
-- [ ] Recompiler en ARM11 les overlays chauds/stables lorsque cela apporte un gain mesurable.
+- [x] Atteindre l'état résident 8.
+- [x] Charger `SU.mrg`.
+- [x] Exécuter `0x8018001C`.
+- [x] Exécuter `0x80180390`.
+- [x] Installer / appeler le callback draw `0x80180B4C`.
+- [x] Créer les 11 objets de menu.
+- [x] Débloquer leur animation d'entrée.
+- [ ] Comprendre pourquoi ils ne sont pas encore visibles.
+- [ ] Afficher le menu français.
+- [ ] Naviguer Haut/Bas.
+- [ ] Valider une entrée.
 
-## 5 — GTE et rendu complet
+## 5 — Nouvelle partie et premier duel
 
-- [ ] Implémenter les opérations GTE effectivement rencontrées.
-- [ ] Valider les scènes 3D et le plateau de duel.
-- [ ] Corriger texture window, CLUT, semi-transparence et masking selon les écarts observés.
-
-## 6 — Contrôles et jouabilité
-
-- [ ] Raccorder le pad 3DS au jeu sans conflit avec l'interface de diagnostic.
-- [ ] Naviguer dans le menu français.
-- [ ] Créer une nouvelle partie.
+- [ ] Lancer « Nlle partie ».
+- [ ] Charger les overlays suivants.
+- [ ] Parcourir l'introduction.
 - [ ] Atteindre Simon Muran.
-- [ ] Terminer un duel complet.
+- [ ] Afficher le plateau.
+- [ ] Jouer un tour complet.
+
+## 6 — Fidélité matérielle
+
+- [ ] CD-ROM async général.
+- [ ] DMA GPU général.
+- [ ] IRQ/timers propres.
+- [ ] GTE complet selon les besoins rencontrés.
+- [ ] Texture window / CLUT / semi-transparence / masking validés.
+- [ ] Suppression progressive des bridges temporaires.
 
 ## 7 — Audio et sauvegarde
 
@@ -64,18 +76,15 @@ Objectif final : jeu complet sur New Nintendo 3DS, avec preuves reproductibles �
 - [ ] memory card.
 - [ ] sauvegarde / chargement.
 
-## 8 — Validation matériel et optimisation
+## 8 — Matériel et optimisation
 
-- [ ] Tester sur New 3DS physique.
-- [ ] Mesurer CPU ARM recompilé vs fallback R3000A.
-- [ ] Mesurer rasteriseur, mémoire et débit SD.
-- [ ] Optimiser uniquement les zones réellement limitantes.
-- [ ] Valider campagne, menus, duels, progression et cas particuliers.
+- [ ] Test New 3DS physique.
+- [ ] Profiling ARM11 / fallback / rasteriseur.
+- [ ] Optimisation.
+- [ ] Validation campagne / menus / duels / progression.
 
 ## Jalon immédiat
 
-Le jalon actif n'est plus « faire exécuter le CPU » : cela fonctionne déjà. Le jalon actif est désormais :
+> **Afficher le menu SU déjà actif en mémoire et dans la boucle de rendu.**
 
-> **produire puis afficher la première VRAM réellement calculée par Forbidden Memories sur le backend New 3DS.**
-
-Voir [ACTION_PLAN.md](ACTION_PLAN.md) pour l'ordre de travail détaillé.
+Voir [ACTION_PLAN.md](ACTION_PLAN.md) pour l'instrumentation suivante.

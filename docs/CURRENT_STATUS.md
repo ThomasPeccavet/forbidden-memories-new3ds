@@ -1,96 +1,135 @@
 # État courant — New Nintendo 3DS
 
-Dernière mise à jour : **17 septembre 2026**.
+Dernière mise à jour : **19 septembre 2026**.
 
 ## Résumé
 
-Le port New 3DS exécute désormais la version française avec une architecture hybride : code résident recompilé en ARM11 lorsque disponible, fallback R3000A pour les blocs inconnus, HLE BIOS partiel et bridge GPU PS1 vers le rasteriseur logiciel.
+Le backend New 3DS/Azahar a franchi le boot graphique : le logo Konami et l'écran
+titre de **Forbidden Memories PAL France SLES-03948** sont affichés à partir des
+données réelles du jeu.
 
-Le jeu n'est pas encore visible à l'écran supérieur, mais le boot avance réellement dans Azahar et ne dépend plus d'une régénération des seeds à chaque appel indirect.
+Le pad START est maintenant reconnu par le guest, l'overlay `SU.mrg` est chargé,
+le menu principal est initialisé et sa boucle d'update s'exécute. Le callback de
+dessin du menu est également appelé.
 
-## Ce qui fonctionne
+Le verrou actif n'est donc plus « démarrer le jeu », mais :
 
-- chargement du BIN français SLES-03948 depuis la SD virtuelle ;
-- chargement du PS-X EXE en RAM PS1 ;
-- CPUState PSXRecomp, registres, RAM 2 Mio, scratchpad et alias KSEG0/KSEG1 ;
-- code C généré recompilé en ARM11 et lié dans `fm-new3ds.elf` ;
-- dispatcher statique ;
-- fallback R3000A par basic block ;
-- plusieurs appels BIOS HLE nécessaires au démarrage ;
-- appels BIOS GPU A0:46..4E routés vers `fm_gpu.c` ;
-- GP0/GP1 MMIO routés vers le bridge GPU ;
-- rasteriseur logiciel PSXRecomp compilé sur ARM11 ;
-- diagnostics temps réel sur écran inférieur.
+> **faire apparaître visuellement le menu SU alors que sa logique, ses objets et
+> son callback de rendu sont déjà actifs.**
 
-## BIOS déjà couvert dans le shim
+## Chemin actuellement validé
 
-Couverture actuelle utilisée pendant le boot :
+- PS-X EXE chargé à `0x80010000` ;
+- entrée guest `0x800128CC` ;
+- code résident ARM11 + fallback R3000A ;
+- appels BIOS nécessaires au boot ;
+- VBlank / pad / IRQ suffisants pour progresser ;
+- lectures CD réelles depuis le BIN ;
+- file CD asynchrone suffisamment fonctionnelle pour le boot ;
+- GTE/helpers rencontrés sur le chemin du boot ;
+- DMA2 / GPU waits bridgés pour les cas observés ;
+- GP0/GP1 et rasteriseur logiciel actifs ;
+- logo Konami affiché ;
+- écran titre affiché ;
+- START transmis au guest ;
+- état résident 8 atteint ;
+- `M:\\mrg\\SU\\SU.mrg` chargé ;
+- overlay SU exécuté à `0x801xxxxx` ;
+- init menu `0x8018001C` exécutée ;
+- update menu `0x80180390` exécutée ;
+- callback draw `0x80180B4C` installé et appelé.
 
-- A0:72 `_96_remove` ;
-- A0:9F `SetMem` ;
-- B0:18 `ResetEntryInt` ;
-- B0:19 `HookEntryInt` ;
-- B0:35 `write` ;
-- B0:56 `GetC0Table` ;
-- B0:57 `GetB0Table` ;
-- B0:5B `ChangeClearPAD` ;
-- C0:02 `SysEnqIntRP` ;
-- C0:03 `SysDeqIntRP` ;
-- C0:0A `ChangeClearRCnt` ;
-- famille GPU A0:46..4E via `fm_gpu_bios_call`.
+## Jalons diagnostiques B57 → B75
 
-Cette liste n'est pas un objectif de couverture exhaustive : chaque service doit être implémenté seulement avec la sémantique nécessaire et vérifiable.
+Les builds de bring-up ont successivement isolé plusieurs verrous :
 
-## Dernier état observé dans Azahar
+- **B57/B59** : lecture CD et curseur de requêtes ;
+- **B62** : helpers GTE nécessaires au chemin courant ;
+- **B67/B68** : file de requêtes CD async ;
+- **B70** : completion d'une commande de file graphique type `0x20` ;
+- **B71** : sortie robuste d'une attente DMA2 ;
+- **B72** : START étiré 10 frames, conforme au scénario PC connu ;
+- **B73** : transition contrôlée vers l'état 8 et chargement réel de SU ;
+- **B74** : preuve que le callback draw du menu est bien appelé ;
+- **B75** : finalisation de l'animation d'entrée des 11 objets du menu.
 
-Après ajout de `B0:56/GetC0Table`, le boot atteint désormais :
+Ces bridges sont des outils de bring-up. Ils devront être remplacés ou
+généralisés par une émulation matérielle/logicielle plus propre une fois les
+causes racines stabilisées.
+
+## Dernier résultat observé — B75
+
+Capture du 19 septembre 2026 :
 
 ```text
-PC          : 000000A0
-RA          : 80089B38
-A0          : 00000001
-A1          : 800FF444
-A2          : 00000000
-T1          : 00000044
-RUN         : NON
-Stop ARM    : RETURN
-Dispatch    : 000000A0 / 1
-R3000A      : utilisé
-Stop interp : BLOCK
-GP0 words   : 4
-Frame VRAM  : NON
-Display XY  : 0,0
-GPUSTAT     : 1C802000
-Static miss : OUI
-Last MMIO   : 1F801074
+BUILD B75-MENU-ENTRANCE-BRIDGE
+RUN:Y
+MENU I/U/D:1/148/0
+CB:80180B4C
+draw:147
+
+ENT bridge:1
+frame:3059
+objs:11
+C0:0
+C5:1>0
+
+O0 flags:00D8  x:160  target:160  timer:0
+O4 flags:00D8  x:160             timer:0
+O5 flags:0088  x:160             timer:0
+
+GPU gp0:301316
+display:0,0
+view:0,0
 ```
 
-Le point courant est donc **A0:44 `FlushCache`**, tandis que le dernier MMIO observé est `0x1F801074` (**I_MASK**).
+Interprétation :
 
-## Progrès GPU récent
+- le menu est bien initialisé ;
+- l'update tourne ;
+- le callback de dessin est réellement appelé ;
+- les 11 objets existent ;
+- l'animation initialement figée a été terminée ;
+- les objets du groupe actif sont à la position finale `x=160` ;
+- l'écran supérieur affiche pourtant encore le titre.
 
-Une boucle artificielle sur A0:49 avait fait monter le compteur GP0 à environ 90 000 mots. La cause était l'absence de retour vers `$ra` dans les handlers BIOS GPU. Après correction, le compteur retombe à **4 mots** au même stade du boot, ce qui confirme que le jeu poursuit désormais son chemin au lieu de répéter le même appel.
+Le problème n'est donc plus un simple timer d'animation, ni un START manquant,
+ni un overlay non chargé.
 
-Le bridge GPU sait déjà parser de nombreuses commandes GP0 : polygones, lignes, rectangles, transferts VRAM, environnement de dessin et linked lists BIOS. La condition `Frame VRAM` reste toutefois à NON dans le dernier test : aucune écriture réellement visible n'a encore été confirmée.
+## Hypothèses de travail immédiates
 
-## Verrous immédiats
+À départager par instrumentation, sans en choisir une arbitrairement :
 
-1. implémenter A0:44 `FlushCache` comme service HLE minimal correct ;
-2. ajouter un modèle cohérent de `I_STAT` / `I_MASK` ;
-3. injecter un VBlank minimal et vérifier les attentes IRQ ;
-4. fiabiliser DMA2 / linked-list GPU hors des seuls wrappers BIOS ;
-5. confirmer la première écriture VRAM ;
-6. présenter la vraie zone d'affichage PS1 sur l'écran supérieur ;
-7. poursuivre vers les premiers overlays `0x801xxxxx` réellement chargés.
+1. les objets SU ne sont pas réellement parcourus par le renderer de layer 2 ;
+2. ils sont parcourus mais ne génèrent pas de primitives GP0 ;
+3. les primitives sont générées mais utilisent texture/CLUT/coords incorrects ;
+4. elles sont rendues dans une zone VRAM non affichée ;
+5. elles sont rendues puis recouvertes par des objets de l'écran titre encore actifs.
 
-## Ce qui n'est pas encore validé
+## Prochaine instrumentation
 
-- menu New 3DS rendu par le jeu ;
-- contrôleur CD asynchrone complet ;
+Le prochain build doit mesurer séparément :
+
+- GP0 avant/après `FUN_80041674` (renderer global) ;
+- GP0 avant/après le callback `0x80180B4C` ;
+- heads/tails des listes d'objets, en particulier le layer 2 ;
+- appartenance des pointeurs `DAT_80184794..` à cette liste ;
+- derniers opcodes/coordonnées de la trace GPU ;
+- ordre relatif des objets titre et menu.
+
+Critère de succès : savoir si le défaut est **avant GP0**, **dans GP0**, ou
+**après GP0 dans la présentation VRAM**.
+
+## Ce qui reste non validé
+
+- menu SU visible et navigable ;
+- nouvelle partie sur backend 3DS ;
+- duel sur backend 3DS ;
+- émulation CD/IRQ/DMA générale sans bridges de bring-up ;
 - GTE complet ;
 - audio SPU/XA ;
-- sauvegarde ;
-- performance sur matériel physique ;
-- duel jouable sur New 3DS.
+- memory card / sauvegarde ;
+- performance et stabilité sur New 3DS physique.
 
-Le runtime PC reste la preuve fonctionnelle de référence pour le menu, l'introduction et le premier duel ; le backend 3DS reste un chantier distinct.
+Le runtime PC reste la référence fonctionnelle pour comparer le comportement du
+menu et du premier duel.
