@@ -14299,7 +14299,7 @@ int main(void)
                 &b100_last_gp105
             );
 
-            printf("BUILD B122-GPU-OPCODE-PROFILE\n");
+            printf("BUILD B123-RENDERER-FASTMATH\n");
 
             printf(
                 "RUN:%c CPU:%08lX RA:%08lX F:%lu I:%s\n",

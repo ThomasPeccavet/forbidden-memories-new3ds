@@ -120,8 +120,25 @@ $(BUILD)/%.o: source/%.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 
+# ============================================================
+# 3DS software rasterizer hot path
+# ============================================================
+#
+# B123: keep conservative FP semantics for game/GTE code, but allow
+# aggressive FP reassociation/reciprocal optimizations in the software GPU.
+# The rasterizer performs float interpolation in the innermost pixel loops.
+#
+RENDERER_CFLAGS := \
+	$(CFLAGS) \
+	-Ofast \
+	-ffast-math \
+	-fno-math-errno \
+	-fno-trapping-math \
+	-funsafe-math-optimizations \
+	-freciprocal-math
+
 $(BUILD)/gpu_sw_renderer.o: $(RUNTIME)/src/gpu_sw_renderer.c | $(BUILD)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(RENDERER_CFLAGS) -c $< -o $@
 
 
 $(BUILD)/gpu_vram_dirty.o: $(RUNTIME)/src/gpu_vram_dirty.c | $(BUILD)
