@@ -57,6 +57,29 @@ unsigned fm_gpu_display_y(void);
 
 
 /*
+ * B122 - high-resolution GP0 opcode profiler.
+ */
+typedef struct FMGpuOpcodePerf
+{
+    uint8_t opcode;
+    uint32_t calls;
+    uint64_t total_us;
+    uint32_t max_us;
+} FMGpuOpcodePerf;
+
+void fm_gpu_b122_rank(
+    unsigned rank,
+    FMGpuOpcodePerf *out
+);
+
+void fm_gpu_b122_totals(
+    uint64_t *exec_us,
+    uint64_t *upload_us,
+    uint64_t *upload_words
+);
+
+
+/*
  * ============================================================
  * Diagnostic GPU bring-up
  * ============================================================

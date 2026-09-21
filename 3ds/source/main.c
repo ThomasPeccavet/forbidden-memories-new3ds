@@ -14299,7 +14299,7 @@ int main(void)
                 &b100_last_gp105
             );
 
-            printf("BUILD B121-EMPTY-OT-RUN-SKIP\n");
+            printf("BUILD B122-GPU-OPCODE-PROFILE\n");
 
             printf(
                 "RUN:%c CPU:%08lX RA:%08lX F:%lu I:%s\n",
@@ -14704,6 +14704,56 @@ int main(void)
                     (unsigned long)b118_dma.dma2_empty_fast_last,
                     (unsigned long)b118_dma.dma2_empty_fast_max
                 );
+
+                {
+                    FMGpuOpcodePerf b122_p0 = {0};
+                    FMGpuOpcodePerf b122_p1 = {0};
+                    FMGpuOpcodePerf b122_p2 = {0};
+                    uint64_t b122_exec_us = 0u;
+                    uint64_t b122_upload_us = 0u;
+                    uint64_t b122_upload_words = 0u;
+
+                    fm_gpu_b122_rank(0u, &b122_p0);
+                    fm_gpu_b122_rank(1u, &b122_p1);
+                    fm_gpu_b122_rank(2u, &b122_p2);
+
+                    fm_gpu_b122_totals(
+                        &b122_exec_us,
+                        &b122_upload_us,
+                        &b122_upload_words
+                    );
+
+                    printf(
+                        "B122 GPU ms exec/up:%llu/%llu upW:%llu\n",
+                        (unsigned long long)(b122_exec_us / 1000u),
+                        (unsigned long long)(b122_upload_us / 1000u),
+                        (unsigned long long)b122_upload_words
+                    );
+
+                    printf(
+                        "B122 P0 %02X c:%lu sum:%llums max:%luus\n",
+                        (unsigned)b122_p0.opcode,
+                        (unsigned long)b122_p0.calls,
+                        (unsigned long long)(b122_p0.total_us / 1000u),
+                        (unsigned long)b122_p0.max_us
+                    );
+
+                    printf(
+                        "B122 P1 %02X c:%lu sum:%llums max:%luus\n",
+                        (unsigned)b122_p1.opcode,
+                        (unsigned long)b122_p1.calls,
+                        (unsigned long long)(b122_p1.total_us / 1000u),
+                        (unsigned long)b122_p1.max_us
+                    );
+
+                    printf(
+                        "B122 P2 %02X c:%lu sum:%llums max:%luus\n",
+                        (unsigned)b122_p2.opcode,
+                        (unsigned long)b122_p2.calls,
+                        (unsigned long long)(b122_p2.total_us / 1000u),
+                        (unsigned long)b122_p2.max_us
+                    );
+                }
             }
 
             /*

@@ -2,6 +2,7 @@
 
 #include "gpu_sw_renderer.h"
 
+#include <3ds.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -59,6 +60,47 @@ static uint64_t g_packet_env = 0;
 static uint64_t g_packet_other = 0;
 
 static uint64_t g_upload_data_words = 0;
+
+/*
+ * ============================================================
+ * B122 - high-resolution GP0 opcode profiler
+ * ============================================================
+ *
+ * B121 still shows 60-230 ms DMA2 transfers after collapsing thousands
+ * of empty OT buckets. Time completed GP0 commands with the ARM11 system
+ * tick so we can rank the actual raster/copy/upload opcodes by cost.
+ */
+static uint64_t g_b122_opcode_ticks[256];
+static uint32_t g_b122_opcode_calls[256];
+static uint64_t g_b122_opcode_max_ticks[256];
+
+static uint64_t g_b122_exec_ticks = 0u;
+static uint64_t g_b122_upload_ticks = 0u;
+static uint64_t g_b122_upload_words = 0u;
+
+static uint64_t b122_ticks_to_us(uint64_t ticks)
+{
+    return
+        (ticks * 1000000ull)
+        /
+        (uint64_t)SYSCLOCK_ARM11;
+}
+
+static void b122_record_opcode(
+    uint8_t opcode,
+    uint64_t ticks
+)
+{
+    g_b122_opcode_ticks[opcode] += ticks;
+    ++g_b122_opcode_calls[opcode];
+
+    if (ticks > g_b122_opcode_max_ticks[opcode])
+    {
+        g_b122_opcode_max_ticks[opcode] = ticks;
+    }
+
+    g_b122_exec_ticks += ticks;
+}
 
 /* B28: diagnostic/preservation des clears framebuffer. */
 static uint64_t g_fill_suppressed = 0;
@@ -2579,6 +2621,33 @@ void fm_gpu_init(
     g_upload_data_words =
         0;
 
+    memset(
+        g_b122_opcode_ticks,
+        0,
+        sizeof(g_b122_opcode_ticks)
+    );
+
+    memset(
+        g_b122_opcode_calls,
+        0,
+        sizeof(g_b122_opcode_calls)
+    );
+
+    memset(
+        g_b122_opcode_max_ticks,
+        0,
+        sizeof(g_b122_opcode_max_ticks)
+    );
+
+    g_b122_exec_ticks =
+        0u;
+
+    g_b122_upload_ticks =
+        0u;
+
+    g_b122_upload_words =
+        0u;
+
     g_fill_suppressed = 0;
     g_last_fill_x = 0;
     g_last_fill_y = 0;
@@ -2754,6 +2823,9 @@ void fm_gpu_gp0_write(
 
     if (g_state == FM_GPU_VRAM_WRITE)
     {
+        uint64_t b122_upload_start =
+            svcGetSystemTick();
+
         ++g_upload_data_words;
 
 
@@ -2859,6 +2931,12 @@ void fm_gpu_gp0_write(
                 1;
         }
 
+        g_b122_upload_ticks +=
+            svcGetSystemTick()
+            -
+            b122_upload_start;
+
+        ++g_b122_upload_words;
 
         return;
     }
@@ -2942,7 +3020,18 @@ void fm_gpu_gp0_write(
         g_cmd_need
     )
     {
+        uint8_t b122_opcode =
+            (uint8_t)(g_cmd[0] >> 24);
+
+        uint64_t b122_start =
+            svcGetSystemTick();
+
         execute_command();
+
+        b122_record_opcode(
+            b122_opcode,
+            svcGetSystemTick() - b122_start
+        );
 
 
         g_cmd_have =
@@ -3265,6 +3354,102 @@ unsigned fm_gpu_display_y(void)
 
 
     return y;
+}
+
+
+void fm_gpu_b122_rank(
+    unsigned rank,
+    FMGpuOpcodePerf *out
+)
+{
+    if (!out)
+    {
+        return;
+    }
+
+    memset(out, 0, sizeof(*out));
+
+    uint8_t selected[256] = {0};
+
+    for (unsigned pick = 0u; pick <= rank; ++pick)
+    {
+        int best = -1;
+        uint64_t best_ticks = 0u;
+
+        for (unsigned op = 0u; op < 256u; ++op)
+        {
+            if (
+                selected[op]
+                ||
+                g_b122_opcode_calls[op] == 0u
+            )
+            {
+                continue;
+            }
+
+            if (
+                best < 0
+                ||
+                g_b122_opcode_ticks[op] > best_ticks
+            )
+            {
+                best = (int)op;
+                best_ticks = g_b122_opcode_ticks[op];
+            }
+        }
+
+        if (best < 0)
+        {
+            return;
+        }
+
+        selected[best] = 1u;
+
+        if (pick == rank)
+        {
+            out->opcode = (uint8_t)best;
+            out->calls = g_b122_opcode_calls[best];
+            out->total_us =
+                b122_ticks_to_us(
+                    g_b122_opcode_ticks[best]
+                );
+            out->max_us =
+                (uint32_t)b122_ticks_to_us(
+                    g_b122_opcode_max_ticks[best]
+                );
+            return;
+        }
+    }
+}
+
+
+void fm_gpu_b122_totals(
+    uint64_t *exec_us,
+    uint64_t *upload_us,
+    uint64_t *upload_words
+)
+{
+    if (exec_us)
+    {
+        *exec_us =
+            b122_ticks_to_us(
+                g_b122_exec_ticks
+            );
+    }
+
+    if (upload_us)
+    {
+        *upload_us =
+            b122_ticks_to_us(
+                g_b122_upload_ticks
+            );
+    }
+
+    if (upload_words)
+    {
+        *upload_words =
+            g_b122_upload_words;
+    }
 }
 
 
