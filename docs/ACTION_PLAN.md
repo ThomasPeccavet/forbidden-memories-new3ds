@@ -1,132 +1,129 @@
 # Plan d'action — New Nintendo 3DS
 
-Objectif actif : obtenir le **menu principal français visible et navigable** sur
-Azahar à partir du vrai overlay SU.
+Dernière mise à jour : **21 septembre 2026**.
 
-Les anciens objectifs « première VRAM » et « premier écran réel » sont atteints :
-le logo Konami et l'écran titre sont déjà rendus.
+## Objectif actif
 
-## Phase 1 — Isoler le défaut de rendu du menu SU
+Le menu SU est visible et navigable, « Nlle partie » fonctionne, la
+saisie/validation du nom fonctionne et le backend atteint la première
+cinématique / les premiers dialogues.
 
-### 1.1 Mesurer le coût GP0 par étape de frame
+L'objectif immédiat est :
 
-Instrumenter :
+> **retrouver une cadence acceptable en identifiant le hotspot réel, puis
+> corriger le rendu de la première cinématique.**
 
-- entrée/sortie de `FUN_80041674` ;
-- entrée/sortie du callback `0x80180B4C` ;
-- compteur GP0 avant/après chaque étape.
+## Phase 1 — Mesurer avant de modifier
 
-Critère de succès : déterminer qui émet réellement les primitives du menu.
+Créer un profil court et lisible sur une fenêtre stable de plusieurs frames.
 
-### 1.2 Inspecter les listes du renderer
+Mesurer par frame :
 
-Le menu crée ses objets via `FUN_800403D0(..., 2)`, donc ils sont associés au
-layer/type 2.
+- temps total boucle hôte ;
+- temps dispatcher / guest ;
+- temps callback VBlank ;
+- temps rendu GPU logiciel ;
+- temps composition/copie VRAM ;
+- temps de présentation 3DS ;
+- temps d'attente VBlank ;
+- instructions interprétées ;
+- appels fallback R3000A ;
+- commandes GP0 et primitives dessinées.
 
-Tracer :
+Conserver les tops B110 de plages guest par temps cumulé, temps maximum et nombre
+d'appels.
 
-- `DAT_800F11C0[]` / `DAT_800F11D0[]` ;
-- chaîne next/prev des objets ;
-- présence des pointeurs `DAT_80184794 .. DAT_801847BC` ;
-- flags `+0x08`, position `+0x30`, type `+0x1E`, callback/données utiles.
+### Critère de succès
 
-Critère de succès : prouver que les objets SU sont réellement vus par le renderer
-global.
+Attribuer la majorité du coût à une catégorie concrète avant toute nouvelle
+optimisation.
 
-### 1.3 Tracer les dernières primitives GPU
+## Phase 2 — Vérifier le timing guest
 
-Utiliser la trace B29/B38 existante pour conserver plusieurs commandes récentes :
+Contrôler :
 
-- opcode ;
-- coordonnées ;
-- texpage ;
-- CLUT ;
-- draw offset ;
-- draw area.
+1. nombre de VBlanks guest par seconde hôte ;
+2. appels des callbacks guest par frame ;
+3. boucles qui attendent un état CD/DMA/GPU ;
+4. bridges qui passent immédiatement un wait au lieu de reproduire sa latence ;
+5. fonctions relancées plusieurs fois car un drapeau matériel n'évolue pas comme
+   sur PS1.
 
-Critère de succès : identifier des primitives correspondant au menu à
-`x ~= 160`, ou prouver qu'elles n'atteignent jamais GP0.
+### Angle d'attaque prioritaire
 
-### 1.4 Départager les scénarios
+Rechercher une plage PC avec énormément de hits et peu de progression logique :
+une routine qui devrait attendre mais tourne en boucle active expliquerait mieux
+quelques FPS qu'une simple conversion framebuffer déjà optimisée.
 
-- **pas de GP0 menu** → réparer le parcours/layer/callback objet ;
-- **GP0 menu présent mais hors écran** → corriger coords / draw offset / display page ;
-- **GP0 menu présent mais transparent/noir** → inspecter texture / CLUT / flags ;
-- **GP0 menu présent puis recouvert** → identifier et désactiver/retirer les objets titre obsolètes.
+## Phase 3 — Isoler interpréteur vs code recompilé
 
-## Phase 2 — Menu visible et navigable
+Ajouter ou exploiter des compteurs distincts :
 
-Une fois le menu visible :
+- appels vers fonction recompilée ;
+- appels fallback ;
+- instructions R3000A interprétées ;
+- temps cumulé dans l'interpréteur ;
+- temps cumulé dans les fonctions ARM générées.
 
-1. valider Haut/Bas ;
-2. valider la sélection ;
-3. valider Croix / Rond ;
-4. comparer le comportement avec le runtime PC ;
-5. supprimer ou réduire les bridges B70/B71/B73/B75 si la cause racine est comprise.
+Si quelques fonctions overlay dominent, les identifier par adresse et envisager
+leur recompilation ciblée.
 
-Critère de succès :
+## Phase 4 — GPU logiciel et présentation
 
-> menu français visible, sélection déplaçable et validation fonctionnelle.
+Ne poursuivre ici que si le profiling l'indique.
 
-## Phase 3 — Nouvelle partie
+Mesurer :
 
-Sélectionner « Nlle partie » et tracer :
+- pixels réellement rasterisés ;
+- primitives par frame ;
+- coût texture/CLUT ;
+- coût composition base + overlay ;
+- coût conversion RGB555 ;
+- coût flush framebuffer.
 
-- transition d'état ;
-- nouvel overlay chargé ;
-- nouveaux besoins CD ;
-- nouvelles instructions GTE ;
-- nouveaux besoins GPU/DMA.
+Pistes possibles seulement si confirmées : dirty rectangles, moins de copies,
+chemins spécialisés, traitement cache-friendly, puis à plus long terme rendu
+natif GPU 3DS.
 
-Critère de succès : quitter proprement le menu SU sans patch manuel d'adresse.
+## Phase 5 — Première cinématique
 
-## Phase 4 — Premier duel
+Une fois les FPS maîtrisés, reprendre :
 
-Utiliser le runtime PC comme oracle fonctionnel et avancer jusqu'à Simon Muran.
+- GP0 E3/E4/E5 draw area/draw offset ;
+- GP1 display start ;
+- display mode ;
+- RGB24 ;
+- MDEC input/output ;
+- page VRAM affichée ;
+- composition des plans.
 
-Critères :
+### Critère de succès
 
-- introduction franchie ;
-- plateau visible ;
-- main de cartes visible ;
-- entrée utilisateur fonctionnelle ;
-- un tour complet exécutable.
+Cinématique lisible et cadrée suffisamment pour poursuivre les dialogues sans
+patch visuel spécifique.
 
-## Phase 5 — Remplacer les bridges de bring-up
+## Phase 6 — Premier duel
 
-Les bridges actuels ont permis d'identifier les attentes réelles, mais ne doivent
-pas devenir l'architecture finale.
+1. progresser dans les dialogues ;
+2. tracer chaque nouvel overlay ;
+3. corriger uniquement les nouveaux besoins matériels rencontrés ;
+4. atteindre Simon Muran ;
+5. afficher le plateau ;
+6. jouer un tour complet.
 
-À généraliser :
+## Phase 7 — Réduire la dette de bring-up
 
-- completion CD async ;
-- DMA2 ;
-- synchronization GPU ;
-- GTE helpers ;
-- état / overlays ;
-- timing d'animation.
-
-Pour chaque bridge : documenter la condition qui le déclenche, retrouver la
-sémantique PS1 originale, puis déplacer la correction dans le composant matériel
-ou runtime approprié.
-
-## Phase 6 — Audio, sauvegarde et performance
-
-Après un premier duel visuel :
-
-- SPU ;
-- XA ;
-- memory card ;
-- sauvegarde/chargement ;
-- tests New 3DS physique ;
-- profiling ARM11/interpréteur/rasteriseur ;
-- optimisation des seuls hotspots mesurés.
+Pour chaque bridge : documenter sa condition, retrouver le comportement PS1,
+déplacer la correction dans CD/DMA/GPU/IRQ/timing, puis supprimer le patch
+spécifique.
 
 ## Discipline de travail
 
-- conserver des diagnostics courts et reproductibles ;
+- profiler avant d'optimiser ;
 - ne pas transformer un appel inconnu en no-op sans preuve ;
-- comparer chaque gros jalon avec le runtime PC ;
-- ne pas versionner le BIN, le BIOS Sony, l'EXE extrait ni les shards C générés ;
+- ne pas réouvrir un problème déjà validé sauf régression ;
+- conserver capture/mesure à chaque jalon ;
+- comparer avec le runtime PC ;
+- ne pas versionner BIN, BIOS Sony, EXE extrait ni shards C propriétaires ;
 - garder PSXRecomp sur la révision documentée tant qu'un changement amont n'est
   pas volontairement validé.

@@ -1,22 +1,29 @@
-# Handoff pour ChatGPT Work / nouvelle session
+# Handoff pour nouvelle session
 
-Dernière mise à jour : **19 septembre 2026**.
+Dernière mise à jour : **21 septembre 2026**.
 
 ## Objectif
 
 Porter **Yu-Gi-Oh! Forbidden Memories PAL France SLES-03948** sur New Nintendo
 3DS avec PSXRecomp, fallback R3000A et runtime libctru.
 
+## Révision projet de référence
+
+~~~text
+912036e9355873d652790a97e160819f031724d9
+UP TO FIRST CINEMATIC AND CHAT
+~~~
+
 ## Révision PSXRecomp
 
-```text
+~~~text
 Unchiga/psxrecomp
 1965b2df424da03483a5370340433a862f78f103
-```
+~~~
 
 ## Données de référence
 
-```text
+~~~text
 BIN taille  : 548427600
 BIN SHA-256 : 9ef0d0ba5e42b838bd8312ecfe4071b09c44bc08ee896f6b76f913a41fe4b835
 EXE SHA-256 : 57ecdfb9a9e1faf8b342fe7c7304c23723810861f3ab2fa3bef9eb27b5146b44
@@ -24,91 +31,97 @@ Load        : 0x80010000
 Entry       : 0x800128CC
 Stack       : 0x801FFFF0
 Disc runtime: sdmc:/3ds/fm-new3ds/disc.bin
-```
-
-## Fichiers importants
-
-```text
-3ds/source/main.c
-3ds/source/fm_cpu.c
-3ds/source/fm_memory.c
-3ds/source/fm_runtime_shim.c
-3ds/source/fm_interp.c
-3ds/source/fm_gpu.c
-3ds/source/disc.c
-3ds/source/platform.c
-docs/CURRENT_STATUS.md
-docs/ACTION_PLAN.md
-```
+~~~
 
 ## État fonctionnel actuel
 
-Le backend 3DS/Azahar sait maintenant :
+Le backend sait maintenant :
 
-- afficher Konami ;
-- afficher l'écran titre ;
-- lire START ;
-- poursuivre les lectures CD ;
-- charger l'overlay SU ;
-- exécuter le menu principal en RAM.
+- afficher Konami et l'écran titre ;
+- charger/exécuter SU ;
+- afficher le menu principal ;
+- naviguer et valider ;
+- lancer une nouvelle partie ;
+- afficher la saisie du nom ;
+- écrire et valider le nom ;
+- poursuivre jusqu'à la première cinématique / aux premiers dialogues.
 
-Adresses clés :
+**Ne plus traiter le menu SU invisible comme verrou principal.**
 
-```text
-SU init       : 8018001C
-SU update     : 80180390
-SU draw cb    : 80180B4C
-callback slot : 8009C898
-menu objects  : 80184794...
-selection     : 801847C0
-entrance flag : 801847C5
-```
+## Problème actif
 
-## Dernier test B75
+Le jeu est extrêmement lent dans le chemin actuel : ordre de grandeur observé de
+quelques FPS.
 
-```text
-MENU I/U/D : 1/148/0
-CB         : 80180B4C
-draw       : 147
-bridge     : 1
-objects    : 11
-C0         : 0
-C5         : 1 -> 0
-O0         : flags 00D8, x=160, target=160, timer=0
-O4         : flags 00D8, x=160, timer=0
-O5         : flags 0088, x=160, timer=0
-GP0        : ~301k words
-display    : 0,0
-```
+Déjà intégré :
 
-**Visuellement, l'écran reste le titre.**
+- B105 : LUT RGB555 et mesures de temps ;
+- B106 : flush/swap top screen seulement ;
+- B107 : profil -O3 / release, y compris shards générés ;
+- B108 : instrumentation VSync ;
+- B110 : profiler de plages guest.
 
-Conclusion : ne plus investiguer START, le chargement SU ou l'animation d'entrée
-en premier. Ils sont déjà validés.
+Le ralentissement persiste. Il faut identifier le hotspot avant de modifier
+encore le code.
 
-## Prochain objectif technique
+## Premier objectif de la prochaine session
 
-Construire une trace B76 ciblée sur la chaîne de rendu :
+Obtenir un tableau de coût par frame avec :
 
-1. compteur GP0 à l'entrée/sortie de `80041674` ;
-2. compteur GP0 à l'entrée/sortie de `80180B4C` ;
-3. heads/tails des listes de layer, surtout layer 2 ;
-4. vérifier que les 11 objets SU appartiennent à la chaîne layer 2 ;
-5. afficher les derniers opcodes/coords de la trace GPU ;
-6. détecter si d'anciens objets du titre sont toujours rendus après le menu.
+~~~text
+loop_ms
+guest_ms
+vblank_callback_ms
+software_render_ms
+present_ms
+wait_vblank_ms
+interp_instructions
+fallback_calls
+gp0_words
+primitives
+top_guest_range_0
+top_guest_range_1
+top_guest_range_2
+~~~
 
-Le résultat doit classifier le bug :
+Puis classer le problème : fallback/interpréteur, boucle guest active, VBlank,
+GPU logiciel, copie/present ou autre routine précise.
 
-- objets non visités ;
-- objets visités sans GP0 ;
-- GP0 hors écran / mauvais texture state ;
-- menu recouvert.
+## Hypothèse à tester en priorité
+
+Chercher une fonction ou boucle qui devrait attendre un événement PS1 mais tourne
+actuellement à plein régime parce qu'un bridge/bypass ne reproduit pas correctement
+le timing.
+
+## Cinématique
+
+La première cinématique est atteinte mais visuellement incorrecte. Les pistes
+déjà ouvertes concernent draw offset/area, display start/mode, RGB24, MDEC et
+composition framebuffer.
+
+Ne pas s'y replonger avant une mesure claire des FPS, sauf si le profiler montre
+directement MDEC/composition comme hotspot.
+
+## Build release
+
+~~~sh
+export DEVKITPRO=/opt/devkitpro
+export DEVKITARM=$DEVKITPRO/devkitARM
+export PATH=$DEVKITARM/bin:$PATH
+
+bash rebuild_generated_release.sh
+make -C 3ds clean
+make -C 3ds -j4
+~~~
+
+Le script cherche aussi automatiquement le compilateur dans les installations
+devkitPro courantes sous MSYS/Git Bash.
 
 ## Discipline
 
 - ne pas réintroduire d'hypothèses déjà réfutées ;
-- conserver les bridges actuels tant qu'ils servent à avancer, mais noter qu'ils
-  sont temporaires ;
-- préférer un diagnostic qui sépare clairement deux hypothèses ;
-- après chaque jalon reproductible : build, capture, puis commit ;
+- profiler avant d'optimiser ;
+- conserver les bridges actuels tant qu'ils servent au diagnostic ;
+- préférer une modification qui sépare clairement deux hypothèses ;
+- après chaque jalon reproductible : build, capture, commit ;
 - ne jamais committer BIN, BIOS Sony, EXE extrait ou shards C propriétaires.

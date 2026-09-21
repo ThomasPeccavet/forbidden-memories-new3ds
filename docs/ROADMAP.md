@@ -1,7 +1,10 @@
 # Feuille de route
 
-Objectif final : jeu complet sur New Nintendo 3DS, avec preuves reproductibles à
-chaque étape.
+Objectif final : **Yu-Gi-Oh! Forbidden Memories PAL France jouable de bout en
+bout sur New Nintendo 3DS**, avec un chemin reproductible et de moins en moins
+dépendant des bridges de bring-up.
+
+Dernière mise à jour : **21 septembre 2026**.
 
 ## 1 — Base française et analyse
 
@@ -22,69 +25,96 @@ chaque étape.
 - [x] Fallback R3000A.
 - [x] HLE BIOS nécessaire au boot.
 - [x] GP0/GP1 + rasteriseur logiciel.
-- [x] Première VRAM réellement produite par le jeu.
-- [x] Première image réelle affichée : logo Konami.
-- [x] Écran titre affiché.
+- [x] Logo Konami.
+- [x] Écran titre.
 
-## 3 — Kernel / CD / GPU nécessaires au chemin actuel
+## 3 — Kernel / CD / GPU du chemin courant
 
 - [x] Pad START transmis au guest.
-- [x] VBlank / IRQ suffisants pour atteindre le titre.
-- [x] Lectures CD suffisantes pour atteindre SU.
+- [x] VBlank / IRQ suffisants pour atteindre le menu.
+- [x] Lectures CD suffisantes pour les overlays rencontrés.
 - [x] File CD async suffisante pour le chemin observé.
-- [x] DMA2 / waits GPU bridgés pour le boot observé.
-- [x] Helpers GTE nécessaires au boot observé.
+- [x] DMA2 / waits GPU bridgés pour le chemin observé.
+- [x] Helpers GTE nécessaires au chemin courant.
 - [ ] Remplacer les bridges de bring-up par des modèles généraux.
 
 ## 4 — Overlay SU et menu principal
 
-- [x] Atteindre l'état résident 8.
-- [x] Charger `SU.mrg`.
-- [x] Exécuter `0x8018001C`.
-- [x] Exécuter `0x80180390`.
-- [x] Installer / appeler le callback draw `0x80180B4C`.
-- [x] Créer les 11 objets de menu.
-- [x] Débloquer leur animation d'entrée.
-- [ ] Comprendre pourquoi ils ne sont pas encore visibles.
-- [ ] Afficher le menu français.
-- [ ] Naviguer Haut/Bas.
-- [ ] Valider une entrée.
+- [x] Charger SU.mrg.
+- [x] Exécuter init/update/draw.
+- [x] Créer les objets du menu.
+- [x] Débloquer l'animation d'entrée.
+- [x] Afficher le menu français.
+- [x] Naviguer dans le menu.
+- [x] Valider une entrée.
 
-## 5 — Nouvelle partie et premier duel
+## 5 — Nouvelle partie / introduction
 
-- [ ] Lancer « Nlle partie ».
-- [ ] Charger les overlays suivants.
-- [ ] Parcourir l'introduction.
+- [x] Lancer « Nlle partie ».
+- [x] Afficher la saisie du nom.
+- [x] Saisir le nom.
+- [x] Valider le nom.
+- [x] Atteindre la première cinématique.
+- [x] Atteindre les premiers dialogues.
+- [ ] Corriger le rendu de la première cinématique.
+- [ ] Stabiliser les transitions suivantes.
+- [ ] Atteindre Simon Muran sur le backend 3DS.
+
+## 6 — Performance — priorité actuelle
+
+- [x] Compiler le runtime 3DS en -O3.
+- [x] Recompiler les shards générés en release.
+- [x] Optimiser la conversion RGB555.
+- [x] Éviter le clear complet à chaque frame.
+- [x] Limiter le flush/swap au top screen.
+- [x] Ajouter des mesures de temps de frame.
+- [x] Ajouter un profiler de plages guest.
+- [ ] Mesurer précisément interpréteur vs code ARM recompilé.
+- [ ] Identifier le hotspot dominant.
+- [ ] Vérifier les boucles d'attente/bypass CD-DMA-GPU.
+- [ ] Vérifier le ratio frame guest / VBlank hôte.
+- [ ] Ramener le chemin menu → cinématique à une cadence acceptable.
+- [ ] Tester ensuite sur New 3DS physique.
+
+## 7 — Premier duel 3DS
+
 - [ ] Atteindre Simon Muran.
 - [ ] Afficher le plateau.
-- [ ] Jouer un tour complet.
+- [ ] Afficher la main.
+- [ ] Jouer une carte.
+- [ ] Terminer un tour complet.
+- [ ] Comparer avec le runtime PC.
 
-## 6 — Fidélité matérielle
+## 8 — Fidélité matérielle
 
 - [ ] CD-ROM async général.
 - [ ] DMA GPU général.
 - [ ] IRQ/timers propres.
 - [ ] GTE complet selon les besoins rencontrés.
+- [ ] MDEC / RGB24 / cinématiques fidèles.
 - [ ] Texture window / CLUT / semi-transparence / masking validés.
 - [ ] Suppression progressive des bridges temporaires.
 
-## 7 — Audio et sauvegarde
+## 9 — Audio et sauvegarde
 
 - [ ] SPU.
 - [ ] XA.
-- [ ] synchronisation audio/vidéo.
-- [ ] memory card.
-- [ ] sauvegarde / chargement.
+- [ ] Synchronisation audio/vidéo.
+- [ ] Memory card.
+- [ ] Sauvegarde / chargement.
 
-## 8 — Matériel et optimisation
+## 10 — Validation complète
 
 - [ ] Test New 3DS physique.
-- [ ] Profiling ARM11 / fallback / rasteriseur.
-- [ ] Optimisation.
-- [ ] Validation campagne / menus / duels / progression.
+- [ ] Profiling ARM11 final.
+- [ ] Campagne complète.
+- [ ] Menus / duels / progression validés.
+- [ ] Robustesse des changements d'overlay.
+- [ ] Nettoyage des diagnostics de bring-up.
 
 ## Jalon immédiat
 
-> **Afficher le menu SU déjà actif en mémoire et dans la boucle de rendu.**
+> **Identifier la cause principale des quelques FPS actuels, la corriger, puis
+> reprendre le rendu de la première cinématique.**
 
-Voir [ACTION_PLAN.md](ACTION_PLAN.md) pour l'instrumentation suivante.
+Voir [ACTION_PLAN.md](ACTION_PLAN.md).
