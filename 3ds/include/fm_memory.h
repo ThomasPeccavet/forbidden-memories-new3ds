@@ -52,6 +52,11 @@ typedef struct FMDmaDebugStats
     uint32_t dma2_last_words;
     uint32_t dma2_last_first_header;
 
+    uint32_t dma2_cycle_abort_count;
+    uint32_t dma2_last_cycle_addr;
+    uint32_t dma2_max_nodes;
+    uint32_t dma2_max_words;
+
     uint32_t dma6_transfer_count;
     uint64_t dma6_word_count;
 

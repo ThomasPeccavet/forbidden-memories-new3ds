@@ -14063,7 +14063,7 @@ int main(void)
                 &b100_last_gp105
             );
 
-            printf("BUILD B117-NORMAL-OT-PATH\n");
+            printf("BUILD B118-DMA2-CYCLE-GUARD\n");
 
             printf(
                 "RUN:%c CPU:%08lX RA:%08lX F:%lu I:%s\n",
@@ -14409,6 +14409,27 @@ int main(void)
                 (unsigned long)g_b115_slow_other,
                 (long)g_b115_slow_native_code
             );
+
+            {
+                FMDmaDebugStats b118_dma = {0};
+                fm_memory_dma_debug(&b118_dma);
+
+                printf(
+                    "B118 DMA2 LL:%lu last N/W:%lu/%lu max:%lu/%lu\n",
+                    (unsigned long)b118_dma.dma2_linked_transfer_count,
+                    (unsigned long)b118_dma.dma2_last_nodes,
+                    (unsigned long)b118_dma.dma2_last_words,
+                    (unsigned long)b118_dma.dma2_max_nodes,
+                    (unsigned long)b118_dma.dma2_max_words
+                );
+
+                printf(
+                    "B118 CYCLE:%lu @%06lX CHCR:%08lX\n",
+                    (unsigned long)b118_dma.dma2_cycle_abort_count,
+                    (unsigned long)b118_dma.dma2_last_cycle_addr,
+                    (unsigned long)b118_dma.dma2_chcr
+                );
+            }
 
             /*
              * Les anciens diagnostics restent dans le fichier pour

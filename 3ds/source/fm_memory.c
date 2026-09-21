@@ -163,6 +163,21 @@ static uint32_t g_dma2_last_nodes = 0;
 static uint32_t g_dma2_last_words = 0;
 static uint32_t g_dma2_last_first_header = 0;
 
+/*
+ * B118 - O(1) cycle guard for DMA2 linked lists.
+ *
+ * PS1 RAM contains 2 MiB / 4 = 524288 aligned word addresses.
+ * One bit per possible node costs 64 KiB and avoids the pathological
+ * 65536-node re-walk when a corrupted OT forms a cycle.
+ */
+#define FM_DMA2_VISIT_WORDS (((PSX_RAM_SIZE / 4u) + 31u) / 32u)
+static uint32_t g_dma2_visit_bits[FM_DMA2_VISIT_WORDS];
+
+static uint32_t g_dma2_cycle_abort_count = 0;
+static uint32_t g_dma2_last_cycle_addr = 0;
+static uint32_t g_dma2_max_nodes = 0;
+static uint32_t g_dma2_max_words = 0;
+
 static uint32_t g_dma6_transfer_count = 0;
 static uint64_t g_dma6_word_count = 0;
 
@@ -1364,6 +1379,17 @@ static int fm_dma2_linked_list(void)
 
     ++g_dma2_linked_transfer_count;
 
+    /*
+     * 64 KiB clear once per DMA2 list is bounded and dramatically cheaper
+     * than accidentally walking/rasterizing tens of thousands of repeated
+     * nodes. Valid OTs are unaffected.
+     */
+    memset(
+        g_dma2_visit_bits,
+        0,
+        sizeof(g_dma2_visit_bits)
+    );
+
 
     for (
         unsigned node = 0;
@@ -1371,6 +1397,35 @@ static int fm_dma2_linked_list(void)
         ++node
     )
     {
+        uint32_t visit_index = addr >> 2;
+        uint32_t visit_word = visit_index >> 5;
+        uint32_t visit_mask = 1u << (visit_index & 31u);
+
+        if (g_dma2_visit_bits[visit_word] & visit_mask)
+        {
+            ++g_dma2_cycle_abort_count;
+            g_dma2_last_cycle_addr = addr;
+
+            if (g_dma2_last_nodes > g_dma2_max_nodes)
+            {
+                g_dma2_max_nodes = g_dma2_last_nodes;
+            }
+
+            if (g_dma2_last_words > g_dma2_max_words)
+            {
+                g_dma2_max_words = g_dma2_last_words;
+            }
+
+            /*
+             * A cyclic GPU linked list is invalid. Complete the emulated DMA
+             * after the unique prefix instead of leaving CHCR busy forever.
+             * This changes only corrupted-list behavior.
+             */
+            return 1;
+        }
+
+        g_dma2_visit_bits[visit_word] |= visit_mask;
+
         uint32_t header =
             fm_dma_ram_read_word(
                 addr
@@ -1443,6 +1498,16 @@ static int fm_dma2_linked_list(void)
             g_dma2_madr =
                 next;
 
+            if (g_dma2_last_nodes > g_dma2_max_nodes)
+            {
+                g_dma2_max_nodes = g_dma2_last_nodes;
+            }
+
+            if (g_dma2_last_words > g_dma2_max_words)
+            {
+                g_dma2_max_words = g_dma2_last_words;
+            }
+
             return 1;
         }
 
@@ -1456,9 +1521,24 @@ static int fm_dma2_linked_list(void)
     }
 
     /*
-     * Protection contre une liste cyclique/corrompue.
+     * Protection de dernier recours. With the visited bitset, reaching this
+     * point means an enormous acyclic/corrupt chain rather than a short cycle.
+     * Finish the DMA to avoid pinning the guest in a permanent busy wait.
      */
-    return 0;
+    if (g_dma2_last_nodes > g_dma2_max_nodes)
+    {
+        g_dma2_max_nodes = g_dma2_last_nodes;
+    }
+
+    if (g_dma2_last_words > g_dma2_max_words)
+    {
+        g_dma2_max_words = g_dma2_last_words;
+    }
+
+    ++g_dma2_cycle_abort_count;
+    g_dma2_last_cycle_addr = addr;
+
+    return 1;
 }
 
 
@@ -2499,6 +2579,24 @@ void fm_memory_init(
         0;
 
     g_dma2_last_first_header =
+        0;
+
+    memset(
+        g_dma2_visit_bits,
+        0,
+        sizeof(g_dma2_visit_bits)
+    );
+
+    g_dma2_cycle_abort_count =
+        0;
+
+    g_dma2_last_cycle_addr =
+        0;
+
+    g_dma2_max_nodes =
+        0;
+
+    g_dma2_max_words =
         0;
 
     g_dma6_transfer_count =
@@ -4116,6 +4214,18 @@ void fm_memory_dma_debug(
 
     out->dma2_last_first_header =
         g_dma2_last_first_header;
+
+    out->dma2_cycle_abort_count =
+        g_dma2_cycle_abort_count;
+
+    out->dma2_last_cycle_addr =
+        g_dma2_last_cycle_addr;
+
+    out->dma2_max_nodes =
+        g_dma2_max_nodes;
+
+    out->dma2_max_words =
+        g_dma2_max_words;
 
 
     out->dma6_transfer_count =
