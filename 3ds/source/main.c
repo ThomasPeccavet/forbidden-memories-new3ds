@@ -1822,6 +1822,10 @@ static uint32_t g_b1359_prev_vsc = 0u;
 static uint64_t g_b1359_prev_gp0 = 0u;
 static uint64_t g_b13513_prev_pixels = 0u;
 
+/* B135.19 - interval counters for the continuous map interpreter. */
+static uint64_t g_b13519_prev_region_chunks = 0u;
+static uint64_t g_b13519_prev_region_instructions = 0u;
+
 /*
  * B135.14 - resident dispatch chaining for the Pharaoh map renderer
  * 800342B0..80034D2F.
@@ -1863,6 +1867,12 @@ static uint32_t g_b13517_interp_time_yields = 0u;
  * waiting for the NEXT 3DS VBlank only throws away more CPU time.
  */
 static uint32_t g_b13518_late_vblank_skips = 0u;
+
+/*
+ * B135.19 - total MIPS instructions retired by the continuous resident-map
+ * interpreter. Existing B135.17 "blocks" counter is reused as region chunks.
+ */
+static uint64_t g_b13519_region_instructions = 0u;
 
 
 static int b13517_is_map_interp_pc(uint32_t pc)
@@ -14043,48 +14053,50 @@ int main(void)
                      */
                     if (b13517_is_map_interp_pc(cpu->pc))
                     {
-                        uint32_t b13517_blocks = 0u;
+                        uint32_t b13519_chunks = 0u;
                         int b13517_time_yield = 0;
 
                         ++g_b13517_interp_entries;
 
+                        /*
+                         * B135.19:
+                         * Execute across internal MIPS branch boundaries inside
+                         * fm_interp.c. A 256-instruction chunk amortizes the
+                         * block-return/dispatcher overhead while still letting
+                         * main.c enforce the 12 ms host slice accurately.
+                         */
                         while (
                             game_running
                             &&
                             b13517_is_map_interp_pc(cpu->pc)
                             &&
-                            b13517_blocks < 1024u
+                            b13519_chunks < 256u
                         )
                         {
                             interp =
-                                fm_interp_run_block(
+                                fm_interp_run_region(
                                     cpu,
-                                    8192u
+                                    256u,
+                                    0x000342B0u,
+                                    0x00035AC8u,
+                                    0x00034D30u
                                 );
 
                             interp_ran = 1;
-                            ++b13517_blocks;
+                            ++b13519_chunks;
                             ++g_b13517_interp_blocks;
+                            g_b13519_region_instructions +=
+                                interp.instructions;
 
                             if (
-                                interp.reason == FM_INTERP_BLOCK_DONE
-                                ||
-                                interp.reason == FM_INTERP_BUDGET
+                                interp.reason
+                                ==
+                                FM_INTERP_BUDGET
                             )
                             {
-                                if (
-                                    interp.reason == FM_INTERP_BUDGET
-                                )
-                                {
-                                    ++g_b84_budget_continues;
-                                }
+                                ++g_b84_budget_continues;
 
-                                /*
-                                 * Keep timer reads sparse in the hot path.
-                                 */
                                 if (
-                                    (b13517_blocks & 7u) == 0u
-                                    &&
                                     (osGetTime() - b16_slice_start_ms)
                                         >= g_b105_slice_budget_ms
                                 )
@@ -14097,12 +14109,18 @@ int main(void)
                                 continue;
                             }
 
+                            /*
+                             * BLOCK_DONE now means the chained interpreter
+                             * deliberately reached a PC outside the region or
+                             * the native 0x34D30 entry. Give it back to the
+                             * normal dispatcher immediately.
+                             */
                             break;
                         }
 
-                        if (b13517_blocks > g_b13517_interp_max)
+                        if (b13519_chunks > g_b13517_interp_max)
                         {
-                            g_b13517_interp_max = b13517_blocks;
+                            g_b13517_interp_max = b13519_chunks;
                         }
 
                         if (b13517_time_yield)
@@ -15044,7 +15062,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.18-INTERP-RAM-FAST (BASE B131)\n");
+            printf("BUILD B135.19-INTERP-REGION (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15103,6 +15121,16 @@ int main(void)
                 uint64_t d_pixels =
                     gpu_debug.b125_pixels - g_b13513_prev_pixels;
 
+                uint64_t d_region_chunks =
+                    g_b13517_interp_blocks
+                    -
+                    g_b13519_prev_region_chunks;
+
+                uint64_t d_region_instructions =
+                    g_b13519_region_instructions
+                    -
+                    g_b13519_prev_region_instructions;
+
                 printf(
                     "PERF pre/rend/vb/gfx/wait:%lu/%lu/%lu/%lu/%lu late:%lu\n",
                     (unsigned long)g_b106_pre_gfx_ms,
@@ -15122,6 +15150,12 @@ int main(void)
                 );
 
                 printf(
+                    "D120 rgch/ins:%llu/%llu\n",
+                    (unsigned long long)d_region_chunks,
+                    (unsigned long long)d_region_instructions
+                );
+
+                printf(
                     "CHAIN2 e/d/m:%lu/%llu/%lu samples:%lu\n",
                     (unsigned long)g_b13514_chain_entries,
                     (unsigned long long)g_b13514_chain_dispatches,
@@ -15130,11 +15164,16 @@ int main(void)
                 );
 
                 printf(
-                    "ICHN ent/blk/max/y:%lu/%llu/%lu/%lu\n",
+                    "IRGN ent/ch/max/y:%lu/%llu/%lu/%lu\n",
                     (unsigned long)g_b13517_interp_entries,
                     (unsigned long long)g_b13517_interp_blocks,
                     (unsigned long)g_b13517_interp_max,
                     (unsigned long)g_b13517_interp_time_yields
+                );
+
+                printf(
+                    "IRGN ins:%llu\n",
+                    (unsigned long long)g_b13519_region_instructions
                 );
 
                 printf(
@@ -15149,6 +15188,9 @@ int main(void)
                 g_b1359_prev_vsc = g_b1358_vsync_completions;
                 g_b1359_prev_gp0 = gpu_debug.gp0_words;
                 g_b13513_prev_pixels = gpu_debug.b125_pixels;
+                g_b13519_prev_region_chunks = g_b13517_interp_blocks;
+                g_b13519_prev_region_instructions =
+                    g_b13519_region_instructions;
             }
 
             printf(
