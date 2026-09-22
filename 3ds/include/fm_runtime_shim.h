@@ -127,6 +127,42 @@ const char *fm_runtime_stop_name(
 
 
 /*
+ * B135 - etat BIOS/HLE persistant necessaire au quick-state.
+ * Le contexte de probe/setjmp n'est volontairement jamais serialise.
+ */
+typedef struct FMRuntimeQuickState
+{
+    uint32_t bios_entry_hook_addr;
+    uint32_t bios_clear_pad;
+    uint32_t bios_memory_megabytes;
+    uint32_t bios_tty_bytes;
+
+    uint32_t bios_pad_buf1;
+    uint32_t bios_pad_buf2;
+    uint32_t bios_pad_size1;
+    uint32_t bios_pad_size2;
+    int32_t bios_pad_started;
+
+    struct
+    {
+        uint32_t used;
+        uint32_t enabled;
+        uint32_t ready;
+        uint32_t class_id;
+        uint32_t spec;
+        uint32_t mode;
+        uint32_t func;
+    } events[32];
+
+    uint32_t irq_chain_heads[8];
+    uint32_t change_clear_rcnt[4];
+} FMRuntimeQuickState;
+
+void fm_runtime_quick_save(FMRuntimeQuickState *out);
+void fm_runtime_quick_load(const FMRuntimeQuickState *in);
+
+
+/*
  * ============================================================
  * BIOS HLE minimal
  * ============================================================
