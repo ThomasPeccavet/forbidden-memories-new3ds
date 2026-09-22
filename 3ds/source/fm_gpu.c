@@ -1108,6 +1108,38 @@ static inline void b125_put_gouraud(
 }
 
 
+static inline int32_t b128_div_fp16(
+    int64_t numerator,
+    int32_t denominator
+)
+{
+    if (denominator == 0)
+    {
+        return 0;
+    }
+
+    return
+        (int32_t)(
+            (numerator << 16)
+            /
+            denominator
+        );
+}
+
+
+/*
+ * B128: affine plane gradients + incremental edges.
+ *
+ * B125 still performed several 64-bit divisions on EVERY scanline.
+ * ARM11 has no hardware integer divide, so those helpers dominated the
+ * supposedly "fast" path. B128 performs all divisions once per triangle:
+ *
+ *   - 3 edge X slopes
+ *   - 4 UV plane gradients for textured triangles
+ *   - 6 RGB plane gradients for Gouraud triangles
+ *
+ * Raster loops then use additions only.
+ */
 static void b125_textured_triangle(
     int x0, int y0, int u0, int v0,
     int x1, int y1, int u1, int v1,
@@ -1120,57 +1152,129 @@ static void b125_textured_triangle(
     int semi
 )
 {
-    /*
-     * Sort by Y, keeping UV synchronized.
-     */
-#define B125_SWAP_INT(a,b) do { int _t=(a); (a)=(b); (b)=_t; } while (0)
+#define B128_SWAP_INT(a,b) do { int _t=(a); (a)=(b); (b)=_t; } while (0)
 
     if (y0 > y1)
     {
-        B125_SWAP_INT(x0,x1);
-        B125_SWAP_INT(y0,y1);
-        B125_SWAP_INT(u0,u1);
-        B125_SWAP_INT(v0,v1);
+        B128_SWAP_INT(x0,x1);
+        B128_SWAP_INT(y0,y1);
+        B128_SWAP_INT(u0,u1);
+        B128_SWAP_INT(v0,v1);
     }
 
     if (y0 > y2)
     {
-        B125_SWAP_INT(x0,x2);
-        B125_SWAP_INT(y0,y2);
-        B125_SWAP_INT(u0,u2);
-        B125_SWAP_INT(v0,v2);
+        B128_SWAP_INT(x0,x2);
+        B128_SWAP_INT(y0,y2);
+        B128_SWAP_INT(u0,u2);
+        B128_SWAP_INT(v0,v2);
     }
 
     if (y1 > y2)
     {
-        B125_SWAP_INT(x1,x2);
-        B125_SWAP_INT(y1,y2);
-        B125_SWAP_INT(u1,u2);
-        B125_SWAP_INT(v1,v2);
+        B128_SWAP_INT(x1,x2);
+        B128_SWAP_INT(y1,y2);
+        B128_SWAP_INT(u1,u2);
+        B128_SWAP_INT(v1,v2);
     }
 
-    int dy_total =
-        y2 - y0;
+    int dy02 = y2 - y0;
 
-    if (dy_total <= 0)
+    if (dy02 <= 0)
     {
         return;
     }
 
-    int mod_r =
-        (command & 0xFFu)
-        >>
-        3;
+    int64_t det =
+        (int64_t)(x1 - x0) * (int64_t)(y2 - y0)
+        -
+        (int64_t)(x2 - x0) * (int64_t)(y1 - y0);
 
-    int mod_g =
-        ((command >> 8) & 0xFFu)
-        >>
-        3;
+    if (det == 0)
+    {
+        return;
+    }
 
-    int mod_b =
-        ((command >> 16) & 0xFFu)
-        >>
-        3;
+    /*
+     * 16.16 affine UV plane gradients. Only four divides per triangle.
+     */
+    int32_t du_dx =
+        (int32_t)(
+            (
+                (
+                    (int64_t)(u1 - u0) * (y2 - y0)
+                    -
+                    (int64_t)(u2 - u0) * (y1 - y0)
+                )
+                << 16
+            )
+            /
+            det
+        );
+
+    int32_t du_dy =
+        (int32_t)(
+            (
+                (
+                    (int64_t)(x1 - x0) * (u2 - u0)
+                    -
+                    (int64_t)(x2 - x0) * (u1 - u0)
+                )
+                << 16
+            )
+            /
+            det
+        );
+
+    int32_t dv_dx =
+        (int32_t)(
+            (
+                (
+                    (int64_t)(v1 - v0) * (y2 - y0)
+                    -
+                    (int64_t)(v2 - v0) * (y1 - y0)
+                )
+                << 16
+            )
+            /
+            det
+        );
+
+    int32_t dv_dy =
+        (int32_t)(
+            (
+                (
+                    (int64_t)(x1 - x0) * (v2 - v0)
+                    -
+                    (int64_t)(x2 - x0) * (v1 - v0)
+                )
+                << 16
+            )
+            /
+            det
+        );
+
+    int32_t dx_long =
+        b128_div_fp16(
+            (int64_t)(x2 - x0),
+            dy02
+        );
+
+    int32_t dx_upper =
+        b128_div_fp16(
+            (int64_t)(x1 - x0),
+            y1 - y0
+        );
+
+    int32_t dx_lower =
+        b128_div_fp16(
+            (int64_t)(x2 - x1),
+            y2 - y1
+        );
+
+    int mod_r = (command & 0xFFu) >> 3;
+    int mod_g = ((command >> 8) & 0xFFu) >> 3;
+    int mod_b = ((command >> 16) & 0xFFu) >> 3;
 
     int semi_mode =
         (texpage >> 5)
@@ -1187,141 +1291,40 @@ static void b125_textured_triangle(
 
     for (int y = ys; y < ye; ++y)
     {
-        int second_half =
-            y >= y1;
+        int32_t xl_fp =
+            ((int32_t)x0 << 16)
+            +
+            dx_long * (y - y0);
 
-        int seg_y0 =
-            second_half
-                ? y1
-                : y0;
+        int32_t xs_fp;
 
-        int seg_y1 =
-            second_half
-                ? y2
-                : y1;
-
-        int seg_h =
-            seg_y1 - seg_y0;
-
-        if (seg_h <= 0)
+        if (y < y1)
         {
-            seg_h = 1;
-        }
-
-        int a_num =
-            y - y0;
-
-        int b_num =
-            y - seg_y0;
-
-        int xa =
-            x0
-            +
-            (int)(
-                ((int64_t)(x2 - x0) * a_num)
-                /
-                dy_total
-            );
-
-        int xb;
-        int64_t ua_fp, va_fp, ub_fp, vb_fp;
-
-        ua_fp =
-            ((int64_t)u0 << 16)
-            +
-            (
-                ((int64_t)(u2 - u0) << 16) * a_num
-            )
-            /
-            dy_total;
-
-        va_fp =
-            ((int64_t)v0 << 16)
-            +
-            (
-                ((int64_t)(v2 - v0) << 16) * a_num
-            )
-            /
-            dy_total;
-
-        if (second_half)
-        {
-            xb =
-                x1
+            xs_fp =
+                ((int32_t)x0 << 16)
                 +
-                (int)(
-                    ((int64_t)(x2 - x1) * b_num)
-                    /
-                    seg_h
-                );
-
-            ub_fp =
-                ((int64_t)u1 << 16)
-                +
-                (
-                    ((int64_t)(u2 - u1) << 16) * b_num
-                )
-                /
-                seg_h;
-
-            vb_fp =
-                ((int64_t)v1 << 16)
-                +
-                (
-                    ((int64_t)(v2 - v1) << 16) * b_num
-                )
-                /
-                seg_h;
+                dx_upper * (y - y0);
         }
         else
         {
-            xb =
-                x0
+            xs_fp =
+                ((int32_t)x1 << 16)
                 +
-                (int)(
-                    ((int64_t)(x1 - x0) * b_num)
-                    /
-                    seg_h
-                );
-
-            ub_fp =
-                ((int64_t)u0 << 16)
-                +
-                (
-                    ((int64_t)(u1 - u0) << 16) * b_num
-                )
-                /
-                seg_h;
-
-            vb_fp =
-                ((int64_t)v0 << 16)
-                +
-                (
-                    ((int64_t)(v1 - v0) << 16) * b_num
-                )
-                /
-                seg_h;
+                dx_lower * (y - y1);
         }
 
-        if (xa > xb)
-        {
-            B125_SWAP_INT(xa,xb);
+        int32_t left_fp =
+            xl_fp < xs_fp
+                ? xl_fp
+                : xs_fp;
 
-            int64_t tt;
-            tt=ua_fp; ua_fp=ub_fp; ub_fp=tt;
-            tt=va_fp; va_fp=vb_fp; vb_fp=tt;
-        }
+        int32_t right_fp =
+            xl_fp < xs_fp
+                ? xs_fp
+                : xl_fp;
 
-        int span =
-            xb - xa;
-
-        if (span <= 0)
-        {
-            continue;
-        }
-
-        int sx = xa;
-        int ex = xb;
+        int sx = left_fp >> 16;
+        int ex = right_fp >> 16;
 
         if (sx < g_draw_x1) sx = g_draw_x1;
         if (ex > g_draw_x2 + 1) ex = g_draw_x2 + 1;
@@ -1333,25 +1336,23 @@ static void b125_textured_triangle(
             continue;
         }
 
-        int64_t du_fp =
-            (ub_fp - ua_fp)
-            /
-            span;
+        int32_t u_fp =
+            (int32_t)(
+                ((int64_t)u0 << 16)
+                +
+                (int64_t)du_dx * (sx - x0)
+                +
+                (int64_t)du_dy * (y - y0)
+            );
 
-        int64_t dv_fp =
-            (vb_fp - va_fp)
-            /
-            span;
-
-        int64_t u_fp =
-            ua_fp
-            +
-            du_fp * (sx - xa);
-
-        int64_t v_fp =
-            va_fp
-            +
-            dv_fp * (sx - xa);
+        int32_t v_fp =
+            (int32_t)(
+                ((int64_t)v0 << 16)
+                +
+                (int64_t)dv_dx * (sx - x0)
+                +
+                (int64_t)dv_dy * (y - y0)
+            );
 
         uint16_t *dst =
             g_vram
@@ -1367,8 +1368,8 @@ static void b125_textured_triangle(
         {
             uint16_t texel =
                 b124_fetch_texel(
-                    (int)(u_fp >> 16) & 0xFF,
-                    (int)(v_fp >> 16) & 0xFF,
+                    (u_fp >> 16) & 0xFF,
+                    (v_fp >> 16) & 0xFF,
                     clx,
                     cly,
                     texpage
@@ -1385,15 +1386,12 @@ static void b125_textured_triangle(
                 semi_mode
             );
 
-            u_fp +=
-                du_fp;
-
-            v_fp +=
-                dv_fp;
+            u_fp += du_dx;
+            v_fp += dv_dx;
         }
     }
 
-#undef B125_SWAP_INT
+#undef B128_SWAP_INT
 }
 
 
@@ -1405,34 +1403,43 @@ static void b125_gouraud_triangle(
     int semi_mode
 )
 {
-#define B125_SWAP_INT2(a,b) do { int _t=(a); (a)=(b); (b)=_t; } while (0)
-#define B125_SWAP_U16(a,b) do { uint16_t _t=(a); (a)=(b); (b)=_t; } while (0)
+#define B128_SWAP_INT2(a,b) do { int _t=(a); (a)=(b); (b)=_t; } while (0)
+#define B128_SWAP_U16(a,b) do { uint16_t _t=(a); (a)=(b); (b)=_t; } while (0)
 
     if (y0 > y1)
     {
-        B125_SWAP_INT2(x0,x1);
-        B125_SWAP_INT2(y0,y1);
-        B125_SWAP_U16(c0,c1);
+        B128_SWAP_INT2(x0,x1);
+        B128_SWAP_INT2(y0,y1);
+        B128_SWAP_U16(c0,c1);
     }
 
     if (y0 > y2)
     {
-        B125_SWAP_INT2(x0,x2);
-        B125_SWAP_INT2(y0,y2);
-        B125_SWAP_U16(c0,c2);
+        B128_SWAP_INT2(x0,x2);
+        B128_SWAP_INT2(y0,y2);
+        B128_SWAP_U16(c0,c2);
     }
 
     if (y1 > y2)
     {
-        B125_SWAP_INT2(x1,x2);
-        B125_SWAP_INT2(y1,y2);
-        B125_SWAP_U16(c1,c2);
+        B128_SWAP_INT2(x1,x2);
+        B128_SWAP_INT2(y1,y2);
+        B128_SWAP_U16(c1,c2);
     }
 
-    int dy_total =
-        y2 - y0;
+    int dy02 = y2 - y0;
 
-    if (dy_total <= 0)
+    if (dy02 <= 0)
+    {
+        return;
+    }
+
+    int64_t det =
+        (int64_t)(x1 - x0) * (int64_t)(y2 - y0)
+        -
+        (int64_t)(x2 - x0) * (int64_t)(y1 - y0);
+
+    if (det == 0)
     {
         return;
     }
@@ -1449,6 +1456,42 @@ static void b125_gouraud_triangle(
     int g2 = (c2 >> 5) & 31;
     int b2 = (c2 >> 10) & 31;
 
+#define B128_GRAD_X(a0,a1,a2) \
+    ((int32_t)(((((int64_t)((a1)-(a0)) * (y2-y0)) - \
+                  ((int64_t)((a2)-(a0)) * (y1-y0))) << 16) / det))
+
+#define B128_GRAD_Y(a0,a1,a2) \
+    ((int32_t)(((((int64_t)(x1-x0) * ((a2)-(a0))) - \
+                  ((int64_t)(x2-x0) * ((a1)-(a0)))) << 16) / det))
+
+    int32_t dr_dx = B128_GRAD_X(r0,r1,r2);
+    int32_t dr_dy = B128_GRAD_Y(r0,r1,r2);
+    int32_t dg_dx = B128_GRAD_X(g0,g1,g2);
+    int32_t dg_dy = B128_GRAD_Y(g0,g1,g2);
+    int32_t db_dx = B128_GRAD_X(b0,b1,b2);
+    int32_t db_dy = B128_GRAD_Y(b0,b1,b2);
+
+#undef B128_GRAD_X
+#undef B128_GRAD_Y
+
+    int32_t dx_long =
+        b128_div_fp16(
+            (int64_t)(x2 - x0),
+            dy02
+        );
+
+    int32_t dx_upper =
+        b128_div_fp16(
+            (int64_t)(x1 - x0),
+            y1 - y0
+        );
+
+    int32_t dx_lower =
+        b128_div_fp16(
+            (int64_t)(x2 - x1),
+            y2 - y1
+        );
+
     int ys = y0;
     int ye = y2;
 
@@ -1459,170 +1502,40 @@ static void b125_gouraud_triangle(
 
     for (int y = ys; y < ye; ++y)
     {
-        int second_half =
-            y >= y1;
+        int32_t xl_fp =
+            ((int32_t)x0 << 16)
+            +
+            dx_long * (y - y0);
 
-        int seg_y0 =
-            second_half
-                ? y1
-                : y0;
+        int32_t xs_fp;
 
-        int seg_y1 =
-            second_half
-                ? y2
-                : y1;
-
-        int seg_h =
-            seg_y1 - seg_y0;
-
-        if (seg_h <= 0)
+        if (y < y1)
         {
-            seg_h = 1;
-        }
-
-        int a_num =
-            y - y0;
-
-        int b_num =
-            y - seg_y0;
-
-        int xa =
-            x0
-            +
-            (int)(
-                ((int64_t)(x2 - x0) * a_num)
-                /
-                dy_total
-            );
-
-        int xb;
-
-        int64_t ra_fp =
-            ((int64_t)r0 << 16)
-            +
-            (
-                ((int64_t)(r2 - r0) << 16) * a_num
-            )
-            /
-            dy_total;
-
-        int64_t ga_fp =
-            ((int64_t)g0 << 16)
-            +
-            (
-                ((int64_t)(g2 - g0) << 16) * a_num
-            )
-            /
-            dy_total;
-
-        int64_t ba_fp =
-            ((int64_t)b0 << 16)
-            +
-            (
-                ((int64_t)(b2 - b0) << 16) * a_num
-            )
-            /
-            dy_total;
-
-        int64_t rb_fp, gb_fp, bb_fp;
-
-        if (second_half)
-        {
-            xb =
-                x1
+            xs_fp =
+                ((int32_t)x0 << 16)
                 +
-                (int)(
-                    ((int64_t)(x2 - x1) * b_num)
-                    /
-                    seg_h
-                );
-
-            rb_fp =
-                ((int64_t)r1 << 16)
-                +
-                (
-                    ((int64_t)(r2 - r1) << 16) * b_num
-                )
-                /
-                seg_h;
-
-            gb_fp =
-                ((int64_t)g1 << 16)
-                +
-                (
-                    ((int64_t)(g2 - g1) << 16) * b_num
-                )
-                /
-                seg_h;
-
-            bb_fp =
-                ((int64_t)b1 << 16)
-                +
-                (
-                    ((int64_t)(b2 - b1) << 16) * b_num
-                )
-                /
-                seg_h;
+                dx_upper * (y - y0);
         }
         else
         {
-            xb =
-                x0
+            xs_fp =
+                ((int32_t)x1 << 16)
                 +
-                (int)(
-                    ((int64_t)(x1 - x0) * b_num)
-                    /
-                    seg_h
-                );
-
-            rb_fp =
-                ((int64_t)r0 << 16)
-                +
-                (
-                    ((int64_t)(r1 - r0) << 16) * b_num
-                )
-                /
-                seg_h;
-
-            gb_fp =
-                ((int64_t)g0 << 16)
-                +
-                (
-                    ((int64_t)(g1 - g0) << 16) * b_num
-                )
-                /
-                seg_h;
-
-            bb_fp =
-                ((int64_t)b0 << 16)
-                +
-                (
-                    ((int64_t)(b1 - b0) << 16) * b_num
-                )
-                /
-                seg_h;
+                dx_lower * (y - y1);
         }
 
-        if (xa > xb)
-        {
-            B125_SWAP_INT2(xa,xb);
+        int32_t left_fp =
+            xl_fp < xs_fp
+                ? xl_fp
+                : xs_fp;
 
-            int64_t tt;
-            tt=ra_fp; ra_fp=rb_fp; rb_fp=tt;
-            tt=ga_fp; ga_fp=gb_fp; gb_fp=tt;
-            tt=ba_fp; ba_fp=bb_fp; bb_fp=tt;
-        }
+        int32_t right_fp =
+            xl_fp < xs_fp
+                ? xs_fp
+                : xl_fp;
 
-        int span =
-            xb - xa;
-
-        if (span <= 0)
-        {
-            continue;
-        }
-
-        int sx = xa;
-        int ex = xb;
+        int sx = left_fp >> 16;
+        int ex = right_fp >> 16;
 
         if (sx < g_draw_x1) sx = g_draw_x1;
         if (ex > g_draw_x2 + 1) ex = g_draw_x2 + 1;
@@ -1634,35 +1547,32 @@ static void b125_gouraud_triangle(
             continue;
         }
 
-        int64_t dr_fp =
-            (rb_fp - ra_fp)
-            /
-            span;
+        int32_t r_fp =
+            (int32_t)(
+                ((int64_t)r0 << 16)
+                +
+                (int64_t)dr_dx * (sx - x0)
+                +
+                (int64_t)dr_dy * (y - y0)
+            );
 
-        int64_t dg_fp =
-            (gb_fp - ga_fp)
-            /
-            span;
+        int32_t g_fp =
+            (int32_t)(
+                ((int64_t)g0 << 16)
+                +
+                (int64_t)dg_dx * (sx - x0)
+                +
+                (int64_t)dg_dy * (y - y0)
+            );
 
-        int64_t db_fp =
-            (bb_fp - ba_fp)
-            /
-            span;
-
-        int64_t r_fp =
-            ra_fp
-            +
-            dr_fp * (sx - xa);
-
-        int64_t g_fp =
-            ga_fp
-            +
-            dg_fp * (sx - xa);
-
-        int64_t b_fp =
-            ba_fp
-            +
-            db_fp * (sx - xa);
+        int32_t b_fp =
+            (int32_t)(
+                ((int64_t)b0 << 16)
+                +
+                (int64_t)db_dx * (sx - x0)
+                +
+                (int64_t)db_dy * (y - y0)
+            );
 
         uint16_t *dst =
             g_vram
@@ -1676,9 +1586,9 @@ static void b125_gouraud_triangle(
 
         for (int x = sx; x < ex; ++x, ++dst)
         {
-            int r = (int)(r_fp >> 16);
-            int g = (int)(g_fp >> 16);
-            int b = (int)(b_fp >> 16);
+            int r = r_fp >> 16;
+            int g = g_fp >> 16;
+            int b = b_fp >> 16;
 
             if (r < 0) r = 0; else if (r > 31) r = 31;
             if (g < 0) g = 0; else if (g > 31) g = 31;
@@ -1700,19 +1610,14 @@ static void b125_gouraud_triangle(
                 semi_mode
             );
 
-            r_fp +=
-                dr_fp;
-
-            g_fp +=
-                dg_fp;
-
-            b_fp +=
-                db_fp;
+            r_fp += dr_dx;
+            g_fp += dg_dx;
+            b_fp += db_dx;
         }
     }
 
-#undef B125_SWAP_INT2
-#undef B125_SWAP_U16
+#undef B128_SWAP_INT2
+#undef B128_SWAP_U16
 }
 
 

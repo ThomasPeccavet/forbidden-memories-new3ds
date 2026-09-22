@@ -14308,7 +14308,7 @@ int main(void)
                 &b100_last_gp105
             );
 
-            printf("BUILD B127-VALID-GPU-STATS\n");
+            printf("BUILD B128-PLANE-GRADIENT-RASTER\n");
 
             printf(
                 "RUN:%c CPU:%08lX RA:%08lX F:%lu I:%s\n",
@@ -14799,6 +14799,10 @@ int main(void)
 
                     printf(
                         "B127 stats:LIVE\n"
+                    );
+
+                    printf(
+                        "B128 raster:PLANE16\n"
                     );
                 }
             }
