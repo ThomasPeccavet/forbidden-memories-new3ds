@@ -1863,6 +1863,16 @@ static int b13517_is_map_interp_pc(uint32_t pc)
 {
     uint32_t phys = pc & 0x1FFFFFFFu;
 
+    /*
+     * 34D30 is a real compiled function entry. Hand it back to the native
+     * dispatcher instead of interpreting the whole function from its entry.
+     * Internal labels inside it (e.g. 35988) remain eligible.
+     */
+    if (phys == 0x00034D30u)
+    {
+        return 0;
+    }
+
     return
         phys >= 0x000342B0u
         &&
