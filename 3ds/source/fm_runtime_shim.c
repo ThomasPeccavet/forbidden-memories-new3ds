@@ -2294,19 +2294,119 @@ void gte_write_ctrl(
 
 /*
  * ============================================================
- * B135 - premier opcode GTE natif : GPF (0x3D)
+ * B135.2 - noyau GTE necessaire a la scene Simon
  * ============================================================
  *
- * B131 s'arrete volontairement dans gte_execute() pour toute commande
- * COP2 non couverte par les HLE B62. La scene de Simon Muran atteint
- * FUN_80088BD8 (PC observe 80088CD0), qui emet 0x0198003D : GPF.
+ * Le premier verrou etait GPF (0x3D) a 80088CD0. Apres ce correctif,
+ * la scene avance puis atteint RTPT (0x30) a 80087B64.
  *
- * On implemente uniquement GPF ici. Les autres commandes conservent le
- * fail-stop historique afin de ne pas masquer le prochain verrou.
+ * Le pseudo-C Ghidra des helpers 800879D8 / 80087A38 montre que ce
+ * chemin enchaine directement :
+ *   RTPT (0x30) -> RTPS (0x01) -> AVSZ3/AVSZ4 (0x2D/0x2E)
+ *
+ * On implemente donc ce petit noyau geometrique coherent, plus NCLIP
+ * (0x06), plutot que de patcher une instruction par test.
+ *
+ * Les autres commandes GTE restent fail-stop : si un nouveau groupe
+ * fonctionnel est requis, le prochain STOP restera explicite.
  */
+
+#define FM_GTE_FLAG_MAC1_POS  (1u << 30)
+#define FM_GTE_FLAG_MAC2_POS  (1u << 29)
+#define FM_GTE_FLAG_MAC3_POS  (1u << 28)
+#define FM_GTE_FLAG_MAC1_NEG  (1u << 27)
+#define FM_GTE_FLAG_MAC2_NEG  (1u << 26)
+#define FM_GTE_FLAG_MAC3_NEG  (1u << 25)
+#define FM_GTE_FLAG_IR1_SAT   (1u << 24)
+#define FM_GTE_FLAG_IR2_SAT   (1u << 23)
+#define FM_GTE_FLAG_IR3_SAT   (1u << 22)
+#define FM_GTE_FLAG_SZ_OTZ    (1u << 18)
+#define FM_GTE_FLAG_DIV_OVF   (1u << 17)
+#define FM_GTE_FLAG_MAC0_POS  (1u << 16)
+#define FM_GTE_FLAG_MAC0_NEG  (1u << 15)
+#define FM_GTE_FLAG_SX_SAT    (1u << 14)
+#define FM_GTE_FLAG_SY_SAT    (1u << 13)
+#define FM_GTE_FLAG_IR0_SAT   (1u << 12)
+#define FM_GTE_FLAG_ERROR_MASK 0x7F87E000u
+
+
 static int32_t fm_b135_gte_s16(uint32_t value)
 {
     return (int32_t)(int16_t)(value & 0xFFFFu);
+}
+
+
+static int32_t fm_b135_gte_hi_s16(uint32_t value)
+{
+    return (int32_t)(int16_t)((value >> 16) & 0xFFFFu);
+}
+
+
+static void fm_b135_gte_finish_flags(
+    CPUState *cpu,
+    uint32_t flags
+)
+{
+    if (flags & FM_GTE_FLAG_ERROR_MASK)
+    {
+        flags |= 0x80000000u;
+    }
+
+    cpu->gte_ctrl[31] = flags;
+}
+
+
+static void fm_b135_gte_check_mac(
+    int64_t value,
+    unsigned index,
+    uint32_t *flags
+)
+{
+    static const uint32_t pos_bits[3] =
+    {
+        FM_GTE_FLAG_MAC1_POS,
+        FM_GTE_FLAG_MAC2_POS,
+        FM_GTE_FLAG_MAC3_POS
+    };
+
+    static const uint32_t neg_bits[3] =
+    {
+        FM_GTE_FLAG_MAC1_NEG,
+        FM_GTE_FLAG_MAC2_NEG,
+        FM_GTE_FLAG_MAC3_NEG
+    };
+
+    if (index >= 3u)
+    {
+        return;
+    }
+
+    if (value > 0x7FFFFFFFFLL)
+    {
+        *flags |= pos_bits[index];
+    }
+
+    if (value < -0x800000000LL)
+    {
+        *flags |= neg_bits[index];
+    }
+}
+
+
+static void fm_b135_gte_check_mac0(
+    int64_t value,
+    uint32_t *flags
+)
+{
+    if (value > 0x7FFFFFFFLL)
+    {
+        *flags |= FM_GTE_FLAG_MAC0_POS;
+    }
+
+    if (value < -0x80000000LL)
+    {
+        *flags |= FM_GTE_FLAG_MAC0_NEG;
+    }
 }
 
 
@@ -2357,6 +2457,643 @@ static uint32_t fm_b135_gte_sat_color(
 }
 
 
+static uint16_t fm_b135_gte_sat_sz(
+    int64_t value,
+    uint32_t *flags
+)
+{
+    if (value < 0)
+    {
+        *flags |= FM_GTE_FLAG_SZ_OTZ;
+        return 0u;
+    }
+
+    if (value > 0xFFFF)
+    {
+        *flags |= FM_GTE_FLAG_SZ_OTZ;
+        return 0xFFFFu;
+    }
+
+    return (uint16_t)value;
+}
+
+
+static int32_t fm_b135_gte_sat_ir0(
+    int64_t value,
+    uint32_t *flags
+)
+{
+    if (value < 0)
+    {
+        *flags |= FM_GTE_FLAG_IR0_SAT;
+        return 0;
+    }
+
+    if (value > 0x1000)
+    {
+        *flags |= FM_GTE_FLAG_IR0_SAT;
+        return 0x1000;
+    }
+
+    return (int32_t)value;
+}
+
+
+static void fm_b135_gte_push_sz(
+    CPUState *cpu,
+    int64_t value,
+    uint32_t *flags
+)
+{
+    cpu->gte_data[16] = cpu->gte_data[17] & 0xFFFFu;
+    cpu->gte_data[17] = cpu->gte_data[18] & 0xFFFFu;
+    cpu->gte_data[18] = cpu->gte_data[19] & 0xFFFFu;
+    cpu->gte_data[19] =
+        (uint32_t)fm_b135_gte_sat_sz(
+            value,
+            flags
+        );
+}
+
+
+static void fm_b135_gte_push_sxy(
+    CPUState *cpu,
+    int64_t sx,
+    int64_t sy,
+    uint32_t *flags
+)
+{
+    int32_t sx_sat;
+    int32_t sy_sat;
+
+    if (sx < -0x400)
+    {
+        sx_sat = -0x400;
+        *flags |= FM_GTE_FLAG_SX_SAT;
+    }
+    else if (sx > 0x3FF)
+    {
+        sx_sat = 0x3FF;
+        *flags |= FM_GTE_FLAG_SX_SAT;
+    }
+    else
+    {
+        sx_sat = (int32_t)sx;
+    }
+
+    if (sy < -0x400)
+    {
+        sy_sat = -0x400;
+        *flags |= FM_GTE_FLAG_SY_SAT;
+    }
+    else if (sy > 0x3FF)
+    {
+        sy_sat = 0x3FF;
+        *flags |= FM_GTE_FLAG_SY_SAT;
+    }
+    else
+    {
+        sy_sat = (int32_t)sy;
+    }
+
+    cpu->gte_data[12] = cpu->gte_data[13];
+    cpu->gte_data[13] = cpu->gte_data[14];
+    cpu->gte_data[14] =
+        ((uint32_t)(uint16_t)sy_sat << 16)
+        |
+        (uint32_t)(uint16_t)sx_sat;
+
+    /* SXYP aliases SXY2 after a normal projection push. */
+    cpu->gte_data[15] = cpu->gte_data[14];
+}
+
+
+static uint8_t g_b135_div_table[0x101];
+static int g_b135_div_table_ready = 0;
+
+
+static void fm_b135_gte_init_div_table(void)
+{
+    if (g_b135_div_table_ready)
+    {
+        return;
+    }
+
+    for (
+        uint32_t divisor = 0x8000u;
+        divisor < 0x10000u;
+        divisor += 0x80u
+    )
+    {
+        uint32_t xa = 512u;
+
+        for (unsigned i = 1u; i < 5u; ++i)
+        {
+            xa =
+                (
+                    xa
+                    *
+                    (
+                        1024u * 512u
+                        -
+                        ((divisor >> 7) * xa)
+                    )
+                )
+                >> 18;
+        }
+
+        g_b135_div_table[(divisor >> 7) & 0xFFu] =
+            (uint8_t)(
+                ((xa + 1u) >> 1)
+                -
+                0x101u
+            );
+    }
+
+    g_b135_div_table[0x100] =
+        g_b135_div_table[0xFF];
+
+    g_b135_div_table_ready = 1;
+}
+
+
+static unsigned fm_b135_gte_clz16(uint16_t value)
+{
+    unsigned n = 0u;
+
+    for (int bit = 15; bit >= 0; --bit)
+    {
+        if (value & (uint16_t)(1u << bit))
+        {
+            break;
+        }
+
+        ++n;
+    }
+
+    return n;
+}
+
+
+static int32_t fm_b135_gte_calc_recip(uint16_t divisor)
+{
+    int32_t x =
+        0x101
+        +
+        g_b135_div_table[
+            (((divisor & 0x7FFFu) + 0x40u) >> 7)
+        ];
+
+    int32_t tmp =
+        (
+            ((int32_t)divisor * -x)
+            +
+            0x80
+        )
+        >> 8;
+
+    int32_t tmp2 =
+        (
+            x
+            *
+            (131072 + tmp)
+            +
+            0x80
+        )
+        >> 8;
+
+    return tmp2;
+}
+
+
+static int32_t fm_b135_gte_divide(
+    uint16_t h,
+    uint16_t sz3,
+    uint32_t *flags
+)
+{
+    fm_b135_gte_init_div_table();
+
+    if ((uint32_t)sz3 * 2u <= (uint32_t)h)
+    {
+        *flags |= FM_GTE_FLAG_DIV_OVF;
+        return 0x1FFFF;
+    }
+
+    unsigned shift =
+        fm_b135_gte_clz16(
+            sz3
+        );
+
+    uint32_t dividend =
+        (uint32_t)h << shift;
+
+    uint32_t divisor =
+        (uint32_t)sz3 << shift;
+
+    uint32_t result =
+        (uint32_t)(
+            (
+                (uint64_t)dividend
+                *
+                (uint32_t)fm_b135_gte_calc_recip(
+                    (uint16_t)(divisor | 0x8000u)
+                )
+                +
+                32768u
+            )
+            >> 16
+        );
+
+    if (result > 0x1FFFFu)
+    {
+        result = 0x1FFFFu;
+    }
+
+    return (int32_t)result;
+}
+
+
+static void fm_b135_gte_unpack_rt(
+    const CPUState *cpu,
+    int32_t rt[3][3]
+)
+{
+    const uint32_t *c = cpu->gte_ctrl;
+
+    rt[0][0] = fm_b135_gte_s16(c[0]);
+    rt[0][1] = fm_b135_gte_hi_s16(c[0]);
+    rt[0][2] = fm_b135_gte_s16(c[1]);
+
+    rt[1][0] = fm_b135_gte_hi_s16(c[1]);
+    rt[1][1] = fm_b135_gte_s16(c[2]);
+    rt[1][2] = fm_b135_gte_hi_s16(c[2]);
+
+    rt[2][0] = fm_b135_gte_s16(c[3]);
+    rt[2][1] = fm_b135_gte_hi_s16(c[3]);
+    rt[2][2] = fm_b135_gte_s16(c[4]);
+}
+
+
+static void fm_b135_gte_unpack_vertex(
+    const CPUState *cpu,
+    unsigned index,
+    int32_t out[3]
+)
+{
+    unsigned base = index * 2u;
+
+    out[0] = fm_b135_gte_s16(cpu->gte_data[base]);
+    out[1] = fm_b135_gte_hi_s16(cpu->gte_data[base]);
+    out[2] = fm_b135_gte_s16(cpu->gte_data[base + 1u]);
+}
+
+
+static void fm_b135_gte_rtps_one(
+    CPUState *cpu,
+    const int32_t vertex[3],
+    int set_mac0,
+    uint32_t cmd,
+    uint32_t *flags
+)
+{
+    int32_t rt[3][3];
+    fm_b135_gte_unpack_rt(cpu, rt);
+
+    const int shift =
+        (cmd & (1u << 19))
+            ? 12
+            : 0;
+
+    const int lm =
+        (cmd & (1u << 10))
+            ? 1
+            : 0;
+
+    int64_t mac1_raw =
+        (int64_t)(int32_t)cpu->gte_ctrl[5] * 4096
+        +
+        (int64_t)rt[0][0] * vertex[0]
+        +
+        (int64_t)rt[0][1] * vertex[1]
+        +
+        (int64_t)rt[0][2] * vertex[2];
+
+    int64_t mac2_raw =
+        (int64_t)(int32_t)cpu->gte_ctrl[6] * 4096
+        +
+        (int64_t)rt[1][0] * vertex[0]
+        +
+        (int64_t)rt[1][1] * vertex[1]
+        +
+        (int64_t)rt[1][2] * vertex[2];
+
+    int64_t mac3_raw =
+        (int64_t)(int32_t)cpu->gte_ctrl[7] * 4096
+        +
+        (int64_t)rt[2][0] * vertex[0]
+        +
+        (int64_t)rt[2][1] * vertex[1]
+        +
+        (int64_t)rt[2][2] * vertex[2];
+
+    fm_b135_gte_check_mac(mac1_raw >> 12, 0u, flags);
+    fm_b135_gte_check_mac(mac2_raw >> 12, 1u, flags);
+    fm_b135_gte_check_mac(mac3_raw >> 12, 2u, flags);
+
+    int32_t mac1 =
+        (int32_t)(mac1_raw >> shift);
+
+    int32_t mac2 =
+        (int32_t)(mac2_raw >> shift);
+
+    int32_t mac3 =
+        (int32_t)(mac3_raw >> shift);
+
+    cpu->gte_data[25] = (uint32_t)mac1;
+    cpu->gte_data[26] = (uint32_t)mac2;
+    cpu->gte_data[27] = (uint32_t)mac3;
+
+    int32_t ir1 =
+        fm_b135_gte_sat_ir(
+            mac1,
+            lm,
+            FM_GTE_FLAG_IR1_SAT,
+            flags
+        );
+
+    int32_t ir2 =
+        fm_b135_gte_sat_ir(
+            mac2,
+            lm,
+            FM_GTE_FLAG_IR2_SAT,
+            flags
+        );
+
+    /*
+     * Hardware quirk: FLAG.IR3 is evaluated from the unshifted >>12
+     * view with lm=0, while the stored IR3 uses the actual sf/lm.
+     */
+    (void)fm_b135_gte_sat_ir(
+        mac3_raw >> 12,
+        0,
+        FM_GTE_FLAG_IR3_SAT,
+        flags
+    );
+
+    int32_t ir3 = mac3;
+    int32_t ir3_lo = lm ? 0 : -32768;
+
+    if (ir3 < ir3_lo)
+    {
+        ir3 = ir3_lo;
+    }
+
+    if (ir3 > 32767)
+    {
+        ir3 = 32767;
+    }
+
+    cpu->gte_data[9] = (uint32_t)ir1;
+    cpu->gte_data[10] = (uint32_t)ir2;
+    cpu->gte_data[11] = (uint32_t)ir3;
+
+    fm_b135_gte_push_sz(
+        cpu,
+        mac3_raw >> 12,
+        flags
+    );
+
+    uint16_t h =
+        (uint16_t)(cpu->gte_ctrl[26] & 0xFFFFu);
+
+    uint16_t sz3 =
+        (uint16_t)(cpu->gte_data[19] & 0xFFFFu);
+
+    int32_t h_div_sz =
+        fm_b135_gte_divide(
+            h,
+            sz3,
+            flags
+        );
+
+    int64_t sx =
+        (
+            (int64_t)(int32_t)cpu->gte_ctrl[24]
+            +
+            (int64_t)ir1 * h_div_sz
+        )
+        >> 16;
+
+    int64_t sy =
+        (
+            (int64_t)(int32_t)cpu->gte_ctrl[25]
+            +
+            (int64_t)ir2 * h_div_sz
+        )
+        >> 16;
+
+    fm_b135_gte_push_sxy(
+        cpu,
+        sx,
+        sy,
+        flags
+    );
+
+    if (set_mac0)
+    {
+        int32_t dqa =
+            fm_b135_gte_s16(
+                cpu->gte_ctrl[27]
+            );
+
+        int32_t dqb =
+            (int32_t)cpu->gte_ctrl[28];
+
+        int64_t mac0 =
+            (int64_t)dqa * h_div_sz
+            +
+            dqb;
+
+        fm_b135_gte_check_mac0(
+            mac0,
+            flags
+        );
+
+        cpu->gte_data[24] =
+            (uint32_t)(int32_t)mac0;
+
+        cpu->gte_data[8] =
+            (uint32_t)fm_b135_gte_sat_ir0(
+                mac0 >> 12,
+                flags
+            );
+    }
+}
+
+
+static void fm_b135_gte_rtps(
+    CPUState *cpu,
+    uint32_t cmd
+)
+{
+    uint32_t flags = 0u;
+    int32_t v0[3];
+
+    fm_b135_gte_unpack_vertex(
+        cpu,
+        0u,
+        v0
+    );
+
+    fm_b135_gte_rtps_one(
+        cpu,
+        v0,
+        1,
+        cmd,
+        &flags
+    );
+
+    fm_b135_gte_finish_flags(
+        cpu,
+        flags
+    );
+}
+
+
+static void fm_b135_gte_rtpt(
+    CPUState *cpu,
+    uint32_t cmd
+)
+{
+    uint32_t flags = 0u;
+    int32_t v[3];
+
+    for (unsigned i = 0u; i < 3u; ++i)
+    {
+        fm_b135_gte_unpack_vertex(
+            cpu,
+            i,
+            v
+        );
+
+        fm_b135_gte_rtps_one(
+            cpu,
+            v,
+            i == 2u,
+            cmd,
+            &flags
+        );
+    }
+
+    fm_b135_gte_finish_flags(
+        cpu,
+        flags
+    );
+}
+
+
+static void fm_b135_gte_nclip(
+    CPUState *cpu
+)
+{
+    uint32_t flags = 0u;
+
+    int32_t sx0 = fm_b135_gte_s16(cpu->gte_data[12]);
+    int32_t sy0 = fm_b135_gte_hi_s16(cpu->gte_data[12]);
+    int32_t sx1 = fm_b135_gte_s16(cpu->gte_data[13]);
+    int32_t sy1 = fm_b135_gte_hi_s16(cpu->gte_data[13]);
+    int32_t sx2 = fm_b135_gte_s16(cpu->gte_data[14]);
+    int32_t sy2 = fm_b135_gte_hi_s16(cpu->gte_data[14]);
+
+    int64_t mac0 =
+        (int64_t)sx0 * (sy1 - sy2)
+        +
+        (int64_t)sx1 * (sy2 - sy0)
+        +
+        (int64_t)sx2 * (sy0 - sy1);
+
+    fm_b135_gte_check_mac0(
+        mac0,
+        &flags
+    );
+
+    cpu->gte_data[24] =
+        (uint32_t)(int32_t)mac0;
+
+    fm_b135_gte_finish_flags(
+        cpu,
+        flags
+    );
+}
+
+
+static void fm_b135_gte_avsz(
+    CPUState *cpu,
+    int four_points
+)
+{
+    uint32_t flags = 0u;
+
+    int64_t sum;
+
+    int32_t zsf;
+
+    if (four_points)
+    {
+        sum =
+            (int64_t)(cpu->gte_data[16] & 0xFFFFu)
+            +
+            (int64_t)(cpu->gte_data[17] & 0xFFFFu)
+            +
+            (int64_t)(cpu->gte_data[18] & 0xFFFFu)
+            +
+            (int64_t)(cpu->gte_data[19] & 0xFFFFu);
+
+        zsf =
+            fm_b135_gte_s16(
+                cpu->gte_ctrl[30]
+            );
+    }
+    else
+    {
+        sum =
+            (int64_t)(cpu->gte_data[17] & 0xFFFFu)
+            +
+            (int64_t)(cpu->gte_data[18] & 0xFFFFu)
+            +
+            (int64_t)(cpu->gte_data[19] & 0xFFFFu);
+
+        zsf =
+            fm_b135_gte_s16(
+                cpu->gte_ctrl[29]
+            );
+    }
+
+    int64_t mac0 =
+        (int64_t)zsf * sum;
+
+    fm_b135_gte_check_mac0(
+        mac0,
+        &flags
+    );
+
+    cpu->gte_data[24] =
+        (uint32_t)(int32_t)mac0;
+
+    cpu->gte_data[7] =
+        (uint32_t)fm_b135_gte_sat_sz(
+            mac0 >> 12,
+            &flags
+        );
+
+    fm_b135_gte_finish_flags(
+        cpu,
+        flags
+    );
+}
+
+
 static void fm_b135_gte_gpf(
     CPUState *cpu,
     uint32_t cmd
@@ -2387,9 +3124,13 @@ static void fm_b135_gte_gpf(
 
     uint32_t flags = 0u;
 
-    int32_t out1 = fm_b135_gte_sat_ir(mac1, lm, 1u << 24, &flags);
-    int32_t out2 = fm_b135_gte_sat_ir(mac2, lm, 1u << 23, &flags);
-    int32_t out3 = fm_b135_gte_sat_ir(mac3, lm, 1u << 22, &flags);
+    fm_b135_gte_check_mac(mac1, 0u, &flags);
+    fm_b135_gte_check_mac(mac2, 1u, &flags);
+    fm_b135_gte_check_mac(mac3, 2u, &flags);
+
+    int32_t out1 = fm_b135_gte_sat_ir(mac1, lm, FM_GTE_FLAG_IR1_SAT, &flags);
+    int32_t out2 = fm_b135_gte_sat_ir(mac2, lm, FM_GTE_FLAG_IR2_SAT, &flags);
+    int32_t out3 = fm_b135_gte_sat_ir(mac3, lm, FM_GTE_FLAG_IR3_SAT, &flags);
 
     cpu->gte_data[9]  = (uint32_t)out1;
     cpu->gte_data[10] = (uint32_t)out2;
@@ -2404,12 +3145,10 @@ static void fm_b135_gte_gpf(
     cpu->gte_data[21] = cpu->gte_data[22];
     cpu->gte_data[22] = code | (b << 16) | (g << 8) | r;
 
-    if (flags != 0u)
-    {
-        flags |= 0x80000000u;
-    }
-
-    cpu->gte_ctrl[31] = flags;
+    fm_b135_gte_finish_flags(
+        cpu,
+        flags
+    );
 }
 
 
@@ -2418,25 +3157,49 @@ void gte_execute(
     uint32_t cmd
 )
 {
-    if (
-        cpu != NULL
-        &&
-        (cmd & 0x3Fu) == 0x3Du
-    )
+    if (!cpu)
     {
-        fm_b135_gte_gpf(
-            cpu,
+        fm_probe_stop(
+            FM_STOP_GTE,
             cmd
         );
 
         return;
     }
 
+    switch (cmd & 0x3Fu)
+    {
+        case 0x01u:
+            fm_b135_gte_rtps(cpu, cmd);
+            return;
 
-    fm_probe_stop(
-        FM_STOP_GTE,
-        cmd
-    );
+        case 0x06u:
+            fm_b135_gte_nclip(cpu);
+            return;
+
+        case 0x2Du:
+            fm_b135_gte_avsz(cpu, 0);
+            return;
+
+        case 0x2Eu:
+            fm_b135_gte_avsz(cpu, 1);
+            return;
+
+        case 0x30u:
+            fm_b135_gte_rtpt(cpu, cmd);
+            return;
+
+        case 0x3Du:
+            fm_b135_gte_gpf(cpu, cmd);
+            return;
+
+        default:
+            fm_probe_stop(
+                FM_STOP_GTE,
+                cmd
+            );
+            return;
+    }
 }
 
 
