@@ -14257,6 +14257,15 @@ int main(void)
                 fm_gpu_gp0_count();
 
             /*
+             * B127: B124/B125/B126 counters previously displayed zeros
+             * because the compact debug path never populated gpu_debug.
+             * Use a lightweight getter that does not scan the whole VRAM.
+             */
+            fm_gpu_b127_perf_snapshot(
+                &gpu_debug
+            );
+
+            /*
              * =================================================
              * B55 - affichage COMPACT
              * =================================================
@@ -14299,7 +14308,7 @@ int main(void)
                 &b100_last_gp105
             );
 
-            printf("BUILD B126-GPU-FASTPATH-DIAG\n");
+            printf("BUILD B127-VALID-GPU-STATS\n");
 
             printf(
                 "RUN:%c CPU:%08lX RA:%08lX F:%lu I:%s\n",
@@ -14786,6 +14795,10 @@ int main(void)
                         gpu_debug.b126_wide,
                         gpu_debug.b126_filter,
                         (unsigned long)gpu_debug.b126_reject_mask
+                    );
+
+                    printf(
+                        "B127 stats:LIVE\n"
                     );
                 }
             }

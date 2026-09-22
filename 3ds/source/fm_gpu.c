@@ -5200,6 +5200,73 @@ static uint32_t fm_gpu_count_nonzero_rect(
 }
 
 
+void fm_gpu_b127_perf_snapshot(
+    FMGpuDebugStats *out
+)
+{
+    if (!out)
+    {
+        return;
+    }
+
+    /*
+     * Do not memset the whole structure here. main.c already owns the
+     * snapshot and may have filled cheap fields such as gp0_words.
+     * Only copy counters needed by B124..B127.
+     */
+    out->b124_rect_hits =
+        g_b124_rect_hits;
+
+    out->b124_rect_fallbacks =
+        g_b124_rect_fallbacks;
+
+    out->b124_rect_pixels =
+        g_b124_rect_pixels;
+
+    out->b124_rect_texels =
+        g_b124_rect_texels;
+
+    out->b125_texquad_hits =
+        g_b125_texquad_hits;
+
+    out->b125_gouraud_hits =
+        g_b125_gouraud_hits;
+
+    out->b125_fallbacks =
+        g_b125_fallbacks;
+
+    out->b125_pixels =
+        g_b125_pixels;
+
+    out->b126_seen_2c =
+        g_b126_seen_2c;
+
+    out->b126_seen_2e =
+        g_b126_seen_2e;
+
+    out->b126_seen_3a =
+        g_b126_seen_3a;
+
+    out->b126_try_t =
+        g_b126_try_t;
+
+    out->b126_try_g =
+        g_b126_try_g;
+
+    out->b126_reject_mask =
+        g_b126_reject_mask;
+
+    out->b126_scale =
+        sw_renderer_scale();
+
+    out->b126_wide =
+        sw_wide_width();
+
+    out->b126_filter =
+        sw_texture_filter();
+}
+
+
 void fm_gpu_debug_stats(
     FMGpuDebugStats *out
 )

@@ -153,6 +153,14 @@ typedef struct FMGpuDebugStats
 
 uint32_t fm_gpu_b126_build_tag(void);
 
+/*
+ * B127: lightweight hot-path snapshot.
+ * Unlike fm_gpu_debug_stats(), this does NOT scan the 1024x512 VRAM.
+ */
+void fm_gpu_b127_perf_snapshot(
+    FMGpuDebugStats *out
+);
+
 
 /*
  * Remplit un snapshot de diagnostic.
