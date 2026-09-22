@@ -13723,9 +13723,17 @@ int main(void)
                  */
                 uint32_t b13514_chain_count = 0u;
                 int b13514_chain_region =
-                    phys >= 0x000342B0u
-                    &&
-                    phys < 0x00034D30u;
+                    (
+                        phys >= 0x000342B0u
+                        &&
+                        phys < 0x00035AC8u
+                    )
+                    ||
+                    (
+                        phys >= 0x0004D260u
+                        &&
+                        phys < 0x0004D5B8u
+                    );
 
 #if defined(NDEBUG)
                 if (b13514_chain_region)
@@ -13736,8 +13744,10 @@ int main(void)
                             dispatch_address,
                             g_b105_probe_budget,
                             0x000342B0u,
-                            0x00034D30u,
-                            256u,
+                            0x00035AC8u,
+                            0x0004D260u,
+                            0x0004D5B8u,
+                            512u,
                             &b13514_chain_count
                         );
                 }
@@ -13763,8 +13773,10 @@ int main(void)
                                 dispatch_address,
                                 g_b105_probe_budget,
                                 0x000342B0u,
-                                0x00034D30u,
-                                256u,
+                                0x00035AC8u,
+                                0x0004D260u,
+                                0x0004D5B8u,
+                                512u,
                                 &b13514_chain_count
                             );
                     }
@@ -14823,7 +14835,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.14-MAP-CHAIN (BASE B131)\n");
+            printf("BUILD B135.15-DUAL-CHAIN (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -14900,7 +14912,7 @@ int main(void)
                 );
 
                 printf(
-                    "CHAIN ent/disp/max:%lu/%llu/%lu DMA:%lu/%lu\n",
+                    "CHAIN2 ent/disp/max:%lu/%llu/%lu DMA:%lu/%lu\n",
                     (unsigned long)g_b13514_chain_entries,
                     (unsigned long long)g_b13514_chain_dispatches,
                     (unsigned long)g_b13514_chain_max,
