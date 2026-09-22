@@ -92,6 +92,23 @@ FMInterpResult fm_interp_run_block(
 );
 
 
+/*
+ * B135.19 - execute continuously across branch/basic-block boundaries while
+ * the next PC remains inside one hot resident region. This avoids returning
+ * to main.c after every tiny MIPS basic block.
+ *
+ * stop_phys is handed back to the native dispatcher even when it lies in
+ * the region (used for the real compiled function entry 0x00034D30).
+ */
+FMInterpResult fm_interp_run_region(
+    CPUState *cpu,
+    uint32_t max_instructions,
+    uint32_t phys_begin,
+    uint32_t phys_end,
+    uint32_t stop_phys
+);
+
+
 const char *fm_interp_stop_name(
     FMInterpStopReason reason
 );
