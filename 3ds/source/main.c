@@ -10313,6 +10313,12 @@ int main(void)
         {
             b135_qs_chord = 1;
 
+            /*
+             * Nettoyer d'abord l'etat HLE host. Le quick-load restaure
+             * ensuite les quelques flags de phase qui doivent survivre.
+             */
+            fm_cd_hle_reset();
+
             g_b135_qs_last_result =
                 fm_b135_quick_load(
                     cpu,
@@ -10339,8 +10345,6 @@ int main(void)
 
                 memset(&probe, 0, sizeof(probe));
                 memset(&interp, 0, sizeof(interp));
-
-                fm_cd_hle_reset();
 
                 old_pad = 0u;
             }
