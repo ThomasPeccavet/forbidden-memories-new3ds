@@ -6152,3 +6152,123 @@ int fm_gpu_b46_sprite_provenance_get(
 
     return 1;
 }
+
+
+/*
+ * ============================================================
+ * B135 - quick-state GPU
+ * ============================================================
+ */
+void fm_gpu_quick_save(
+    FMGpuQuickState *out
+)
+{
+    if (!out)
+    {
+        return;
+    }
+
+    memset(out, 0, sizeof(*out));
+
+    out->parser_state = (uint32_t)g_state;
+
+    memcpy(
+        out->cmd,
+        g_cmd,
+        sizeof(g_cmd)
+    );
+
+    out->cmd_have = g_cmd_have;
+    out->cmd_need = g_cmd_need;
+    out->has_frame = (uint32_t)g_has_frame;
+
+    out->texpage = g_texpage;
+    out->texture_window = g_texture_window;
+
+    out->draw_x1 = g_draw_x1;
+    out->draw_y1 = g_draw_y1;
+    out->draw_x2 = g_draw_x2;
+    out->draw_y2 = g_draw_y2;
+
+    out->offset_x = g_offset_x;
+    out->offset_y = g_offset_y;
+
+    out->mask_set = g_mask_set;
+    out->mask_check = g_mask_check;
+
+    out->display_x = g_display_x;
+    out->display_y = g_display_y;
+    out->display_disabled = g_display_disabled;
+    out->display_mode = g_display_mode;
+
+    out->upload_x = g_upload_x;
+    out->upload_y = g_upload_y;
+    out->upload_w = g_upload_w;
+    out->upload_h = g_upload_h;
+    out->upload_index = g_upload_index;
+    out->upload_pixels = g_upload_pixels;
+}
+
+
+void fm_gpu_quick_load(
+    const FMGpuQuickState *in
+)
+{
+    if (!in)
+    {
+        return;
+    }
+
+    if (in->parser_state <= (uint32_t)FM_GPU_POLYLINE_SHADED_SKIP)
+    {
+        g_state = (FMGpuState)in->parser_state;
+    }
+    else
+    {
+        g_state = FM_GPU_IDLE;
+    }
+
+    memcpy(
+        g_cmd,
+        in->cmd,
+        sizeof(g_cmd)
+    );
+
+    g_cmd_have = in->cmd_have <= 16u ? in->cmd_have : 0u;
+    g_cmd_need = in->cmd_need <= 16u ? in->cmd_need : 0u;
+    g_has_frame = in->has_frame ? 1 : 0;
+
+    g_texpage = in->texpage;
+    g_texture_window = in->texture_window;
+
+    g_draw_x1 = in->draw_x1;
+    g_draw_y1 = in->draw_y1;
+    g_draw_x2 = in->draw_x2;
+    g_draw_y2 = in->draw_y2;
+
+    g_offset_x = in->offset_x;
+    g_offset_y = in->offset_y;
+
+    g_mask_set = in->mask_set ? 1 : 0;
+    g_mask_check = in->mask_check ? 1 : 0;
+
+    g_display_x = in->display_x & 0x3FFu;
+    g_display_y = in->display_y & 0x1FFu;
+    g_display_disabled = in->display_disabled ? 1 : 0;
+    g_display_mode = in->display_mode;
+
+    g_upload_x = in->upload_x;
+    g_upload_y = in->upload_y;
+    g_upload_w = in->upload_w;
+    g_upload_h = in->upload_h;
+    g_upload_index = in->upload_index;
+    g_upload_pixels = in->upload_pixels;
+
+    /*
+     * La copie VRAM est restauree par main.c juste avant cet appel.
+     * Signaler une image disponible et invalider les caches de dirty
+     * tracking afin que le prochain present voie immediatement l'etat.
+     */
+    g_has_frame = 1;
+    gpu_vram_dirty_mark_all();
+}
