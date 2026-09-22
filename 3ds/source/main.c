@@ -9150,6 +9150,324 @@ static int fm_b93_hle_800917f8(
 }
 
 
+
+/*
+ * ============================================================
+ * B135 - quick-state de debug persistant
+ * ============================================================
+ *
+ * Objectif : atteindre Simon une seule fois, sauvegarder l'etat sur SD,
+ * puis le recharger directement apres chaque nouveau build.
+ *
+ * Raccourcis :
+ *   SELECT + X : sauvegarde
+ *   SELECT + Y : recharge et reprend l'execution
+ *
+ * Le snapshot ne serialise jamais les pointeurs de fonctions CPU.
+ */
+#define FM_B135_QS_MAGIC       0x35333142u /* "B135" little-endian */
+#define FM_B135_QS_VERSION     1u
+#define FM_B135_QS_RAM_SIZE    (2u * 1024u * 1024u)
+#define FM_B135_QS_VRAM_WORDS  (1024u * 512u)
+#define FM_B135_QS_PATH        "sdmc:/3ds/fm-new3ds/quickstate-b135.bin"
+
+typedef struct FMB135CpuQuickState
+{
+    uint32_t gpr[32];
+    uint32_t pc;
+    uint32_t hi;
+    uint32_t lo;
+    uint32_t cop0[32];
+    uint32_t gte_data[32];
+    uint32_t gte_ctrl[32];
+
+    uint64_t muldiv_ts_done;
+    uint64_t gte_ts_done;
+
+    uint8_t read_absorb[33];
+    uint8_t read_absorb_which;
+    uint8_t read_fudge;
+    uint8_t ld_which_t;
+    uint32_t ld_absorb;
+} FMB135CpuQuickState;
+
+typedef struct FMB135QuickStateHeader
+{
+    uint32_t magic;
+    uint32_t version;
+    uint32_t header_size;
+    uint32_t ram_size;
+    uint32_t vram_words;
+
+    uint32_t frame;
+    uint32_t last_dispatch_address;
+
+    uint32_t direct2df_active;
+    uint32_t menu_bridge_active;
+    uint32_t str_intro_skip_pending;
+    uint32_t native_video;
+
+    uint32_t guest_frames;
+    uint32_t last_latched_guest_frame;
+
+    FMB135CpuQuickState cpu;
+    FMMemoryQuickState memory;
+    FMGpuQuickState gpu;
+} FMB135QuickStateHeader;
+
+static int32_t g_b135_qs_last_result = 0;
+static uint32_t g_b135_qs_save_count = 0u;
+static uint32_t g_b135_qs_load_count = 0u;
+
+
+static void fm_b135_cpu_quick_save(
+    FMB135CpuQuickState *out,
+    const CPUState *cpu
+)
+{
+    memset(out, 0, sizeof(*out));
+
+    memcpy(out->gpr, cpu->gpr, sizeof(out->gpr));
+    out->pc = cpu->pc;
+    out->hi = cpu->hi;
+    out->lo = cpu->lo;
+    memcpy(out->cop0, cpu->cop0, sizeof(out->cop0));
+    memcpy(out->gte_data, cpu->gte_data, sizeof(out->gte_data));
+    memcpy(out->gte_ctrl, cpu->gte_ctrl, sizeof(out->gte_ctrl));
+
+    out->muldiv_ts_done = cpu->muldiv_ts_done;
+    out->gte_ts_done = cpu->gte_ts_done;
+
+    memcpy(out->read_absorb, cpu->read_absorb, sizeof(out->read_absorb));
+    out->read_absorb_which = cpu->read_absorb_which;
+    out->read_fudge = cpu->read_fudge;
+    out->ld_which_t = cpu->ld_which_t;
+    out->ld_absorb = cpu->ld_absorb;
+}
+
+
+static void fm_b135_cpu_quick_load(
+    CPUState *cpu,
+    const FMB135CpuQuickState *in
+)
+{
+    memcpy(cpu->gpr, in->gpr, sizeof(in->gpr));
+    cpu->pc = in->pc;
+    cpu->hi = in->hi;
+    cpu->lo = in->lo;
+    memcpy(cpu->cop0, in->cop0, sizeof(in->cop0));
+    memcpy(cpu->gte_data, in->gte_data, sizeof(in->gte_data));
+    memcpy(cpu->gte_ctrl, in->gte_ctrl, sizeof(in->gte_ctrl));
+
+    cpu->muldiv_ts_done = in->muldiv_ts_done;
+    cpu->gte_ts_done = in->gte_ts_done;
+
+    memcpy(cpu->read_absorb, in->read_absorb, sizeof(in->read_absorb));
+    cpu->read_absorb_which = in->read_absorb_which;
+    cpu->read_fudge = in->read_fudge;
+    cpu->ld_which_t = in->ld_which_t;
+    cpu->ld_absorb = in->ld_absorb;
+
+    cpu->gpr[0] = 0u;
+}
+
+
+static int fm_b135_quick_save(
+    CPUState *cpu,
+    const uint8_t *ram,
+    const uint16_t *vram,
+    uint32_t frame,
+    uint32_t last_dispatch_address
+)
+{
+    if (!cpu || !ram || !vram)
+    {
+        return -1;
+    }
+
+    FMB135QuickStateHeader state;
+    memset(&state, 0, sizeof(state));
+
+    state.magic = FM_B135_QS_MAGIC;
+    state.version = FM_B135_QS_VERSION;
+    state.header_size = (uint32_t)sizeof(state);
+    state.ram_size = FM_B135_QS_RAM_SIZE;
+    state.vram_words = FM_B135_QS_VRAM_WORDS;
+
+    state.frame = frame;
+    state.last_dispatch_address = last_dispatch_address;
+
+    state.direct2df_active = g_direct2df_active;
+    state.menu_bridge_active = g_b102_menu_bridge_active;
+    state.str_intro_skip_pending = g_str_intro_skip_pending;
+    state.native_video = (uint32_t)g_b42_native_video;
+
+    state.guest_frames = g_b85_guest_frames;
+    state.last_latched_guest_frame = g_b85_last_latched_guest_frame;
+
+    fm_b135_cpu_quick_save(
+        &state.cpu,
+        cpu
+    );
+
+    fm_memory_quick_save(
+        &state.memory
+    );
+
+    fm_gpu_quick_save(
+        &state.gpu
+    );
+
+    FILE *fp = fopen(FM_B135_QS_PATH, "wb");
+
+    if (!fp)
+    {
+        return -2;
+    }
+
+    int ok =
+        fwrite(&state, sizeof(state), 1u, fp) == 1u
+        &&
+        fwrite(ram, FM_B135_QS_RAM_SIZE, 1u, fp) == 1u
+        &&
+        fwrite(
+            vram,
+            sizeof(uint16_t) * FM_B135_QS_VRAM_WORDS,
+            1u,
+            fp
+        ) == 1u;
+
+    if (fclose(fp) != 0)
+    {
+        ok = 0;
+    }
+
+    return ok ? 0 : -3;
+}
+
+
+static int fm_b135_quick_load(
+    CPUState *cpu,
+    uint8_t *ram,
+    uint16_t *vram,
+    uint32_t *frame,
+    uint32_t *last_dispatch_address
+)
+{
+    if (!cpu || !ram || !vram || !frame || !last_dispatch_address)
+    {
+        return -1;
+    }
+
+    FILE *fp = fopen(FM_B135_QS_PATH, "rb");
+
+    if (!fp)
+    {
+        return -2;
+    }
+
+    const long expected_size =
+        (long)sizeof(FMB135QuickStateHeader)
+        +
+        (long)FM_B135_QS_RAM_SIZE
+        +
+        (long)(sizeof(uint16_t) * FM_B135_QS_VRAM_WORDS);
+
+    if (
+        fseek(fp, 0, SEEK_END) != 0
+        ||
+        ftell(fp) != expected_size
+        ||
+        fseek(fp, 0, SEEK_SET) != 0
+    )
+    {
+        fclose(fp);
+        return -3;
+    }
+
+    FMB135QuickStateHeader state;
+
+    if (
+        fread(&state, sizeof(state), 1u, fp) != 1u
+        ||
+        state.magic != FM_B135_QS_MAGIC
+        ||
+        state.version != FM_B135_QS_VERSION
+        ||
+        state.header_size != sizeof(state)
+        ||
+        state.ram_size != FM_B135_QS_RAM_SIZE
+        ||
+        state.vram_words != FM_B135_QS_VRAM_WORDS
+    )
+    {
+        fclose(fp);
+        return -4;
+    }
+
+    if (
+        fread(ram, FM_B135_QS_RAM_SIZE, 1u, fp) != 1u
+        ||
+        fread(
+            vram,
+            sizeof(uint16_t) * FM_B135_QS_VRAM_WORDS,
+            1u,
+            fp
+        ) != 1u
+    )
+    {
+        fclose(fp);
+        return -5;
+    }
+
+    fclose(fp);
+
+    fm_memory_quick_load(
+        &state.memory
+    );
+
+    fm_gpu_quick_load(
+        &state.gpu
+    );
+
+    fm_b135_cpu_quick_load(
+        cpu,
+        &state.cpu
+    );
+
+    *frame = state.frame;
+    *last_dispatch_address = state.last_dispatch_address;
+
+    g_direct2df_active = state.direct2df_active ? 1u : 0u;
+    g_b102_menu_bridge_active = state.menu_bridge_active ? 1u : 0u;
+    g_str_intro_skip_pending = state.str_intro_skip_pending;
+    g_b42_native_video = state.native_video ? 1 : 0;
+
+    g_b85_guest_frames = state.guest_frames;
+    g_b85_last_latched_guest_frame = state.last_latched_guest_frame;
+
+    /*
+     * Un snapshot est pris entre deux tranches host : aucune attente HLE
+     * ne doit rester armee apres un redemarrage de l'application.
+     */
+    g_vsync_wait_active = 0u;
+    g_vsync_wait_until_frame = 0u;
+    g_b108_vsync_sync_valid = 0u;
+
+    /*
+     * Forcer un nouveau latch/present depuis la VRAM restauree.
+     */
+    g_b84_latch_valid = 0u;
+    g_b86_present_dirty = 1u;
+
+    g_b65_stop_code = 0u;
+    g_b65_stop_pc = 0u;
+    g_b65_stop_ra = 0u;
+    g_b65_stop_detail = 0u;
+
+    return 0;
+}
+
 int main(void)
 {
     gfxInitDefault();
@@ -9946,6 +10264,94 @@ int main(void)
 
             probe_ran = 0;
             interp_ran = 0;
+        }
+
+
+        /*
+         * ====================================================
+         * B135 - QUICK-STATE SELECT+X / SELECT+Y
+         * ====================================================
+         */
+        int b135_qs_chord = 0;
+
+        if (
+            (held & KEY_SELECT)
+            &&
+            (down & KEY_X)
+            &&
+            cpu
+            &&
+            memory_status == 0
+        )
+        {
+            b135_qs_chord = 1;
+
+            g_b135_qs_last_result =
+                fm_b135_quick_save(
+                    cpu,
+                    ram,
+                    vram,
+                    frame,
+                    last_dispatch_address
+                );
+
+            if (g_b135_qs_last_result == 0)
+            {
+                ++g_b135_qs_save_count;
+            }
+        }
+
+        if (
+            (held & KEY_SELECT)
+            &&
+            (down & KEY_Y)
+            &&
+            cpu
+            &&
+            memory_status == 0
+        )
+        {
+            b135_qs_chord = 1;
+
+            g_b135_qs_last_result =
+                fm_b135_quick_load(
+                    cpu,
+                    ram,
+                    vram,
+                    &frame,
+                    &last_dispatch_address
+                );
+
+            if (g_b135_qs_last_result == 0)
+            {
+                ++g_b135_qs_load_count;
+
+                game_running = 1;
+                probe_ran = 1;
+                interp_ran = 0;
+                static_miss = 0;
+
+                low_jump_from = 0u;
+                low_jump_target = 0u;
+                low_jump_ra = 0u;
+                low_jump_t1 = 0u;
+                low_jump_opcode = 0u;
+
+                memset(&probe, 0, sizeof(probe));
+                memset(&interp, 0, sizeof(interp));
+
+                fm_cd_hle_reset();
+
+                old_pad = 0u;
+            }
+        }
+
+        /*
+         * Ne jamais transmettre la combinaison de debug au pad PS1.
+         */
+        if (b135_qs_chord)
+        {
+            psx_pressed = 0u;
         }
 
 
@@ -14261,7 +14667,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B131-DIRTY-FRAME-PACING\n");
+            printf("BUILD B135-SIMON-GPF-QS (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -14269,6 +14675,15 @@ int main(void)
                 (unsigned long)frame,
                 cpu ? (unsigned long)cpu->pc : 0ul,
                 (unsigned)fm_memory_read_byte(0x801847C0u)
+            );
+
+            printf(
+                "QS rc:%ld S/L:%lu/%lu STOP:%lu D:%08lX\n",
+                (long)g_b135_qs_last_result,
+                (unsigned long)g_b135_qs_save_count,
+                (unsigned long)g_b135_qs_load_count,
+                (unsigned long)g_b65_stop_code,
+                (unsigned long)g_b65_stop_detail
             );
 
             printf(
