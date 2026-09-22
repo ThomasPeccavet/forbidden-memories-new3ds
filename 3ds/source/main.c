@@ -1830,6 +1830,65 @@ static uint32_t g_b13514_chain_entries = 0u;
 static uint64_t g_b13514_chain_dispatches = 0u;
 static uint32_t g_b13514_chain_max = 0u;
 
+/*
+ * B135.16 - sampled heavy hitters for the PC that immediately BREAKS the
+ * chain. B135.15 still reports max=1, so the next PC after almost every
+ * map dispatch lives outside our two chained regions.
+ *
+ * Sample only 1/16 exits to keep the diagnostic overhead negligible.
+ */
+static uint32_t g_b13516_exit_pc[4] = {0u};
+static uint32_t g_b13516_exit_weight[4] = {0u};
+static uint32_t g_b13516_exit_samples = 0u;
+static uint32_t g_b13516_exit_seen = 0u;
+
+
+static void b13516_note_chain_exit(uint32_t pc)
+{
+    ++g_b13516_exit_seen;
+
+    if ((g_b13516_exit_seen & 15u) != 0u)
+    {
+        return;
+    }
+
+    ++g_b13516_exit_samples;
+
+    pc &= 0x1FFFFFFFu;
+
+    for (unsigned i = 0u; i < 4u; ++i)
+    {
+        if (
+            g_b13516_exit_weight[i] != 0u
+            &&
+            g_b13516_exit_pc[i] == pc
+        )
+        {
+            ++g_b13516_exit_weight[i];
+            return;
+        }
+    }
+
+    for (unsigned i = 0u; i < 4u; ++i)
+    {
+        if (g_b13516_exit_weight[i] == 0u)
+        {
+            g_b13516_exit_pc[i] = pc;
+            g_b13516_exit_weight[i] = 1u;
+            return;
+        }
+    }
+
+    /*
+     * Misra-Gries: preserve the recurring destinations without a large
+     * hash table in the hot scheduler.
+     */
+    for (unsigned i = 0u; i < 4u; ++i)
+    {
+        --g_b13516_exit_weight[i];
+    }
+}
+
 
 /*
  * ============================================================
@@ -13821,6 +13880,17 @@ int main(void)
                         g_b13514_chain_max =
                             b13514_chain_count;
                     }
+
+                    if (
+                        probe.reason == FM_STOP_RETURNED
+                        &&
+                        probe.pc != 0u
+                    )
+                    {
+                        b13516_note_chain_exit(
+                            probe.pc
+                        );
+                    }
                 }
 
                 probe_ran = 1;
@@ -14835,7 +14905,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.15-DUAL-CHAIN (BASE B131)\n");
+            printf("BUILD B135.16-EXIT-PC-DIAG (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -14912,12 +14982,23 @@ int main(void)
                 );
 
                 printf(
-                    "CHAIN2 ent/disp/max:%lu/%llu/%lu DMA:%lu/%lu\n",
+                    "CHAIN2 e/d/m:%lu/%llu/%lu samples:%lu\n",
                     (unsigned long)g_b13514_chain_entries,
                     (unsigned long long)g_b13514_chain_dispatches,
                     (unsigned long)g_b13514_chain_max,
-                    (unsigned long)b130_dma.dma2_linked_last_ms,
-                    (unsigned long)b130_dma.dma2_linked_max_ms
+                    (unsigned long)g_b13516_exit_samples
+                );
+
+                printf(
+                    "EXIT:%06lX/%lu %06lX/%lu %06lX/%lu %06lX/%lu\n",
+                    (unsigned long)g_b13516_exit_pc[0],
+                    (unsigned long)g_b13516_exit_weight[0],
+                    (unsigned long)g_b13516_exit_pc[1],
+                    (unsigned long)g_b13516_exit_weight[1],
+                    (unsigned long)g_b13516_exit_pc[2],
+                    (unsigned long)g_b13516_exit_weight[2],
+                    (unsigned long)g_b13516_exit_pc[3],
+                    (unsigned long)g_b13516_exit_weight[3]
                 );
 
                 g_b1359_prev_swap = g_b131_swap_count;
