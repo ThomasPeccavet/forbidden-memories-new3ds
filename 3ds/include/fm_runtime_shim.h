@@ -117,6 +117,20 @@ FMRuntimeProbeResult fm_runtime_probe(
     uint32_t check_budget
 );
 
+/*
+ * B135.14 - execute plusieurs dispatchs recompiles consecutifs sous le
+ * meme setjmp tant que le PC reste dans une plage resident donnee.
+ */
+FMRuntimeProbeResult fm_runtime_probe_chain(
+    CPUState *cpu,
+    uint32_t addr,
+    uint32_t check_budget,
+    uint32_t phys_begin,
+    uint32_t phys_end,
+    uint32_t max_dispatches,
+    uint32_t *out_dispatches
+);
+
 
 /*
  * Nom lisible du motif d'arrêt.
