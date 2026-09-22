@@ -57,6 +57,51 @@ unsigned fm_gpu_display_y(void);
 
 
 /*
+ * B135 - etat fonctionnel minimal du GPU pour le quick-state de debug.
+ * La VRAM 1024x512 est sauvegardee separement par main.c.
+ */
+typedef struct FMGpuQuickState
+{
+    uint32_t parser_state;
+    uint32_t cmd[16];
+    uint32_t cmd_have;
+    uint32_t cmd_need;
+
+    uint32_t has_frame;
+
+    uint16_t texpage;
+    uint16_t reserved0;
+    uint32_t texture_window;
+
+    int32_t draw_x1;
+    int32_t draw_y1;
+    int32_t draw_x2;
+    int32_t draw_y2;
+
+    int32_t offset_x;
+    int32_t offset_y;
+
+    int32_t mask_set;
+    int32_t mask_check;
+
+    uint32_t display_x;
+    uint32_t display_y;
+    int32_t display_disabled;
+    uint32_t display_mode;
+
+    uint32_t upload_x;
+    uint32_t upload_y;
+    uint32_t upload_w;
+    uint32_t upload_h;
+    uint32_t upload_index;
+    uint32_t upload_pixels;
+} FMGpuQuickState;
+
+void fm_gpu_quick_save(FMGpuQuickState *out);
+void fm_gpu_quick_load(const FMGpuQuickState *in);
+
+
+/*
  * B122 - high-resolution GP0 opcode profiler.
  */
 typedef struct FMGpuOpcodePerf
