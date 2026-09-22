@@ -4533,3 +4533,101 @@ unsigned fm_memory_unmapped_count(void)
     return
         g_unmapped_count;
 }
+
+
+/*
+ * ============================================================
+ * B135 - quick-state MMIO
+ * ============================================================
+ */
+void fm_memory_quick_save(
+    FMMemoryQuickState *out
+)
+{
+    if (!out)
+    {
+        return;
+    }
+
+    memset(out, 0, sizeof(*out));
+
+    memcpy(
+        out->scratch,
+        g_scratch,
+        sizeof(g_scratch)
+    );
+
+    out->i_stat = g_i_stat;
+    out->i_mask = g_i_mask;
+
+    for (unsigned i = 0u; i < PSX_TIMER_COUNT; ++i)
+    {
+        out->timers[i].count = g_timers[i].count;
+        out->timers[i].mode = g_timers[i].mode;
+        out->timers[i].target = g_timers[i].target;
+        out->timers[i].irq_fired_once = g_timers[i].irq_fired_once;
+    }
+
+    out->dma2_madr = g_dma2_madr;
+    out->dma2_bcr = g_dma2_bcr;
+    out->dma2_chcr = g_dma2_chcr;
+
+    out->dma6_madr = g_dma6_madr;
+    out->dma6_bcr = g_dma6_bcr;
+    out->dma6_chcr = g_dma6_chcr;
+
+    out->dma_dpcr = g_dma_dpcr;
+    out->dma_dicr = g_dma_dicr;
+}
+
+
+void fm_memory_quick_load(
+    const FMMemoryQuickState *in
+)
+{
+    if (!in)
+    {
+        return;
+    }
+
+    memcpy(
+        g_scratch,
+        in->scratch,
+        sizeof(g_scratch)
+    );
+
+    g_i_stat = in->i_stat;
+    g_i_mask = in->i_mask;
+
+    for (unsigned i = 0u; i < PSX_TIMER_COUNT; ++i)
+    {
+        g_timers[i].count = in->timers[i].count;
+        g_timers[i].mode = in->timers[i].mode;
+        g_timers[i].target = in->timers[i].target;
+        g_timers[i].irq_fired_once = in->timers[i].irq_fired_once;
+    }
+
+    g_dma2_madr = in->dma2_madr;
+    g_dma2_bcr = in->dma2_bcr;
+    g_dma2_chcr = in->dma2_chcr;
+
+    g_dma6_madr = in->dma6_madr;
+    g_dma6_bcr = in->dma6_bcr;
+    g_dma6_chcr = in->dma6_chcr;
+
+    g_dma_dpcr = in->dma_dpcr;
+    g_dma_dicr = in->dma_dicr;
+
+    /*
+     * La table de detection de boucle DMA est purement host/debug.
+     * Repartir d'une generation propre evite de reutiliser des marques
+     * qui appartiennent au run precedent.
+     */
+    memset(
+        g_dma2_visit_epoch,
+        0,
+        sizeof(g_dma2_visit_epoch)
+    );
+
+    g_dma2_visit_generation = 1u;
+}
