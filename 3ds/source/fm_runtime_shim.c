@@ -378,6 +378,131 @@ FMRuntimeProbeResult fm_runtime_probe(
 
 /*
  * ============================================================
+ * B135.14 - chained resident probe
+ * ============================================================
+ *
+ * The normal main loop pays one setjmp + dispatcher/HLE scan for every
+ * recompiled function return. The Pharaoh map renderer lives in one known
+ * resident region and bounces between many tiny compiled helpers there.
+ *
+ * Keep one probe armed and immediately re-dispatch while the next PC stays
+ * in that safe region. As soon as code exits the range, becomes unknown,
+ * hits the watchdog, GTE stop, syscall, etc., return to main unchanged.
+ */
+FMRuntimeProbeResult fm_runtime_probe_chain(
+    CPUState *cpu,
+    uint32_t addr,
+    uint32_t check_budget,
+    uint32_t phys_begin,
+    uint32_t phys_end,
+    uint32_t max_dispatches,
+    uint32_t *out_dispatches
+)
+{
+    FMRuntimeProbeResult result;
+
+    result.reason = FM_STOP_NONE;
+    result.dispatch_result = -1;
+    result.pc = cpu ? cpu->pc : 0u;
+    result.detail = 0u;
+    result.checks = 0u;
+
+    if (out_dispatches)
+    {
+        *out_dispatches = 0u;
+    }
+
+    if (
+        !cpu
+        ||
+        phys_begin >= phys_end
+        ||
+        max_dispatches == 0u
+    )
+    {
+        return result;
+    }
+
+    g_probe_cpu = cpu;
+    g_probe_budget = check_budget;
+    g_probe_checks = 0u;
+    g_probe_reason = FM_STOP_NONE;
+    g_probe_detail = 0u;
+    g_probe_armed = 1;
+
+    int jumped =
+        setjmp(
+            g_probe_jmp
+        );
+
+    if (jumped == 0)
+    {
+        uint32_t current = addr;
+        uint32_t dispatched_count = 0u;
+        int last_dispatch = -1;
+
+        while (dispatched_count < max_dispatches)
+        {
+            uint32_t phys =
+                current
+                &
+                0x1FFFFFFFu;
+
+            if (
+                phys < phys_begin
+                ||
+                phys >= phys_end
+            )
+            {
+                break;
+            }
+
+            last_dispatch =
+                psx_dispatch_game_compiled(
+                    cpu,
+                    current
+                );
+
+            ++dispatched_count;
+
+            if (last_dispatch != 1)
+            {
+                break;
+            }
+
+            current = cpu->pc;
+        }
+
+        g_probe_armed = 0;
+
+        result.reason = FM_STOP_RETURNED;
+        result.dispatch_result = last_dispatch;
+
+        if (out_dispatches)
+        {
+            *out_dispatches = dispatched_count;
+        }
+    }
+    else
+    {
+        g_probe_armed = 0;
+
+        result.reason = g_probe_reason;
+        result.dispatch_result = -1;
+    }
+
+    result.pc = cpu->pc;
+    result.detail = g_probe_detail;
+    result.checks = g_probe_checks;
+
+    g_probe_cpu = NULL;
+
+    return result;
+}
+
+
+/*
+ * ============================================================
  * Stop reason
  * ============================================================
  */
