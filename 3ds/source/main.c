@@ -13274,6 +13274,7 @@ int main(void)
 
                 probe_ran = 1;
 
+#if !defined(NDEBUG)
                 {
                     uint32_t b91_handoff_ms =
                         (uint32_t)(osGetTime() - b91_handoff_start_ms);
@@ -13284,6 +13285,7 @@ int main(void)
                         g_b91_slow_handoff_pc = dispatch_address;
                     }
                 }
+#endif
 
 
                 /*
