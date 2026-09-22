@@ -9166,7 +9166,7 @@ static int fm_b93_hle_800917f8(
  * Le snapshot ne serialise jamais les pointeurs de fonctions CPU.
  */
 #define FM_B135_QS_MAGIC       0x35333142u /* "B135" little-endian */
-#define FM_B135_QS_VERSION     1u
+#define FM_B135_QS_VERSION     2u
 #define FM_B135_QS_RAM_SIZE    (2u * 1024u * 1024u)
 #define FM_B135_QS_VRAM_WORDS  (1024u * 512u)
 #define FM_B135_QS_PATH        "sdmc:/3ds/fm-new3ds/quickstate-b135.bin"
@@ -9213,6 +9213,7 @@ typedef struct FMB135QuickStateHeader
     FMB135CpuQuickState cpu;
     FMMemoryQuickState memory;
     FMGpuQuickState gpu;
+    FMRuntimeQuickState runtime;
 } FMB135QuickStateHeader;
 
 static int32_t g_b135_qs_last_result = 0;
@@ -9316,6 +9317,10 @@ static int fm_b135_quick_save(
 
     fm_gpu_quick_save(
         &state.gpu
+    );
+
+    fm_runtime_quick_save(
+        &state.runtime
     );
 
     FILE *fp = fopen(FM_B135_QS_PATH, "wb");
@@ -9428,6 +9433,10 @@ static int fm_b135_quick_load(
 
     fm_gpu_quick_load(
         &state.gpu
+    );
+
+    fm_runtime_quick_load(
+        &state.runtime
     );
 
     fm_b135_cpu_quick_load(
