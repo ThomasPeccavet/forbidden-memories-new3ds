@@ -12964,6 +12964,30 @@ int main(void)
                     fm_repair_ot_sentinel(cpu, src_ot);
                     fm_repair_ot_sentinel(cpu, dst_ot);
 
+                    /*
+                     * B133 - diagnostic restore of the pre-B117 source OT path.
+                     *
+                     * B117 removed this direct source submission under the
+                     * assumption that GsSortOt + the later GsDrawOt/DMA2 path
+                     * preserved every primitive. Menu text disappeared in the
+                     * following builds while the selected entry still rendered.
+                     *
+                     * Restore the B116 behavior for one controlled test: submit
+                     * the source OT before splicing it into the destination OT.
+                     * If the missing static labels return, the regression is in
+                     * the B117 OT-path change rather than framebuffer capture.
+                     *
+                     * This may render some primitives twice and is deliberately
+                     * diagnostic; it is not the intended final optimization.
+                     */
+                    if (g_hle_85d98_src_tag != 0u)
+                    {
+                        fm_submit_ot_safe(
+                            cpu,
+                            g_hle_85d98_src_tag
+                        );
+                    }
+
                     int b115_native_ok =
                         fm_try_c_gssortot(
                             cpu,
@@ -13910,7 +13934,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B132-NATIVE-MENU-FRAME\n");
+            printf("BUILD B133-RESTORE-SOURCE-OT\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
