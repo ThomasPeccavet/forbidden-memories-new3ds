@@ -930,17 +930,24 @@ static int exec_normal(
              */
             if (cop_rs >= 0x10)
             {
-                if ((instruction & 0x3Fu) == 0x3Du)
+                switch (instruction & 0x3Fu)
                 {
-                    gte_execute(
-                        cpu,
-                        instruction
-                    );
+                    case 0x01u: /* RTPS  */
+                    case 0x06u: /* NCLIP */
+                    case 0x2Du: /* AVSZ3 */
+                    case 0x2Eu: /* AVSZ4 */
+                    case 0x30u: /* RTPT  */
+                    case 0x3Du: /* GPF   */
+                        gte_execute(
+                            cpu,
+                            instruction
+                        );
 
-                    return 0;
+                        return 0;
+
+                    default:
+                        return 3;
                 }
-
-                return 3;
             }
 
 
