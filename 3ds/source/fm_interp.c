@@ -934,6 +934,7 @@ static int exec_normal(
                 {
                     case 0x01u: /* RTPS  */
                     case 0x06u: /* NCLIP */
+                    case 0x12u: /* MVMVA */
                     case 0x2Du: /* AVSZ3 */
                     case 0x2Eu: /* AVSZ4 */
                     case 0x30u: /* RTPT  */
