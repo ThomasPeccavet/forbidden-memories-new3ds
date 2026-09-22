@@ -2242,15 +2242,218 @@ int psx_vsync_query_hle_try(
  * ============================================================
  */
 
+/*
+ * B135.6 - semantique architecturale des registres GTE.
+ *
+ * Le shim utilisait jusque-la de simples lectures/ecritures du tableau
+ * CPUState. Ce n'est pas equivalent au COP2 PS1 : plusieurs registres sont
+ * 16 bits, SXYP est un alias FIFO, IRGB est derive de IR1..3 et LZCR est
+ * derive de LZCS. Le renderer de carte passe massivement par ces transferts.
+ *
+ * Cette logique reprend la semantique O(1) du PSXRecomp epingle par le projet,
+ * sans les caches PGXP qui ne sont pas utilises sur 3DS.
+ */
+static uint32_t fm_b136_gte_sign_extend_16(uint32_t value)
+{
+    return (uint32_t)(int32_t)(int16_t)(value & 0xFFFFu);
+}
+
+
+static uint32_t fm_b136_gte_lzcr(uint32_t value)
+{
+    uint32_t bits =
+        (value & 0x80000000u)
+            ? ~value
+            : value;
+
+    if (bits == 0u)
+    {
+        return 32u;
+    }
+
+    uint32_t count = 0u;
+
+    while ((bits & 0x80000000u) == 0u)
+    {
+        bits <<= 1;
+        ++count;
+    }
+
+    return count;
+}
+
+
+static uint32_t fm_b136_gte_irgb_component(uint32_t value)
+{
+    int32_t ir =
+        (int32_t)(int16_t)(value & 0xFFFFu);
+
+    if (ir <= 0)
+    {
+        return 0u;
+    }
+
+    uint32_t scaled =
+        (uint32_t)ir >> 7;
+
+    return
+        scaled > 0x1Fu
+            ? 0x1Fu
+            : scaled;
+}
+
+
+static uint32_t fm_b136_gte_pack_irgb(const CPUState *cpu)
+{
+    uint32_t r =
+        fm_b136_gte_irgb_component(cpu->gte_data[9]);
+
+    uint32_t g =
+        fm_b136_gte_irgb_component(cpu->gte_data[10]);
+
+    uint32_t b =
+        fm_b136_gte_irgb_component(cpu->gte_data[11]);
+
+    return
+        (b << 10)
+        |
+        (g << 5)
+        |
+        r;
+}
+
+
+static void fm_b136_gte_canonicalize_backing(CPUState *cpu)
+{
+    static const uint8_t data_u16[] =
+    {
+        1u, 3u, 5u, 7u, 16u, 17u, 18u, 19u
+    };
+
+    static const uint8_t data_s16[] =
+    {
+        8u, 9u, 10u, 11u
+    };
+
+    static const uint8_t ctrl_u16[] =
+    {
+        4u, 12u, 20u, 26u
+    };
+
+    static const uint8_t ctrl_s16[] =
+    {
+        27u, 29u, 30u
+    };
+
+    for (
+        unsigned i = 0u;
+        i < sizeof(data_u16) / sizeof(data_u16[0]);
+        ++i
+    )
+    {
+        uint8_t r = data_u16[i];
+        cpu->gte_data[r] &= 0xFFFFu;
+    }
+
+    for (
+        unsigned i = 0u;
+        i < sizeof(data_s16) / sizeof(data_s16[0]);
+        ++i
+    )
+    {
+        uint8_t r = data_s16[i];
+        cpu->gte_data[r] =
+            fm_b136_gte_sign_extend_16(
+                cpu->gte_data[r]
+            );
+    }
+
+    cpu->gte_data[15] =
+        cpu->gte_data[14];
+
+    cpu->gte_data[23] =
+        0u;
+
+    cpu->gte_data[28] =
+        fm_b136_gte_pack_irgb(cpu);
+
+    cpu->gte_data[29] =
+        cpu->gte_data[28];
+
+    cpu->gte_data[31] =
+        fm_b136_gte_lzcr(
+            cpu->gte_data[30]
+        );
+
+    for (
+        unsigned i = 0u;
+        i < sizeof(ctrl_u16) / sizeof(ctrl_u16[0]);
+        ++i
+    )
+    {
+        uint8_t r = ctrl_u16[i];
+        cpu->gte_ctrl[r] &= 0xFFFFu;
+    }
+
+    for (
+        unsigned i = 0u;
+        i < sizeof(ctrl_s16) / sizeof(ctrl_s16[0]);
+        ++i
+    )
+    {
+        uint8_t r = ctrl_s16[i];
+        cpu->gte_ctrl[r] =
+            fm_b136_gte_sign_extend_16(
+                cpu->gte_ctrl[r]
+            );
+    }
+}
+
+
 uint32_t gte_read_data(
     CPUState *cpu,
     uint8_t reg
 )
 {
-    return
-        cpu->gte_data[
-            reg & 31u
-        ];
+    reg &= 31u;
+
+    switch (reg)
+    {
+        case 1u:
+        case 3u:
+        case 5u:
+        case 7u:
+        case 16u:
+        case 17u:
+        case 18u:
+        case 19u:
+            return cpu->gte_data[reg] & 0xFFFFu;
+
+        case 8u:
+        case 9u:
+        case 10u:
+        case 11u:
+            return
+                fm_b136_gte_sign_extend_16(
+                    cpu->gte_data[reg]
+                );
+
+        case 15u:
+            return cpu->gte_data[14];
+
+        case 23u:
+            return 0u;
+
+        case 28u:
+        case 29u:
+            return fm_b136_gte_pack_irgb(cpu);
+
+        case 31u:
+            return fm_b136_gte_lzcr(cpu->gte_data[30]);
+
+        default:
+            return cpu->gte_data[reg];
+    }
 }
 
 
@@ -2259,10 +2462,27 @@ uint32_t gte_read_ctrl(
     uint8_t reg
 )
 {
-    return
-        cpu->gte_ctrl[
-            reg & 31u
-        ];
+    reg &= 31u;
+
+    switch (reg)
+    {
+        case 4u:
+        case 12u:
+        case 20u:
+        case 26u:
+            return cpu->gte_ctrl[reg] & 0xFFFFu;
+
+        case 27u:
+        case 29u:
+        case 30u:
+            return
+                fm_b136_gte_sign_extend_16(
+                    cpu->gte_ctrl[reg]
+                );
+
+        default:
+            return cpu->gte_ctrl[reg];
+    }
 }
 
 
@@ -2272,10 +2492,108 @@ void gte_write_data(
     uint32_t value
 )
 {
-    cpu->gte_data[
-        reg & 31u
-    ] =
-        value;
+    reg &= 31u;
+
+    fm_b136_gte_canonicalize_backing(cpu);
+
+    switch (reg)
+    {
+        case 1u:
+        case 3u:
+        case 5u:
+        case 7u:
+        case 16u:
+        case 17u:
+        case 18u:
+        case 19u:
+            cpu->gte_data[reg] =
+                value & 0xFFFFu;
+            return;
+
+        case 8u:
+        case 9u:
+        case 10u:
+        case 11u:
+            cpu->gte_data[reg] =
+                fm_b136_gte_sign_extend_16(value);
+
+            if (reg >= 9u)
+            {
+                uint32_t packed =
+                    fm_b136_gte_pack_irgb(cpu);
+
+                cpu->gte_data[28] = packed;
+                cpu->gte_data[29] = packed;
+            }
+            return;
+
+        case 12u:
+        case 13u:
+            cpu->gte_data[reg] = value;
+            return;
+
+        case 14u:
+            cpu->gte_data[14] = value;
+            cpu->gte_data[15] = value;
+            return;
+
+        case 15u:
+            cpu->gte_data[12] = cpu->gte_data[13];
+            cpu->gte_data[13] = cpu->gte_data[14];
+            cpu->gte_data[14] = value;
+            cpu->gte_data[15] = value;
+            return;
+
+        case 23u:
+            cpu->gte_data[23] = 0u;
+            return;
+
+        case 28u:
+        {
+            cpu->gte_data[9] =
+                (value & 0x1Fu) << 7;
+
+            cpu->gte_data[10] =
+                ((value >> 5) & 0x1Fu) << 7;
+
+            cpu->gte_data[11] =
+                ((value >> 10) & 0x1Fu) << 7;
+
+            uint32_t packed =
+                value & 0x7FFFu;
+
+            cpu->gte_data[28] = packed;
+            cpu->gte_data[29] = packed;
+            return;
+        }
+
+        case 29u:
+        {
+            uint32_t packed =
+                fm_b136_gte_pack_irgb(cpu);
+
+            cpu->gte_data[28] = packed;
+            cpu->gte_data[29] = packed;
+            return;
+        }
+
+        case 30u:
+            cpu->gte_data[30] = value;
+            cpu->gte_data[31] =
+                fm_b136_gte_lzcr(value);
+            return;
+
+        case 31u:
+            cpu->gte_data[31] =
+                fm_b136_gte_lzcr(
+                    cpu->gte_data[30]
+                );
+            return;
+
+        default:
+            cpu->gte_data[reg] = value;
+            return;
+    }
 }
 
 
@@ -2285,10 +2603,36 @@ void gte_write_ctrl(
     uint32_t value
 )
 {
-    cpu->gte_ctrl[
-        reg & 31u
-    ] =
-        value;
+    reg &= 31u;
+
+    fm_b136_gte_canonicalize_backing(cpu);
+
+    switch (reg)
+    {
+        case 4u:
+        case 12u:
+        case 20u:
+        case 26u:
+            cpu->gte_ctrl[reg] =
+                value & 0xFFFFu;
+            return;
+
+        case 27u:
+        case 29u:
+        case 30u:
+            cpu->gte_ctrl[reg] =
+                fm_b136_gte_sign_extend_16(value);
+            return;
+
+        case 31u:
+            cpu->gte_ctrl[31] =
+                value & 0x7FFFF000u;
+            return;
+
+        default:
+            cpu->gte_ctrl[reg] = value;
+            return;
+    }
 }
 
 
