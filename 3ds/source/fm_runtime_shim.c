@@ -395,6 +395,8 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
     uint32_t check_budget,
     uint32_t phys_begin,
     uint32_t phys_end,
+    uint32_t phys2_begin,
+    uint32_t phys2_end,
     uint32_t max_dispatches,
     uint32_t *out_dispatches
 )
@@ -416,6 +418,8 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
         !cpu
         ||
         phys_begin >= phys_end
+        ||
+        phys2_begin >= phys2_end
         ||
         max_dispatches == 0u
     )
@@ -448,11 +452,17 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
                 &
                 0x1FFFFFFFu;
 
-            if (
-                phys < phys_begin
-                ||
-                phys >= phys_end
-            )
+            int in_primary =
+                phys >= phys_begin
+                &&
+                phys < phys_end;
+
+            int in_secondary =
+                phys >= phys2_begin
+                &&
+                phys < phys2_end;
+
+            if (!in_primary && !in_secondary)
             {
                 break;
             }
@@ -464,6 +474,11 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
                 );
 
             ++dispatched_count;
+
+            if (out_dispatches)
+            {
+                *out_dispatches = dispatched_count;
+            }
 
             if (last_dispatch != 1)
             {
