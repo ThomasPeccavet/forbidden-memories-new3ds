@@ -1785,6 +1785,25 @@ static uint32_t g_b131_swap_count = 0u;
 static uint32_t g_b131_skip_count = 0u;
 static uint32_t g_b131_dirty_present_count = 0u;
 
+/*
+ * ============================================================
+ * B135.7 - VSync-boundary latch for DIRECT-2DF gameplay
+ * ============================================================
+ *
+ * 8002DF60 is the game's persistent main state-machine loop; it is not
+ * a normal once-per-frame function. The old B85/B131 rule waited for the
+ * artificial DIRECT-2DF sentinel before latching a new host frame. On the
+ * Palace map that sentinel is reached only rarely, so Azahar reports ~1-2
+ * App FPS even though the guest itself keeps running near full speed.
+ *
+ * A VSync wait is the natural stable boundary: by the time the game asks
+ * for the next VBlank, all GP0 work submitted since the previous latch is
+ * already in software VRAM. Latch once there when GP0 actually changed.
+ */
+static uint64_t g_b1357_last_latched_gp0 = 0u;
+static uint32_t g_b1357_vsync_latches = 0u;
+static uint32_t g_b1357_display_latches = 0u;
+
 
 /*
  * ============================================================
@@ -14177,13 +14196,42 @@ int main(void)
             }
             else if (g_direct2df_active)
             {
+                int b1357_vsync_boundary =
+                    g_vsync_wait_active
+                    &&
+                    b104_gp0 != g_b1357_last_latched_gp0;
+
+                /*
+                 * B135.7:
+                 * - VSync wait = stable end-of-frame boundary for gameplay;
+                 * - GP1 page change is also inherently safe;
+                 * - keep the historical sentinel path as a fallback.
+                 *
+                 * The GP0 comparison is against the LAST LATCH, not merely
+                 * the previous host loop. A complex PS1 frame can span
+                 * several 12 ms scheduler slices before it reaches VSync.
+                 */
                 if (
                     !g_b84_latch_valid
+                    ||
+                    b1357_vsync_boundary
+                    ||
+                    display_changed
                     ||
                     complete_guest_frame
                 )
                 {
                     need_latch = 1;
+
+                    if (b1357_vsync_boundary)
+                    {
+                        ++g_b1357_vsync_latches;
+                    }
+
+                    if (display_changed)
+                    {
+                        ++g_b1357_display_latches;
+                    }
                 }
             }
             else if (display_changed)
@@ -14405,6 +14453,7 @@ int main(void)
 
                 g_b84_latch_valid = 1u;
                 g_b86_present_dirty = 1u;
+                g_b1357_last_latched_gp0 = b104_gp0;
                 ++g_b84_latch_count;
 
                 if (b104_decode24)
@@ -14684,7 +14733,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.6-GTE-REGS-QS (BASE B131)\n");
+            printf("BUILD B135.7-VSYNC-LATCH-QS (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -14731,10 +14780,12 @@ int main(void)
             );
 
             printf(
-                "PACING swap/dirty/skip:%lu/%lu/%lu\n",
+                "PACING swap/dirty/skip:%lu/%lu/%lu VSL:%lu DPL:%lu\n",
                 (unsigned long)g_b131_swap_count,
                 (unsigned long)g_b131_dirty_present_count,
-                (unsigned long)g_b131_skip_count
+                (unsigned long)g_b131_skip_count,
+                (unsigned long)g_b1357_vsync_latches,
+                (unsigned long)g_b1357_display_latches
             );
 
             printf(
