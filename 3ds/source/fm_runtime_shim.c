@@ -5,6 +5,7 @@
 #include <setjmp.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 
 extern int psx_dispatch_game_compiled(
