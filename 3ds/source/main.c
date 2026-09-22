@@ -13839,7 +13839,11 @@ int main(void)
                 g_b65_stop_code = 5u;
                 g_b65_stop_pc = probe.pc;
                 g_b65_stop_ra = cpu ? cpu->gpr[31] : 0u;
-                g_b65_stop_detail = (uint32_t)probe.reason;
+                /*
+                 * B135 : conserver le DETAIL reel (commande GTE, syscall,
+                 * etc.) plutot que seulement l'enum du motif.
+                 */
+                g_b65_stop_detail = probe.detail;
 
                 game_running = 0;
                 break;
