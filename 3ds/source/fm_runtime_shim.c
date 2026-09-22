@@ -2494,8 +2494,6 @@ void gte_write_data(
 {
     reg &= 31u;
 
-    fm_b136_gte_canonicalize_backing(cpu);
-
     switch (reg)
     {
         case 1u:
@@ -2604,8 +2602,6 @@ void gte_write_ctrl(
 )
 {
     reg &= 31u;
-
-    fm_b136_gte_canonicalize_backing(cpu);
 
     switch (reg)
     {
