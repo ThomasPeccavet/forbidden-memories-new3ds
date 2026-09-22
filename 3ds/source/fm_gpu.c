@@ -809,6 +809,26 @@ static int b124_try_textured_rect(
         return 0;
     }
 
+    /*
+     * B134: small variable textured rectangles are a likely font/sprite
+     * path. Keep them on the upstream generic renderer while we validate
+     * the missing-menu-text regression. Large hot rectangles still use
+     * the B124 native fast path, preserving most of its performance gain.
+     */
+    if (
+        w > 0
+        &&
+        h > 0
+        &&
+        w <= 32
+        &&
+        h <= 32
+    )
+    {
+        ++g_b124_rect_fallbacks;
+        return 0;
+    }
+
     ++g_b124_rect_hits;
 
     if (w <= 0 || h <= 0)
