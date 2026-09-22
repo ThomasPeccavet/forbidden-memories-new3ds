@@ -3260,6 +3260,435 @@ static void fm_b135_gte_mvmva(
 }
 
 
+static void fm_b135_gte_light_transform(
+    CPUState *cpu,
+    const int32_t vertex[3],
+    uint32_t cmd,
+    uint32_t *flags
+)
+{
+    int32_t m[3][3];
+    fm_b135_gte_unpack_matrix(cpu, 8u, m);
+
+    int lm = (cmd & (1u << 10)) ? 1 : 0;
+
+    int64_t mac1 =
+        (
+            (int64_t)m[0][0] * vertex[0]
+            +
+            (int64_t)m[0][1] * vertex[1]
+            +
+            (int64_t)m[0][2] * vertex[2]
+        )
+        >> 12;
+
+    int64_t mac2 =
+        (
+            (int64_t)m[1][0] * vertex[0]
+            +
+            (int64_t)m[1][1] * vertex[1]
+            +
+            (int64_t)m[1][2] * vertex[2]
+        )
+        >> 12;
+
+    int64_t mac3 =
+        (
+            (int64_t)m[2][0] * vertex[0]
+            +
+            (int64_t)m[2][1] * vertex[1]
+            +
+            (int64_t)m[2][2] * vertex[2]
+        )
+        >> 12;
+
+    cpu->gte_data[25] = (uint32_t)(int32_t)mac1;
+    cpu->gte_data[26] = (uint32_t)(int32_t)mac2;
+    cpu->gte_data[27] = (uint32_t)(int32_t)mac3;
+
+    cpu->gte_data[9] =
+        (uint32_t)fm_b135_gte_sat_ir(
+            mac1,
+            lm,
+            FM_GTE_FLAG_IR1_SAT,
+            flags
+        );
+
+    cpu->gte_data[10] =
+        (uint32_t)fm_b135_gte_sat_ir(
+            mac2,
+            lm,
+            FM_GTE_FLAG_IR2_SAT,
+            flags
+        );
+
+    cpu->gte_data[11] =
+        (uint32_t)fm_b135_gte_sat_ir(
+            mac3,
+            lm,
+            FM_GTE_FLAG_IR3_SAT,
+            flags
+        );
+}
+
+
+static void fm_b135_gte_light_color(
+    CPUState *cpu,
+    uint32_t cmd,
+    uint32_t *flags
+)
+{
+    int32_t m[3][3];
+    fm_b135_gte_unpack_matrix(cpu, 16u, m);
+
+    int lm = (cmd & (1u << 10)) ? 1 : 0;
+
+    int64_t ir1 = fm_b135_gte_s16(cpu->gte_data[9]);
+    int64_t ir2 = fm_b135_gte_s16(cpu->gte_data[10]);
+    int64_t ir3 = fm_b135_gte_s16(cpu->gte_data[11]);
+
+    int64_t mac1 =
+        (
+            (int64_t)(int32_t)cpu->gte_ctrl[13] * 4096
+            +
+            (int64_t)m[0][0] * ir1
+            +
+            (int64_t)m[0][1] * ir2
+            +
+            (int64_t)m[0][2] * ir3
+        )
+        >> 12;
+
+    int64_t mac2 =
+        (
+            (int64_t)(int32_t)cpu->gte_ctrl[14] * 4096
+            +
+            (int64_t)m[1][0] * ir1
+            +
+            (int64_t)m[1][1] * ir2
+            +
+            (int64_t)m[1][2] * ir3
+        )
+        >> 12;
+
+    int64_t mac3 =
+        (
+            (int64_t)(int32_t)cpu->gte_ctrl[15] * 4096
+            +
+            (int64_t)m[2][0] * ir1
+            +
+            (int64_t)m[2][1] * ir2
+            +
+            (int64_t)m[2][2] * ir3
+        )
+        >> 12;
+
+    cpu->gte_data[25] = (uint32_t)(int32_t)mac1;
+    cpu->gte_data[26] = (uint32_t)(int32_t)mac2;
+    cpu->gte_data[27] = (uint32_t)(int32_t)mac3;
+
+    cpu->gte_data[9] =
+        (uint32_t)fm_b135_gte_sat_ir(
+            mac1,
+            lm,
+            FM_GTE_FLAG_IR1_SAT,
+            flags
+        );
+
+    cpu->gte_data[10] =
+        (uint32_t)fm_b135_gte_sat_ir(
+            mac2,
+            lm,
+            FM_GTE_FLAG_IR2_SAT,
+            flags
+        );
+
+    cpu->gte_data[11] =
+        (uint32_t)fm_b135_gte_sat_ir(
+            mac3,
+            lm,
+            FM_GTE_FLAG_IR3_SAT,
+            flags
+        );
+}
+
+
+static void fm_b135_gte_depth_cue_from_ir(
+    CPUState *cpu,
+    uint32_t cmd,
+    uint32_t *flags
+)
+{
+    int shift = (cmd & (1u << 19)) ? 12 : 0;
+    int lm = (cmd & (1u << 10)) ? 1 : 0;
+
+    int64_t ir1 = fm_b135_gte_s16(cpu->gte_data[9]);
+    int64_t ir2 = fm_b135_gte_s16(cpu->gte_data[10]);
+    int64_t ir3 = fm_b135_gte_s16(cpu->gte_data[11]);
+    int64_t ir0 = fm_b135_gte_s16(cpu->gte_data[8]);
+
+    int64_t base1 = ir1 * 4096;
+    int64_t base2 = ir2 * 4096;
+    int64_t base3 = ir3 * 4096;
+
+    int32_t step1 =
+        fm_b135_gte_sat_ir(
+            (
+                (
+                    (int64_t)(int32_t)cpu->gte_ctrl[21] * 4096
+                    -
+                    base1
+                )
+                >> shift
+            ),
+            0,
+            FM_GTE_FLAG_IR1_SAT,
+            flags
+        );
+
+    int32_t step2 =
+        fm_b135_gte_sat_ir(
+            (
+                (
+                    (int64_t)(int32_t)cpu->gte_ctrl[22] * 4096
+                    -
+                    base2
+                )
+                >> shift
+            ),
+            0,
+            FM_GTE_FLAG_IR2_SAT,
+            flags
+        );
+
+    int32_t step3 =
+        fm_b135_gte_sat_ir(
+            (
+                (
+                    (int64_t)(int32_t)cpu->gte_ctrl[23] * 4096
+                    -
+                    base3
+                )
+                >> shift
+            ),
+            0,
+            FM_GTE_FLAG_IR3_SAT,
+            flags
+        );
+
+    int64_t mac1 =
+        (
+            base1
+            +
+            ir0 * step1
+        )
+        >> shift;
+
+    int64_t mac2 =
+        (
+            base2
+            +
+            ir0 * step2
+        )
+        >> shift;
+
+    int64_t mac3 =
+        (
+            base3
+            +
+            ir0 * step3
+        )
+        >> shift;
+
+    fm_b135_gte_check_mac(mac1, 0u, flags);
+    fm_b135_gte_check_mac(mac2, 1u, flags);
+    fm_b135_gte_check_mac(mac3, 2u, flags);
+
+    cpu->gte_data[25] = (uint32_t)(int32_t)mac1;
+    cpu->gte_data[26] = (uint32_t)(int32_t)mac2;
+    cpu->gte_data[27] = (uint32_t)(int32_t)mac3;
+
+    cpu->gte_data[9] =
+        (uint32_t)fm_b135_gte_sat_ir(
+            mac1,
+            lm,
+            FM_GTE_FLAG_IR1_SAT,
+            flags
+        );
+
+    cpu->gte_data[10] =
+        (uint32_t)fm_b135_gte_sat_ir(
+            mac2,
+            lm,
+            FM_GTE_FLAG_IR2_SAT,
+            flags
+        );
+
+    cpu->gte_data[11] =
+        (uint32_t)fm_b135_gte_sat_ir(
+            mac3,
+            lm,
+            FM_GTE_FLAG_IR3_SAT,
+            flags
+        );
+}
+
+
+static void fm_b135_gte_color_output(
+    CPUState *cpu,
+    uint32_t cmd,
+    uint32_t *flags
+)
+{
+    int lm = (cmd & (1u << 10)) ? 1 : 0;
+
+    uint32_t rgbc = cpu->gte_data[6];
+
+    int64_t ir1 = fm_b135_gte_s16(cpu->gte_data[9]);
+    int64_t ir2 = fm_b135_gte_s16(cpu->gte_data[10]);
+    int64_t ir3 = fm_b135_gte_s16(cpu->gte_data[11]);
+
+    int64_t mac1 =
+        (
+            (int64_t)(rgbc & 0xFFu)
+            *
+            ir1
+            *
+            16
+        )
+        >> 12;
+
+    int64_t mac2 =
+        (
+            (int64_t)((rgbc >> 8) & 0xFFu)
+            *
+            ir2
+            *
+            16
+        )
+        >> 12;
+
+    int64_t mac3 =
+        (
+            (int64_t)((rgbc >> 16) & 0xFFu)
+            *
+            ir3
+            *
+            16
+        )
+        >> 12;
+
+    cpu->gte_data[25] = (uint32_t)(int32_t)mac1;
+    cpu->gte_data[26] = (uint32_t)(int32_t)mac2;
+    cpu->gte_data[27] = (uint32_t)(int32_t)mac3;
+
+    cpu->gte_data[9] =
+        (uint32_t)fm_b135_gte_sat_ir(
+            mac1,
+            lm,
+            FM_GTE_FLAG_IR1_SAT,
+            flags
+        );
+
+    cpu->gte_data[10] =
+        (uint32_t)fm_b135_gte_sat_ir(
+            mac2,
+            lm,
+            FM_GTE_FLAG_IR2_SAT,
+            flags
+        );
+
+    cpu->gte_data[11] =
+        (uint32_t)fm_b135_gte_sat_ir(
+            mac3,
+            lm,
+            FM_GTE_FLAG_IR3_SAT,
+            flags
+        );
+
+    uint32_t r =
+        fm_b135_gte_sat_color(
+            mac1 >> 4,
+            1u << 21,
+            flags
+        );
+
+    uint32_t g =
+        fm_b135_gte_sat_color(
+            mac2 >> 4,
+            1u << 20,
+            flags
+        );
+
+    uint32_t b =
+        fm_b135_gte_sat_color(
+            mac3 >> 4,
+            1u << 19,
+            flags
+        );
+
+    uint32_t code =
+        rgbc & 0xFF000000u;
+
+    cpu->gte_data[20] = cpu->gte_data[21];
+    cpu->gte_data[21] = cpu->gte_data[22];
+    cpu->gte_data[22] =
+        code
+        |
+        (b << 16)
+        |
+        (g << 8)
+        |
+        r;
+}
+
+
+static void fm_b135_gte_ncds(
+    CPUState *cpu,
+    uint32_t cmd
+)
+{
+    uint32_t flags = 0u;
+    int32_t v0[3];
+
+    fm_b135_gte_unpack_vertex(
+        cpu,
+        0u,
+        v0
+    );
+
+    fm_b135_gte_light_transform(
+        cpu,
+        v0,
+        cmd,
+        &flags
+    );
+
+    fm_b135_gte_light_color(
+        cpu,
+        cmd,
+        &flags
+    );
+
+    fm_b135_gte_depth_cue_from_ir(
+        cpu,
+        cmd,
+        &flags
+    );
+
+    fm_b135_gte_color_output(
+        cpu,
+        cmd,
+        &flags
+    );
+
+    fm_b135_gte_finish_flags(
+        cpu,
+        flags
+    );
+}
+
+
 static void fm_b135_gte_gpf(
     CPUState *cpu,
     uint32_t cmd
@@ -3345,6 +3774,10 @@ void gte_execute(
 
         case 0x12u:
             fm_b135_gte_mvmva(cpu, cmd);
+            return;
+
+        case 0x13u:
+            fm_b135_gte_ncds(cpu, cmd);
             return;
 
         case 0x2Du:
