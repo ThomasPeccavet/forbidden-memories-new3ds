@@ -1822,6 +1822,14 @@ static uint32_t g_b1359_prev_vsc = 0u;
 static uint64_t g_b1359_prev_gp0 = 0u;
 static uint64_t g_b13513_prev_pixels = 0u;
 
+/*
+ * B135.14 - resident dispatch chaining for the Pharaoh map renderer
+ * 800342B0..80034D2F.
+ */
+static uint32_t g_b13514_chain_entries = 0u;
+static uint64_t g_b13514_chain_dispatches = 0u;
+static uint32_t g_b13514_chain_max = 0u;
+
 
 /*
  * ============================================================
@@ -13713,24 +13721,62 @@ int main(void)
                  * Le profiler complet reste disponible dans un build
                  * sans NDEBUG.
                  */
-#if defined(NDEBUG)
-                probe =
-                    fm_runtime_probe(
-                        cpu,
-                        dispatch_address,
-                        g_b105_probe_budget
-                    );
-#else
-                {
-                    uint64_t b110_probe_start_tick =
-                        svcGetSystemTick();
+                uint32_t b13514_chain_count = 0u;
+                int b13514_chain_region =
+                    phys >= 0x000342B0u
+                    &&
+                    phys < 0x00034D30u;
 
+#if defined(NDEBUG)
+                if (b13514_chain_region)
+                {
+                    probe =
+                        fm_runtime_probe_chain(
+                            cpu,
+                            dispatch_address,
+                            g_b105_probe_budget,
+                            0x000342B0u,
+                            0x00034D30u,
+                            256u,
+                            &b13514_chain_count
+                        );
+                }
+                else
+                {
                     probe =
                         fm_runtime_probe(
                             cpu,
                             dispatch_address,
                             g_b105_probe_budget
                         );
+                }
+#else
+                {
+                    uint64_t b110_probe_start_tick =
+                        svcGetSystemTick();
+
+                    if (b13514_chain_region)
+                    {
+                        probe =
+                            fm_runtime_probe_chain(
+                                cpu,
+                                dispatch_address,
+                                g_b105_probe_budget,
+                                0x000342B0u,
+                                0x00034D30u,
+                                256u,
+                                &b13514_chain_count
+                            );
+                    }
+                    else
+                    {
+                        probe =
+                            fm_runtime_probe(
+                                cpu,
+                                dispatch_address,
+                                g_b105_probe_budget
+                            );
+                    }
 
                     uint64_t b110_probe_ticks =
                         svcGetSystemTick()
@@ -13751,6 +13797,19 @@ int main(void)
                     );
                 }
 #endif
+
+                if (b13514_chain_count != 0u)
+                {
+                    ++g_b13514_chain_entries;
+                    g_b13514_chain_dispatches +=
+                        b13514_chain_count;
+
+                    if (b13514_chain_count > g_b13514_chain_max)
+                    {
+                        g_b13514_chain_max =
+                            b13514_chain_count;
+                    }
+                }
 
                 probe_ran = 1;
 
@@ -14764,7 +14823,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.13-VFP-GRADIENTS (BASE B131)\n");
+            printf("BUILD B135.14-MAP-CHAIN (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -14841,9 +14900,10 @@ int main(void)
                 );
 
                 printf(
-                    "HOT hand:%08lX/%lu DMA:%lu/%lu ms\n",
-                    (unsigned long)g_b91_slow_handoff_pc,
-                    (unsigned long)g_b91_slow_handoff_ms,
+                    "CHAIN ent/disp/max:%lu/%llu/%lu DMA:%lu/%lu\n",
+                    (unsigned long)g_b13514_chain_entries,
+                    (unsigned long long)g_b13514_chain_dispatches,
+                    (unsigned long)g_b13514_chain_max,
                     (unsigned long)b130_dma.dma2_linked_last_ms,
                     (unsigned long)b130_dma.dma2_linked_max_ms
                 );
