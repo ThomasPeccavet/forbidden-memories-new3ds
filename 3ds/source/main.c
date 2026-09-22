@@ -1804,6 +1804,15 @@ static uint64_t g_b1357_last_latched_gp0 = 0u;
 static uint32_t g_b1357_vsync_latches = 0u;
 static uint32_t g_b1357_display_latches = 0u;
 
+/*
+ * B135.8 - one-loop pulse emitted when the VSync HLE actually RETURNS.
+ * B135.7 looked at g_vsync_wait_active during presentation, but that flag is
+ * cleared inside the HLE before main.c reaches the latch stage. Therefore
+ * VSL stayed at zero even though gameplay was synchronizing correctly.
+ */
+static uint32_t g_b1358_vsync_completed = 0u;
+static uint32_t g_b1358_vsync_completions = 0u;
+
 
 /*
  * ============================================================
@@ -12146,6 +12155,14 @@ int main(void)
                     g_vsync_wait_until_frame =
                         0;
 
+                    /*
+                     * B135.8: pulse survives until the presentation stage of
+                     * this same host loop. This is the real stable guest-frame
+                     * boundary that B135.7 was trying to observe.
+                     */
+                    g_b1358_vsync_completed = 1u;
+                    ++g_b1358_vsync_completions;
+
 
                     static_miss =
                         0;
@@ -14197,7 +14214,7 @@ int main(void)
             else if (g_direct2df_active)
             {
                 int b1357_vsync_boundary =
-                    g_vsync_wait_active
+                    g_b1358_vsync_completed
                     &&
                     b104_gp0 != g_b1357_last_latched_gp0;
 
@@ -14464,6 +14481,11 @@ int main(void)
 
             g_b104_last_gp0 = b104_gp0;
             g_b104_last_mode = b104_mode;
+
+            /*
+             * B135.8: VSync completion is an edge, not a level.
+             */
+            g_b1358_vsync_completed = 0u;
         }
 
 
@@ -14733,7 +14755,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.7-VSYNC-LATCH-QS (BASE B131)\n");
+            printf("BUILD B135.8-VSYNC-EDGE-QS (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -14780,12 +14802,12 @@ int main(void)
             );
 
             printf(
-                "PACING swap/dirty/skip:%lu/%lu/%lu VSL:%lu DPL:%lu\n",
+                "PACING swap/dirty/skip:%lu/%lu/%lu VSL:%lu VSC:%lu\n",
                 (unsigned long)g_b131_swap_count,
                 (unsigned long)g_b131_dirty_present_count,
                 (unsigned long)g_b131_skip_count,
                 (unsigned long)g_b1357_vsync_latches,
-                (unsigned long)g_b1357_display_latches
+                (unsigned long)g_b1358_vsync_completions
             );
 
             printf(
