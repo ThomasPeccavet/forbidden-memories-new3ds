@@ -1813,6 +1813,14 @@ static uint32_t g_b1357_display_latches = 0u;
 static uint32_t g_b1358_vsync_completed = 0u;
 static uint32_t g_b1358_vsync_completions = 0u;
 
+/*
+ * B135.9 - compact performance deltas over the 120-loop debug interval.
+ * These counters are deliberately host-side and are not part of quick-state.
+ */
+static uint32_t g_b1359_prev_swap = 0u;
+static uint32_t g_b1359_prev_vsc = 0u;
+static uint64_t g_b1359_prev_gp0 = 0u;
+
 
 /*
  * ============================================================
@@ -14755,7 +14763,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.8-VSYNC-EDGE-QS (BASE B131)\n");
+            printf("BUILD B135.9-PERF-BREAKDOWN (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -14800,6 +14808,37 @@ int main(void)
                 (unsigned long)g_b86_present_count,
                 (unsigned long)g_b74_hit_menu_draw_cb
             );
+
+            {
+                uint32_t d_swap =
+                    g_b131_swap_count - g_b1359_prev_swap;
+
+                uint32_t d_vsc =
+                    g_b1358_vsync_completions - g_b1359_prev_vsc;
+
+                uint64_t d_gp0 =
+                    gpu_debug.gp0_words - g_b1359_prev_gp0;
+
+                printf(
+                    "PERF pre/rend/vb/gfx/wait:%lu/%lu/%lu/%lu/%lu ms\n",
+                    (unsigned long)g_b106_pre_gfx_ms,
+                    (unsigned long)g_b105_render_ms,
+                    (unsigned long)g_b105_vblank_ms,
+                    (unsigned long)g_b106_gfx_ms,
+                    (unsigned long)g_b106_wait_ms
+                );
+
+                printf(
+                    "D120 swap/vsc/gp0:%lu/%lu/%llu\n",
+                    (unsigned long)d_swap,
+                    (unsigned long)d_vsc,
+                    (unsigned long long)d_gp0
+                );
+
+                g_b1359_prev_swap = g_b131_swap_count;
+                g_b1359_prev_vsc = g_b1358_vsync_completions;
+                g_b1359_prev_gp0 = gpu_debug.gp0_words;
+            }
 
             printf(
                 "PACING swap/dirty/skip:%lu/%lu/%lu VSL:%lu VSC:%lu\n",
