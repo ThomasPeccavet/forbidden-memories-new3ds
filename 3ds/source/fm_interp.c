@@ -1731,13 +1731,38 @@ static int exec_delay_slot(
 
 /*
  * ============================================================
- * Interprétation d'un basic block
+ * Interprétation R3000A
  * ============================================================
  */
 
-FMInterpResult fm_interp_run_block(
+static inline int interp_region_contains(
+    uint32_t pc,
+    uint32_t phys_begin,
+    uint32_t phys_end,
+    uint32_t stop_phys
+)
+{
+    uint32_t phys =
+        pc
+        &
+        0x1FFFFFFFu;
+
+    return
+        phys >= phys_begin
+        &&
+        phys < phys_end
+        &&
+        phys != stop_phys;
+}
+
+
+static FMInterpResult fm_interp_run_internal(
     CPUState *cpu,
-    uint32_t max_instructions
+    uint32_t max_instructions,
+    int chain_region,
+    uint32_t phys_begin,
+    uint32_t phys_end,
+    uint32_t stop_phys
 )
 {
     if (!cpu)
@@ -1771,6 +1796,32 @@ FMInterpResult fm_interp_run_block(
     {
         uint32_t pc =
             cpu->pc;
+
+
+        /*
+         * B135.19: in chained mode the next PC may have left the hot
+         * resident region (or reached a real native function entry).
+         * Hand it back to main.c before fetching/executing it here.
+         */
+        if (
+            chain_region
+            &&
+            !interp_region_contains(
+                pc,
+                phys_begin,
+                phys_end,
+                stop_phys
+            )
+        )
+        {
+            return
+                make_result(
+                    FM_INTERP_BLOCK_DONE,
+                    pc,
+                    0u,
+                    count
+                );
+        }
 
 
         uint32_t instruction =
@@ -1916,6 +1967,25 @@ FMInterpResult fm_interp_run_block(
                 0;
 
 
+            /*
+             * B135.19: do not bounce through main.c for an internal branch.
+             * Calls/returns that leave the region still return normally.
+             */
+            if (
+                chain_region
+                &&
+                interp_region_contains(
+                    cpu->pc,
+                    phys_begin,
+                    phys_end,
+                    stop_phys
+                )
+            )
+            {
+                continue;
+            }
+
+
             return
                 make_result(
                     FM_INTERP_BLOCK_DONE,
@@ -2019,6 +2089,25 @@ FMInterpResult fm_interp_run_block(
 
             cpu->gpr[0] =
                 0;
+
+
+            /*
+             * B135.19: do not bounce through main.c for an internal branch.
+             * Calls/returns that leave the region still return normally.
+             */
+            if (
+                chain_region
+                &&
+                interp_region_contains(
+                    cpu->pc,
+                    phys_begin,
+                    phys_end,
+                    stop_phys
+                )
+            )
+            {
+                continue;
+            }
 
 
             return
@@ -2146,6 +2235,25 @@ FMInterpResult fm_interp_run_block(
                 0;
 
 
+            /*
+             * B135.19: do not bounce through main.c for an internal branch.
+             * Calls/returns that leave the region still return normally.
+             */
+            if (
+                chain_region
+                &&
+                interp_region_contains(
+                    cpu->pc,
+                    phys_begin,
+                    phys_end,
+                    stop_phys
+                )
+            )
+            {
+                continue;
+            }
+
+
             return
                 make_result(
                     FM_INTERP_BLOCK_DONE,
@@ -2249,6 +2357,25 @@ FMInterpResult fm_interp_run_block(
                 0;
 
 
+            /*
+             * B135.19: do not bounce through main.c for an internal branch.
+             * Calls/returns that leave the region still return normally.
+             */
+            if (
+                chain_region
+                &&
+                interp_region_contains(
+                    cpu->pc,
+                    phys_begin,
+                    phys_end,
+                    stop_phys
+                )
+            )
+            {
+                continue;
+            }
+
+
             return
                 make_result(
                     FM_INTERP_BLOCK_DONE,
@@ -2326,6 +2453,54 @@ FMInterpResult fm_interp_run_block(
                 cpu->pc
             ),
             count
+        );
+}
+
+
+FMInterpResult fm_interp_run_block(
+    CPUState *cpu,
+    uint32_t max_instructions
+)
+{
+    return
+        fm_interp_run_internal(
+            cpu,
+            max_instructions,
+            0,
+            0u,
+            0u,
+            0xFFFFFFFFu
+        );
+}
+
+
+FMInterpResult fm_interp_run_region(
+    CPUState *cpu,
+    uint32_t max_instructions,
+    uint32_t phys_begin,
+    uint32_t phys_end,
+    uint32_t stop_phys
+)
+{
+    if (phys_begin >= phys_end)
+    {
+        return
+            make_result(
+                FM_INTERP_UNSUPPORTED,
+                cpu ? cpu->pc : 0u,
+                0u,
+                0u
+            );
+    }
+
+    return
+        fm_interp_run_internal(
+            cpu,
+            max_instructions,
+            1,
+            phys_begin,
+            phys_end,
+            stop_phys
         );
 }
 
