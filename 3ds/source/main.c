@@ -9355,7 +9355,7 @@ static int fm_b135_quick_load(
     CPUState *cpu,
     uint8_t *ram,
     uint16_t *vram,
-    uint32_t *frame,
+    unsigned *frame,
     uint32_t *last_dispatch_address
 )
 {
