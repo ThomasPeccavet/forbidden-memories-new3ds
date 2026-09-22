@@ -1771,6 +1771,20 @@ static uint32_t g_b86_present_dirty = 0u;
 static uint32_t g_b86_present_count = 0u;
 static uint32_t g_b86_skipped_presents = 0u;
 
+/*
+ * ============================================================
+ * B131 - dirty-frame pacing
+ * ============================================================
+ *
+ * B130 showed far more host presents than real menu draws. Re-presenting
+ * the same latched PS1 image wastes RGB555 conversion + cache flush + swap
+ * and can worsen frame pacing. B131 swaps only when a new image has been
+ * latched; otherwise the current frontbuffer simply remains visible.
+ */
+static uint32_t g_b131_swap_count = 0u;
+static uint32_t g_b131_skip_count = 0u;
+static uint32_t g_b131_dirty_present_count = 0u;
+
 
 /*
  * ============================================================
@@ -9414,6 +9428,8 @@ int main(void)
     {
         uint64_t b105_loop_start_ms = osGetTime();
 
+        int b131_presented_this_loop = 0;
+
         /*
          * B93 : le vieux maximum B91 masquait les hotspots recurrents
          * avec une grosse fonction de chargement vue une seule fois.
@@ -14021,24 +14037,36 @@ int main(void)
              */
             if (g_b84_latch_valid)
             {
-                fm_present_rgb555(
-                    composite,
-                    320,
-                    crop
-                );
-
+                /*
+                 * B131: only copy/swap when the guest produced a new
+                 * stable image. If nothing changed, keep the current
+                 * 3DS frontbuffer visible and just wait for VBlank.
+                 */
                 if (g_b86_present_dirty)
                 {
-                    g_b86_present_dirty = 0u;
-                }
+                    fm_present_rgb555(
+                        composite,
+                        320,
+                        crop
+                    );
 
-                ++g_b86_present_count;
+                    g_b86_present_dirty = 0u;
+
+                    ++g_b86_present_count;
+                    ++g_b131_dirty_present_count;
+                    b131_presented_this_loop = 1;
+                }
+                else
+                {
+                    ++g_b86_skipped_presents;
+                    ++g_b131_skip_count;
+                }
             }
             else
             {
                 /*
-                 * Avant le premier latch stable, garder le comportement
-                 * historique afin que le boot reste visible.
+                 * Before the first stable latch, keep the historical
+                 * behavior so boot progress remains visible.
                  */
                 fm_present_rgb555(
                     vram + display_y * 1024u + display_x,
@@ -14047,6 +14075,7 @@ int main(void)
                 );
 
                 ++g_b86_present_count;
+                b131_presented_this_loop = 1;
             }
         }
         else if (
@@ -14076,6 +14105,8 @@ int main(void)
                 1024,
                 0
             );
+
+            b131_presented_this_loop = 1;
         }
         else if (
             !g_b42_native_video
@@ -14087,6 +14118,8 @@ int main(void)
                 320,
                 0
             );
+
+            b131_presented_this_loop = 1;
         }
         else if (
             fm_gpu_has_frame()
@@ -14113,6 +14146,8 @@ int main(void)
                 1024,
                 crop
             );
+
+            b131_presented_this_loop = 1;
         }
         else if (show_preview)
         {
@@ -14121,6 +14156,8 @@ int main(void)
                 320,
                 crop
             );
+
+            b131_presented_this_loop = 1;
         }
         else
         {
@@ -14140,6 +14177,8 @@ int main(void)
                 1024,
                 crop
             );
+
+            b131_presented_this_loop = 1;
         }
 
         render_ticks +=
@@ -14222,7 +14261,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B130-PERF-CLEAN\n");
+            printf("BUILD B131-DIRTY-FRAME-PACING\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -14257,6 +14296,13 @@ int main(void)
                 (unsigned long long)gpu_debug.gp0_words,
                 (unsigned long)g_b86_present_count,
                 (unsigned long)g_b74_hit_menu_draw_cb
+            );
+
+            printf(
+                "PACING swap/dirty/skip:%lu/%lu/%lu\n",
+                (unsigned long)g_b131_swap_count,
+                (unsigned long)g_b131_dirty_present_count,
+                (unsigned long)g_b131_skip_count
             );
 
             printf(
@@ -15606,36 +15652,41 @@ int main(void)
             uint64_t b106_gfx_start_ms =
                 osGetTime();
 
-            uint8_t *top_fb =
-                gfxGetFramebuffer(
-                    GFX_TOP,
-                    GFX_LEFT,
-                    NULL,
-                    NULL
-                );
+            if (b131_presented_this_loop)
+            {
+                uint8_t *top_fb =
+                    gfxGetFramebuffer(
+                        GFX_TOP,
+                        GFX_LEFT,
+                        NULL,
+                        NULL
+                    );
 
-            unsigned top_bpp =
-                gspGetBytesPerPixel(
-                    gfxGetScreenFormat(
-                        GFX_TOP
+                unsigned top_bpp =
+                    gspGetBytesPerPixel(
+                        gfxGetScreenFormat(
+                            GFX_TOP
+                        )
+                    );
+
+                GSPGPU_FlushDataCache(
+                    top_fb,
+                    (u32)(
+                        GSP_SCREEN_WIDTH
+                        *
+                        GSP_SCREEN_HEIGHT_TOP
+                        *
+                        top_bpp
                     )
                 );
 
-            GSPGPU_FlushDataCache(
-                top_fb,
-                (u32)(
-                    GSP_SCREEN_WIDTH
-                    *
-                    GSP_SCREEN_HEIGHT_TOP
-                    *
-                    top_bpp
-                )
-            );
+                gfxScreenSwapBuffers(
+                    GFX_TOP,
+                    false
+                );
 
-            gfxScreenSwapBuffers(
-                GFX_TOP,
-                false
-            );
+                ++g_b131_swap_count;
+            }
 
             g_b106_gfx_ms =
                 (uint32_t)(
