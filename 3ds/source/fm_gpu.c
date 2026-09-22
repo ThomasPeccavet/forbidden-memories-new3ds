@@ -1687,6 +1687,55 @@ static void b125_gouraud_triangle(
 }
 
 
+/*
+ * B135.13 - setup de gradients via VFP.
+ *
+ * Le rasterizer B135.11 a supprime le flottant du pixel-loop, mais son setup
+ * faisait encore 13 divisions entieres 64 bits par triangle. Sur ARM11 ces
+ * divisions passent par des helpers logiciels couteux.
+ *
+ * Les numerateurs de gradients PS1 tiennent ici largement dans 32 bits
+ * (coordonnees 11 bits, UV 8 bits, RGB 5 bits). On calcule donc un reciprocal
+ * float UNE fois par determinant / edge, puis on reconvertit en 16.16 entier.
+ * Le pixel-loop reste entier et le rendu reste a resolution PS1 native.
+ */
+static inline int32_t b13513_grad_fp16(
+    int32_t numerator,
+    float inv_den_fp16
+)
+{
+    return
+        (int32_t)(
+            (float)numerator
+            *
+            inv_den_fp16
+        );
+}
+
+
+static inline int32_t b13513_edge_fp16(
+    int32_t dx,
+    int32_t dy
+)
+{
+    if (dy == 0)
+    {
+        return 0;
+    }
+
+    return
+        (int32_t)(
+            (float)dx
+            *
+            (
+                65536.0f
+                /
+                (float)dy
+            )
+        );
+}
+
+
 static void b13511_shaded_textured_triangle(
     int x0, int y0, int u0, int v0, uint32_t c0,
     int x1, int y1, int u1, int v1, uint32_t c1,
@@ -1725,10 +1774,10 @@ static void b13511_shaded_textured_triangle(
     int dy02 = y2 - y0;
     if (dy02 <= 0) return;
 
-    int64_t det =
-        (int64_t)(x1 - x0) * (y2 - y0)
+    int32_t det =
+        (x1 - x0) * (y2 - y0)
         -
-        (int64_t)(x2 - x0) * (y1 - y0);
+        (x2 - x0) * (y1 - y0);
 
     if (det == 0) return;
 
@@ -1744,27 +1793,41 @@ static void b13511_shaded_textured_triangle(
     int g2 = ((int)((c2 >> 8) & 0xFFu)) >> 3;
     int b2 = ((int)((c2 >> 16) & 0xFFu)) >> 3;
 
-#define B13511_GRAD_X(a0,a1,a2)     ((int32_t)(((((int64_t)((a1)-(a0)) * (y2-y0)) -                   ((int64_t)((a2)-(a0)) * (y1-y0))) << 16) / det))
-#define B13511_GRAD_Y(a0,a1,a2)     ((int32_t)(((((int64_t)(x1-x0) * ((a2)-(a0))) -                   ((int64_t)(x2-x0) * ((a1)-(a0)))) << 16) / det))
+    /*
+     * One VFP division replaces the ten 64-bit software divisions used by
+     * the UV + RGB plane gradients.
+     */
+    float inv_det_fp16 =
+        65536.0f
+        /
+        (float)det;
 
-    int32_t du_dx = B13511_GRAD_X(u0,u1,u2);
-    int32_t du_dy = B13511_GRAD_Y(u0,u1,u2);
-    int32_t dv_dx = B13511_GRAD_X(v0,v1,v2);
-    int32_t dv_dy = B13511_GRAD_Y(v0,v1,v2);
+#define B13513_NUM_X(a0,a1,a2) \
+    (((int32_t)((a1)-(a0)) * (y2-y0)) - \
+     ((int32_t)((a2)-(a0)) * (y1-y0)))
 
-    int32_t dr_dx = B13511_GRAD_X(r0,r1,r2);
-    int32_t dr_dy = B13511_GRAD_Y(r0,r1,r2);
-    int32_t dg_dx = B13511_GRAD_X(g0,g1,g2);
-    int32_t dg_dy = B13511_GRAD_Y(g0,g1,g2);
-    int32_t db_dx = B13511_GRAD_X(b0,b1,b2);
-    int32_t db_dy = B13511_GRAD_Y(b0,b1,b2);
+#define B13513_NUM_Y(a0,a1,a2) \
+    (((int32_t)(x1-x0) * ((a2)-(a0))) - \
+     ((int32_t)(x2-x0) * ((a1)-(a0))))
 
-#undef B13511_GRAD_X
-#undef B13511_GRAD_Y
+    int32_t du_dx = b13513_grad_fp16(B13513_NUM_X(u0,u1,u2), inv_det_fp16);
+    int32_t du_dy = b13513_grad_fp16(B13513_NUM_Y(u0,u1,u2), inv_det_fp16);
+    int32_t dv_dx = b13513_grad_fp16(B13513_NUM_X(v0,v1,v2), inv_det_fp16);
+    int32_t dv_dy = b13513_grad_fp16(B13513_NUM_Y(v0,v1,v2), inv_det_fp16);
 
-    int32_t dx_long = b128_div_fp16((int64_t)(x2-x0), dy02);
-    int32_t dx_upper = b128_div_fp16((int64_t)(x1-x0), y1-y0);
-    int32_t dx_lower = b128_div_fp16((int64_t)(x2-x1), y2-y1);
+    int32_t dr_dx = b13513_grad_fp16(B13513_NUM_X(r0,r1,r2), inv_det_fp16);
+    int32_t dr_dy = b13513_grad_fp16(B13513_NUM_Y(r0,r1,r2), inv_det_fp16);
+    int32_t dg_dx = b13513_grad_fp16(B13513_NUM_X(g0,g1,g2), inv_det_fp16);
+    int32_t dg_dy = b13513_grad_fp16(B13513_NUM_Y(g0,g1,g2), inv_det_fp16);
+    int32_t db_dx = b13513_grad_fp16(B13513_NUM_X(b0,b1,b2), inv_det_fp16);
+    int32_t db_dy = b13513_grad_fp16(B13513_NUM_Y(b0,b1,b2), inv_det_fp16);
+
+#undef B13513_NUM_X
+#undef B13513_NUM_Y
+
+    int32_t dx_long = b13513_edge_fp16(x2-x0, dy02);
+    int32_t dx_upper = b13513_edge_fp16(x1-x0, y1-y0);
+    int32_t dx_lower = b13513_edge_fp16(x2-x1, y2-y1);
 
     int semi_mode = (texpage >> 5) & 3u;
 
