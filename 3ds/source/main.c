@@ -14684,7 +14684,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.3-MVMVA-QS (BASE B131)\n");
+            printf("BUILD B135.4-GTE-STORE-QS (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
