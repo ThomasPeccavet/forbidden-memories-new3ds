@@ -29,6 +29,42 @@ uint16_t fm_memory_i_mask(void);
 
 
 /*
+ * B135 - etat MMIO minimal pour le quick-state de debug.
+ * La RAM principale est sauvegardee separement par main.c.
+ */
+typedef struct FMMemoryQuickState
+{
+    uint8_t scratch[0x400];
+
+    uint16_t i_stat;
+    uint16_t i_mask;
+
+    struct
+    {
+        uint16_t count;
+        uint16_t mode;
+        uint16_t target;
+        uint8_t irq_fired_once;
+        uint8_t reserved;
+    } timers[3];
+
+    uint32_t dma2_madr;
+    uint32_t dma2_bcr;
+    uint32_t dma2_chcr;
+
+    uint32_t dma6_madr;
+    uint32_t dma6_bcr;
+    uint32_t dma6_chcr;
+
+    uint32_t dma_dpcr;
+    uint32_t dma_dicr;
+} FMMemoryQuickState;
+
+void fm_memory_quick_save(FMMemoryQuickState *out);
+void fm_memory_quick_load(const FMMemoryQuickState *in);
+
+
+/*
  * ============================================================
  * Diagnostic DMA bring-up
  * ============================================================
