@@ -14299,7 +14299,7 @@ int main(void)
                 &b100_last_gp105
             );
 
-            printf("BUILD B125-FAST-HOT-QUADS\n");
+            printf("BUILD B126-GPU-FASTPATH-DIAG\n");
 
             printf(
                 "RUN:%c CPU:%08lX RA:%08lX F:%lu I:%s\n",
@@ -14768,6 +14768,24 @@ int main(void)
                         (unsigned long)gpu_debug.b125_gouraud_hits,
                         (unsigned long)gpu_debug.b125_fallbacks,
                         (unsigned long long)gpu_debug.b125_pixels
+                    );
+
+                    printf(
+                        "B126 tag:%lu seen 2C/2E/3A:%lu/%lu/%lu\n",
+                        (unsigned long)fm_gpu_b126_build_tag(),
+                        (unsigned long)gpu_debug.b126_seen_2c,
+                        (unsigned long)gpu_debug.b126_seen_2e,
+                        (unsigned long)gpu_debug.b126_seen_3a
+                    );
+
+                    printf(
+                        "B126 try T/G:%lu/%lu mode S/W/F:%d/%d/%d rej:%lX\n",
+                        (unsigned long)gpu_debug.b126_try_t,
+                        (unsigned long)gpu_debug.b126_try_g,
+                        gpu_debug.b126_scale,
+                        gpu_debug.b126_wide,
+                        gpu_debug.b126_filter,
+                        (unsigned long)gpu_debug.b126_reject_mask
                     );
                 }
             }

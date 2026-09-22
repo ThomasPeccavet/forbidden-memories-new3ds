@@ -98,6 +98,14 @@ static uint32_t g_b125_gouraud_hits = 0u;
 static uint32_t g_b125_fallbacks = 0u;
 static uint64_t g_b125_pixels = 0u;
 
+/* B126 - direct proof of opcode flow and linked object version. */
+static uint32_t g_b126_seen_2c = 0u;
+static uint32_t g_b126_seen_2e = 0u;
+static uint32_t g_b126_seen_3a = 0u;
+static uint32_t g_b126_try_t = 0u;
+static uint32_t g_b126_try_g = 0u;
+static uint32_t g_b126_reject_mask = 0u;
+
 static uint64_t b122_ticks_to_us(uint64_t ticks)
 {
     return
@@ -967,14 +975,16 @@ static int b124_try_textured_rect(
 
 static int b125_native_mode_ready(void)
 {
-    return
-        g_vram
-        &&
-        sw_renderer_scale() == 1
-        &&
-        sw_wide_width() == 0
-        &&
-        sw_texture_filter() == 0;
+    uint32_t reject = 0u;
+
+    if (!g_vram) reject |= 1u;
+    if (sw_renderer_scale() != 1) reject |= 2u;
+    if (sw_wide_width() != 0) reject |= 4u;
+    if (sw_texture_filter() != 0) reject |= 8u;
+
+    g_b126_reject_mask |= reject;
+
+    return reject == 0u;
 }
 
 
@@ -2354,6 +2364,10 @@ static void execute_command(void)
         &
         0xFFu;
 
+    if (opcode == 0x2Cu) ++g_b126_seen_2c;
+    if (opcode == 0x2Eu) ++g_b126_seen_2e;
+    if (opcode == 0x3Au) ++g_b126_seen_3a;
+
     ++g_b46_cmd_serial;
 
     if (opcode == 0xE1u)
@@ -2835,6 +2849,8 @@ static void execute_command(void)
                 int v3 =
                     tex_v(g_cmd[8]);
 
+                ++g_b126_try_t;
+
                 if (
                     b125_try_textured_quad(
                         opcode,
@@ -2988,6 +3004,8 @@ static void execute_command(void)
 
                 int y3 =
                     (coord_y(g_cmd[7]) + g_offset_y);
+
+                ++g_b126_try_g;
 
                 if (
                     b125_try_gouraud_quad(
@@ -4012,6 +4030,24 @@ void fm_gpu_init(
         0u;
 
     g_b125_pixels =
+        0u;
+
+    g_b126_seen_2c =
+        0u;
+
+    g_b126_seen_2e =
+        0u;
+
+    g_b126_seen_3a =
+        0u;
+
+    g_b126_try_t =
+        0u;
+
+    g_b126_try_g =
+        0u;
+
+    g_b126_reject_mask =
         0u;
 
     g_fill_suppressed = 0;
@@ -5269,6 +5305,33 @@ void fm_gpu_debug_stats(
     out->b125_pixels =
         g_b125_pixels;
 
+    out->b126_seen_2c =
+        g_b126_seen_2c;
+
+    out->b126_seen_2e =
+        g_b126_seen_2e;
+
+    out->b126_seen_3a =
+        g_b126_seen_3a;
+
+    out->b126_try_t =
+        g_b126_try_t;
+
+    out->b126_try_g =
+        g_b126_try_g;
+
+    out->b126_reject_mask =
+        g_b126_reject_mask;
+
+    out->b126_scale =
+        sw_renderer_scale();
+
+    out->b126_wide =
+        sw_wide_width();
+
+    out->b126_filter =
+        sw_texture_filter();
+
 
     /*
      * Les trois fenêtres qui nous intéressent pour Forbidden
@@ -5308,6 +5371,12 @@ void fm_gpu_debug_stats(
             1024,
             512
         );
+}
+
+
+uint32_t fm_gpu_b126_build_tag(void)
+{
+    return 126u;
 }
 
 

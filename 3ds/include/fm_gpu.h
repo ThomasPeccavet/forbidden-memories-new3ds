@@ -139,7 +139,19 @@ typedef struct FMGpuDebugStats
     uint32_t b125_gouraud_hits;
     uint32_t b125_fallbacks;
     uint64_t b125_pixels;
+
+    uint32_t b126_seen_2c;
+    uint32_t b126_seen_2e;
+    uint32_t b126_seen_3a;
+    uint32_t b126_try_t;
+    uint32_t b126_try_g;
+    uint32_t b126_reject_mask;
+    int b126_scale;
+    int b126_wide;
+    int b126_filter;
 } FMGpuDebugStats;
+
+uint32_t fm_gpu_b126_build_tag(void);
 
 
 /*
