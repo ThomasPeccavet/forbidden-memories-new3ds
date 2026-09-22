@@ -2,6 +2,16 @@
 
 #include <stdint.h>
 
+/*
+ * B135.1 - le GPF de la scene Simon peut etre repris par le fallback
+ * R3000A apres un stop du code ARM recompile. On reutilise exactement
+ * le meme helper GTE que le chemin natif, mais uniquement pour GPF.
+ */
+extern void gte_execute(
+    CPUState *cpu,
+    uint32_t cmd
+);
+
 
 /*
  * ============================================================
@@ -905,9 +915,31 @@ static int exec_normal(
 
             /*
              * Commande GTE.
+             *
+             * B135.1 : la scene Simon atteint GPF (fonction 0x3D)
+             * dans FUN_80088BD8. Le code ARM recompile peut s'arreter
+             * sur cette commande puis reprendre exactement au PC GPF
+             * dans l'interpreteur. Si on renvoie simplement FM_INTERP_GTE,
+             * main.c classe alors l'instruction 0x4B98003D comme STOP:4.
+             *
+             * Executer GPF ici preserve aussi correctement les delay slots,
+             * car exec_normal() reste dans le flot normal de run_block().
+             *
+             * Les autres commandes restent volontairement non supportees :
+             * on veut voir le prochain vrai verrou au lieu de le masquer.
              */
             if (cop_rs >= 0x10)
             {
+                if ((instruction & 0x3Fu) == 0x3Du)
+                {
+                    gte_execute(
+                        cpu,
+                        instruction
+                    );
+
+                    return 0;
+                }
+
                 return 3;
             }
 
