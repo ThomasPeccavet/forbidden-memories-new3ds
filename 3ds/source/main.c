@@ -1858,6 +1858,12 @@ static uint64_t g_b13517_interp_blocks = 0u;
 static uint32_t g_b13517_interp_max = 0u;
 static uint32_t g_b13517_interp_time_yields = 0u;
 
+/*
+ * B135.18 - when a host loop already consumed a full 60 Hz frame budget,
+ * waiting for the NEXT 3DS VBlank only throws away more CPU time.
+ */
+static uint32_t g_b13518_late_vblank_skips = 0u;
+
 
 static int b13517_is_map_interp_pc(uint32_t pc)
 {
@@ -9802,6 +9808,11 @@ int main(void)
             2 * 1024 * 1024
         );
 
+        fm_interp_bind_ram(
+            ram,
+            2u * 1024u * 1024u
+        );
+
         fm_cpu_init(
             entry
         );
@@ -10386,6 +10397,11 @@ int main(void)
                 fm_memory_init(
                     ram,
                     2 * 1024 * 1024
+                );
+
+                fm_interp_bind_ram(
+                    ram,
+                    2u * 1024u * 1024u
                 );
 
                 fm_cpu_init(
@@ -14067,7 +14083,7 @@ int main(void)
                                  * Keep timer reads sparse in the hot path.
                                  */
                                 if (
-                                    (b13517_blocks & 31u) == 0u
+                                    (b13517_blocks & 7u) == 0u
                                     &&
                                     (osGetTime() - b16_slice_start_ms)
                                         >= g_b105_slice_budget_ms
@@ -15028,7 +15044,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.17-INTERP-CHAIN (BASE B131)\n");
+            printf("BUILD B135.18-INTERP-RAM-FAST (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15088,12 +15104,13 @@ int main(void)
                     gpu_debug.b125_pixels - g_b13513_prev_pixels;
 
                 printf(
-                    "PERF pre/rend/vb/gfx/wait:%lu/%lu/%lu/%lu/%lu ms\n",
+                    "PERF pre/rend/vb/gfx/wait:%lu/%lu/%lu/%lu/%lu late:%lu\n",
                     (unsigned long)g_b106_pre_gfx_ms,
                     (unsigned long)g_b105_render_ms,
                     (unsigned long)g_b105_vblank_ms,
                     (unsigned long)g_b106_gfx_ms,
-                    (unsigned long)g_b106_wait_ms
+                    (unsigned long)g_b106_wait_ms,
+                    (unsigned long)g_b13518_late_vblank_skips
                 );
 
                 printf(
@@ -16542,17 +16559,31 @@ int main(void)
             );
 
         {
-            uint64_t b106_wait_start_ms =
-                osGetTime();
+            /*
+             * B135.18:
+             * If the guest work already took >= 16 ms, we have missed the
+             * current 60 Hz budget. Do not idle until another VBlank; start
+             * the next guest slice immediately.
+             */
+            if (g_b105_work_ms < 16u)
+            {
+                uint64_t b106_wait_start_ms =
+                    osGetTime();
 
-            gspWaitForVBlank();
+                gspWaitForVBlank();
 
-            g_b106_wait_ms =
-                (uint32_t)(
-                    osGetTime()
-                    -
-                    b106_wait_start_ms
-                );
+                g_b106_wait_ms =
+                    (uint32_t)(
+                        osGetTime()
+                        -
+                        b106_wait_start_ms
+                    );
+            }
+            else
+            {
+                g_b106_wait_ms = 0u;
+                ++g_b13518_late_vblank_skips;
+            }
         }
 
         g_b105_loop_ms =
