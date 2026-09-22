@@ -1,6 +1,7 @@
 #include "fm_gpu.h"
 
 #include "gpu_sw_renderer.h"
+#include "gpu_vram_dirty.h"
 
 #include <3ds.h>
 #include <stdint.h>
@@ -105,6 +106,16 @@ static uint32_t g_b126_seen_3a = 0u;
 static uint32_t g_b126_try_t = 0u;
 static uint32_t g_b126_try_g = 0u;
 static uint32_t g_b126_reject_mask = 0u;
+
+/*
+ * B129 - direct native VRAM fill for GP0(02h).
+ * Keeps the current renderer semantics but removes per-pixel wrap masking.
+ */
+static uint32_t g_b129_fill_hits = 0u;
+static uint32_t g_b129_fill_fallbacks = 0u;
+static uint64_t g_b129_fill_pixels = 0u;
+static uint64_t g_b129_fill_zero_pixels = 0u;
+static uint32_t g_b129_fill_max_pixels = 0u;
 
 static uint64_t b122_ticks_to_us(uint64_t ticks)
 {
@@ -1727,6 +1738,206 @@ static int b125_try_gouraud_quad(
 }
 
 
+
+/*
+ * ============================================================
+ * B129 - fast GP0(02h) VRAM fill
+ * ============================================================
+ */
+
+static inline void b129_fill_span(
+    uint16_t *dst,
+    uint32_t count,
+    uint16_t color
+)
+{
+    if (count == 0u)
+    {
+        return;
+    }
+
+    if (color == 0u)
+    {
+        memset(
+            dst,
+            0,
+            (size_t)count * sizeof(uint16_t)
+        );
+        return;
+    }
+
+    if (color == 0xFFFFu)
+    {
+        memset(
+            dst,
+            0xFF,
+            (size_t)count * sizeof(uint16_t)
+        );
+        return;
+    }
+
+    if (
+        ((uintptr_t)dst & 3u) != 0u
+        &&
+        count != 0u
+    )
+    {
+        *dst++ = color;
+        --count;
+    }
+
+    uint32_t pair =
+        (uint32_t)color
+        |
+        ((uint32_t)color << 16);
+
+    uint32_t pairs =
+        count >> 1;
+
+    uint32_t *dst32 =
+        (uint32_t *)dst;
+
+    while (pairs >= 4u)
+    {
+        dst32[0] = pair;
+        dst32[1] = pair;
+        dst32[2] = pair;
+        dst32[3] = pair;
+
+        dst32 += 4;
+        pairs -= 4u;
+    }
+
+    while (pairs != 0u)
+    {
+        *dst32++ = pair;
+        --pairs;
+    }
+
+    if (count & 1u)
+    {
+        *((uint16_t *)dst32) =
+            color;
+    }
+}
+
+
+static int b129_try_fill_rect(
+    int x,
+    int y,
+    int w,
+    int h,
+    uint16_t color
+)
+{
+    /*
+     * sw_fill_rect() only maintains the supersampled shadow when scale>1.
+     * In the current 3DS native mode scale is 1, so direct VRAM is exact.
+     */
+    if (
+        !g_vram
+        ||
+        sw_renderer_scale() != 1
+    )
+    {
+        ++g_b129_fill_fallbacks;
+        return 0;
+    }
+
+    ++g_b129_fill_hits;
+
+    if (w <= 0 || h <= 0)
+    {
+        return 1;
+    }
+
+    uint32_t area =
+        (uint32_t)w
+        *
+        (uint32_t)h;
+
+    g_b129_fill_pixels +=
+        area;
+
+    if (color == 0u)
+    {
+        g_b129_fill_zero_pixels +=
+            area;
+    }
+
+    if (area > g_b129_fill_max_pixels)
+    {
+        g_b129_fill_max_pixels =
+            area;
+    }
+
+    uint32_t x0 =
+        (uint32_t)x
+        &
+        1023u;
+
+    uint32_t y0 =
+        (uint32_t)y
+        &
+        511u;
+
+    for (int row = 0; row < h; ++row)
+    {
+        uint32_t py =
+            (y0 + (uint32_t)row)
+            &
+            511u;
+
+        uint32_t remaining =
+            (uint32_t)w;
+
+        uint32_t px =
+            x0;
+
+        while (remaining != 0u)
+        {
+            uint32_t span =
+                1024u - px;
+
+            if (span > remaining)
+            {
+                span =
+                    remaining;
+            }
+
+            b129_fill_span(
+                g_vram
+                    +
+                    (size_t)py * 1024u
+                    +
+                    px,
+                span,
+                color
+            );
+
+            remaining -=
+                span;
+
+            px =
+                0u;
+        }
+    }
+
+    /*
+     * Preserve the same dirty-region side effect as sw_fill_rect().
+     * Offline this is an inline no-op; rollback tracking remains correct.
+     */
+    gpu_vram_dirty_mark_rect(
+        (int)x0,
+        (int)y0,
+        w,
+        h
+    );
+
+    return 1;
+}
+
+
 /*
  * ============================================================
  * Longueur commande GP0
@@ -2502,13 +2713,24 @@ static void execute_command(void)
             return;
         }
 
-        sw_fill_rect(
-            x,
-            y,
-            w,
-            h,
-            fill_color
-        );
+        if (
+            !b129_try_fill_rect(
+                x,
+                y,
+                w,
+                h,
+                fill_color
+            )
+        )
+        {
+            sw_fill_rect(
+                x,
+                y,
+                w,
+                h,
+                fill_color
+            );
+        }
 
 
         g_has_frame =
@@ -3955,6 +4177,21 @@ void fm_gpu_init(
     g_b126_reject_mask =
         0u;
 
+    g_b129_fill_hits =
+        0u;
+
+    g_b129_fill_fallbacks =
+        0u;
+
+    g_b129_fill_pixels =
+        0u;
+
+    g_b129_fill_zero_pixels =
+        0u;
+
+    g_b129_fill_max_pixels =
+        0u;
+
     g_fill_suppressed = 0;
     g_last_fill_x = 0;
     g_last_fill_y = 0;
@@ -5169,6 +5406,21 @@ void fm_gpu_b127_perf_snapshot(
 
     out->b126_filter =
         sw_texture_filter();
+
+    out->b129_fill_hits =
+        g_b129_fill_hits;
+
+    out->b129_fill_fallbacks =
+        g_b129_fill_fallbacks;
+
+    out->b129_fill_pixels =
+        g_b129_fill_pixels;
+
+    out->b129_fill_zero_pixels =
+        g_b129_fill_zero_pixels;
+
+    out->b129_fill_max_pixels =
+        g_b129_fill_max_pixels;
 }
 
 

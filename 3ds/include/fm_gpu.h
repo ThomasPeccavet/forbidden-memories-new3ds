@@ -149,6 +149,12 @@ typedef struct FMGpuDebugStats
     int b126_scale;
     int b126_wide;
     int b126_filter;
+
+    uint32_t b129_fill_hits;
+    uint32_t b129_fill_fallbacks;
+    uint64_t b129_fill_pixels;
+    uint64_t b129_fill_zero_pixels;
+    uint32_t b129_fill_max_pixels;
 } FMGpuDebugStats;
 
 uint32_t fm_gpu_b126_build_tag(void);
