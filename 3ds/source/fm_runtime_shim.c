@@ -413,6 +413,110 @@ const char *fm_runtime_stop_name(
 
 /*
  * ============================================================
+ * B135 - quick-state BIOS/HLE
+ * ============================================================
+ */
+void fm_runtime_quick_save(
+    FMRuntimeQuickState *out
+)
+{
+    if (!out)
+    {
+        return;
+    }
+
+    memset(out, 0, sizeof(*out));
+
+    out->bios_entry_hook_addr = g_bios_entry_hook_addr;
+    out->bios_clear_pad = g_bios_clear_pad;
+    out->bios_memory_megabytes = g_bios_memory_megabytes;
+    out->bios_tty_bytes = g_bios_tty_bytes;
+
+    out->bios_pad_buf1 = g_bios_pad_buf1;
+    out->bios_pad_buf2 = g_bios_pad_buf2;
+    out->bios_pad_size1 = g_bios_pad_size1;
+    out->bios_pad_size2 = g_bios_pad_size2;
+    out->bios_pad_started = g_bios_pad_started;
+
+    for (unsigned i = 0u; i < FM_BIOS_EVENT_COUNT; ++i)
+    {
+        out->events[i].used = g_bios_events[i].used;
+        out->events[i].enabled = g_bios_events[i].enabled;
+        out->events[i].ready = g_bios_events[i].ready;
+        out->events[i].class_id = g_bios_events[i].class_id;
+        out->events[i].spec = g_bios_events[i].spec;
+        out->events[i].mode = g_bios_events[i].mode;
+        out->events[i].func = g_bios_events[i].func;
+    }
+
+    memcpy(
+        out->irq_chain_heads,
+        g_bios_irq_chain_heads,
+        sizeof(g_bios_irq_chain_heads)
+    );
+
+    memcpy(
+        out->change_clear_rcnt,
+        g_bios_change_clear_rcnt,
+        sizeof(g_bios_change_clear_rcnt)
+    );
+}
+
+
+void fm_runtime_quick_load(
+    const FMRuntimeQuickState *in
+)
+{
+    if (!in)
+    {
+        return;
+    }
+
+    g_bios_entry_hook_addr = in->bios_entry_hook_addr;
+    g_bios_clear_pad = in->bios_clear_pad;
+    g_bios_memory_megabytes = in->bios_memory_megabytes;
+    g_bios_tty_bytes = in->bios_tty_bytes;
+
+    g_bios_pad_buf1 = in->bios_pad_buf1;
+    g_bios_pad_buf2 = in->bios_pad_buf2;
+    g_bios_pad_size1 = in->bios_pad_size1;
+    g_bios_pad_size2 = in->bios_pad_size2;
+    g_bios_pad_started = in->bios_pad_started;
+
+    for (unsigned i = 0u; i < FM_BIOS_EVENT_COUNT; ++i)
+    {
+        g_bios_events[i].used = in->events[i].used;
+        g_bios_events[i].enabled = in->events[i].enabled;
+        g_bios_events[i].ready = in->events[i].ready;
+        g_bios_events[i].class_id = in->events[i].class_id;
+        g_bios_events[i].spec = in->events[i].spec;
+        g_bios_events[i].mode = in->events[i].mode;
+        g_bios_events[i].func = in->events[i].func;
+    }
+
+    memcpy(
+        g_bios_irq_chain_heads,
+        in->irq_chain_heads,
+        sizeof(g_bios_irq_chain_heads)
+    );
+
+    memcpy(
+        g_bios_change_clear_rcnt,
+        in->change_clear_rcnt,
+        sizeof(g_bios_change_clear_rcnt)
+    );
+
+    g_probe_armed = 0;
+    g_probe_budget = 0u;
+    g_probe_checks = 0u;
+    g_probe_reason = FM_STOP_NONE;
+    g_probe_detail = 0u;
+    g_probe_cpu = NULL;
+}
+
+
+/*
+ * ============================================================
  * Static-code dirty checks
  * ============================================================
  */
