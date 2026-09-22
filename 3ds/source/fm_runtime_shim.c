@@ -3094,6 +3094,172 @@ static void fm_b135_gte_avsz(
 }
 
 
+static void fm_b135_gte_unpack_matrix(
+    const CPUState *cpu,
+    unsigned base,
+    int32_t out[3][3]
+)
+{
+    const uint32_t *c = cpu->gte_ctrl;
+
+    out[0][0] = fm_b135_gte_s16(c[base + 0u]);
+    out[0][1] = fm_b135_gte_hi_s16(c[base + 0u]);
+    out[0][2] = fm_b135_gte_s16(c[base + 1u]);
+
+    out[1][0] = fm_b135_gte_hi_s16(c[base + 1u]);
+    out[1][1] = fm_b135_gte_s16(c[base + 2u]);
+    out[1][2] = fm_b135_gte_hi_s16(c[base + 2u]);
+
+    out[2][0] = fm_b135_gte_s16(c[base + 3u]);
+    out[2][1] = fm_b135_gte_hi_s16(c[base + 3u]);
+    out[2][2] = fm_b135_gte_s16(c[base + 4u]);
+}
+
+
+static void fm_b135_gte_mvmva(
+    CPUState *cpu,
+    uint32_t cmd
+)
+{
+    uint32_t flags = 0u;
+
+    unsigned mx = (cmd >> 17) & 3u;
+    unsigned vv = (cmd >> 15) & 3u;
+    unsigned tv = (cmd >> 13) & 3u;
+
+    int sf = (int)((cmd >> 19) & 1u);
+    int lm = (int)((cmd >> 10) & 1u);
+
+    int32_t m[3][3] = {{0}};
+    int32_t v[3] = {0, 0, 0};
+    int64_t t[3] = {0, 0, 0};
+
+    switch (mx)
+    {
+        case 0u:
+            fm_b135_gte_unpack_matrix(cpu, 0u, m);
+            break;
+
+        case 1u:
+            fm_b135_gte_unpack_matrix(cpu, 8u, m);
+            break;
+
+        case 2u:
+            fm_b135_gte_unpack_matrix(cpu, 16u, m);
+            break;
+
+        default:
+            /*
+             * Matrix 3 is reserved/garbage on hardware. The current
+             * Forbidden Memories path does not use it; keep a deterministic
+             * zero matrix rather than inventing host-dependent garbage.
+             */
+            break;
+    }
+
+    switch (vv)
+    {
+        case 0u:
+        case 1u:
+        case 2u:
+            fm_b135_gte_unpack_vertex(cpu, vv, v);
+            break;
+
+        default:
+            v[0] = fm_b135_gte_s16(cpu->gte_data[9]);
+            v[1] = fm_b135_gte_s16(cpu->gte_data[10]);
+            v[2] = fm_b135_gte_s16(cpu->gte_data[11]);
+            break;
+    }
+
+    switch (tv)
+    {
+        case 0u:
+            t[0] = (int64_t)(int32_t)cpu->gte_ctrl[5] * 4096;
+            t[1] = (int64_t)(int32_t)cpu->gte_ctrl[6] * 4096;
+            t[2] = (int64_t)(int32_t)cpu->gte_ctrl[7] * 4096;
+            break;
+
+        case 1u:
+            t[0] = (int64_t)(int32_t)cpu->gte_ctrl[13] * 4096;
+            t[1] = (int64_t)(int32_t)cpu->gte_ctrl[14] * 4096;
+            t[2] = (int64_t)(int32_t)cpu->gte_ctrl[15] * 4096;
+            break;
+
+        case 2u:
+            t[0] = (int64_t)(int32_t)cpu->gte_ctrl[21] * 4096;
+            t[1] = (int64_t)(int32_t)cpu->gte_ctrl[22] * 4096;
+            t[2] = (int64_t)(int32_t)cpu->gte_ctrl[23] * 4096;
+            break;
+
+        default:
+            break;
+    }
+
+    int64_t mac1 =
+        t[0]
+        + (int64_t)m[0][0] * v[0]
+        + (int64_t)m[0][1] * v[1]
+        + (int64_t)m[0][2] * v[2];
+
+    int64_t mac2 =
+        t[1]
+        + (int64_t)m[1][0] * v[0]
+        + (int64_t)m[1][1] * v[1]
+        + (int64_t)m[1][2] * v[2];
+
+    int64_t mac3 =
+        t[2]
+        + (int64_t)m[2][0] * v[0]
+        + (int64_t)m[2][1] * v[1]
+        + (int64_t)m[2][2] * v[2];
+
+    if (sf)
+    {
+        mac1 >>= 12;
+        mac2 >>= 12;
+        mac3 >>= 12;
+    }
+
+    fm_b135_gte_check_mac(mac1, 0u, &flags);
+    fm_b135_gte_check_mac(mac2, 1u, &flags);
+    fm_b135_gte_check_mac(mac3, 2u, &flags);
+
+    cpu->gte_data[25] = (uint32_t)(int32_t)mac1;
+    cpu->gte_data[26] = (uint32_t)(int32_t)mac2;
+    cpu->gte_data[27] = (uint32_t)(int32_t)mac3;
+
+    cpu->gte_data[9] =
+        (uint32_t)fm_b135_gte_sat_ir(
+            mac1,
+            lm,
+            FM_GTE_FLAG_IR1_SAT,
+            &flags
+        );
+
+    cpu->gte_data[10] =
+        (uint32_t)fm_b135_gte_sat_ir(
+            mac2,
+            lm,
+            FM_GTE_FLAG_IR2_SAT,
+            &flags
+        );
+
+    cpu->gte_data[11] =
+        (uint32_t)fm_b135_gte_sat_ir(
+            mac3,
+            lm,
+            FM_GTE_FLAG_IR3_SAT,
+            &flags
+        );
+
+    fm_b135_gte_finish_flags(
+        cpu,
+        flags
+    );
+}
+
+
 static void fm_b135_gte_gpf(
     CPUState *cpu,
     uint32_t cmd
@@ -3175,6 +3341,10 @@ void gte_execute(
 
         case 0x06u:
             fm_b135_gte_nclip(cpu);
+            return;
+
+        case 0x12u:
+            fm_b135_gte_mvmva(cpu, cmd);
             return;
 
         case 0x2Du:
