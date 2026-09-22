@@ -1781,6 +1781,8 @@ static uint32_t g_b86_skipped_presents = 0u;
  * and can worsen frame pacing. B131 swaps only when a new image has been
  * latched; otherwise the current frontbuffer simply remains visible.
  */
+static uint32_t g_b132_last_capture = 0u;
+
 static uint32_t g_b131_swap_count = 0u;
 static uint32_t g_b131_skip_count = 0u;
 static uint32_t g_b131_dirty_present_count = 0u;
@@ -9267,6 +9269,9 @@ int main(void)
     fm_gpu_init(
         vram
     );
+    fm_gpu_set_display_capture(composite);
+    g_b84_latch_valid = 0u;
+    g_b132_last_capture = fm_gpu_display_capture_serial();
 
 
     /*
@@ -9931,6 +9936,9 @@ int main(void)
             fm_gpu_init(
                 vram
             );
+            fm_gpu_set_display_capture(composite);
+            g_b84_latch_valid = 0u;
+            g_b132_last_capture = fm_gpu_display_capture_serial();
 
             memset(
                 &probe,
@@ -13601,397 +13609,38 @@ int main(void)
             g_vram_view_nonzero = best_nz;
         }
 
-        /*
-         * ====================================================
-         * B84 - framebuffer stable
-         * ====================================================
-         *
-         * B78/B79 ont deja un compteur de transactions DMA2. Une
-         * nouvelle transaction est un bien meilleur point de capture
-         * qu'une frame 3DS arbitraire : on evite de montrer une VRAM
-         * en plein milieu de la construction d'image.
-         */
-        /*
-         * ====================================================
-         * B87 - double-buffer PS1 avec une image de retard
-         * ====================================================
-         *
-         * PRE-DIRECT :
-         *   quand GP1(05) change de page, on capture l'ANCIENNE
-         *   page. Elle vient de rester affichee pendant toute une
-         *   frame et doit donc etre stable.
-         *
-         * DIRECT-2DF :
-         *   on conserve la frontiere "frame guest terminee" de B85.
-         */
-        if (
-            g_b42_native_video
-            &&
-            fm_gpu_has_frame()
-        )
+        /* B132: GP1 selects a complete display page, never a layer.
+         * Capture at the command boundary instead of inspecting VRAM after
+         * an arbitrary host budget. Do not merge pages or treat black as
+         * transparent: both can expose obsolete menu positions.
+         * Keep the B131 dirty-only presentation and GPU fast paths. */
+        if (g_b42_native_video && fm_gpu_has_frame())
         {
-            unsigned current_x = fm_gpu_display_x();
-            unsigned current_y = fm_gpu_display_y();
-
-            uint32_t b104_mode = fm_gpu_display_mode_raw();
-            int b104_24bit = fm_gpu_display_24bit();
-            uint64_t b104_gp0 = fm_gpu_gp0_count();
-
-            if (current_x > 704u)
+            uint32_t mode = fm_gpu_display_mode_raw();
+            uint64_t gp0 = fm_gpu_gp0_count();
+            int direct_complete = g_direct2df_active &&
+                g_b85_guest_frames != g_b85_last_latched_guest_frame;
+            if ((!g_b84_latch_valid &&
+                 fm_gpu_display_capture_serial() == g_b132_last_capture) ||
+                mode != g_b104_last_mode || direct_complete ||
+                (fm_gpu_display_24bit() && gp0 != g_b104_last_gp0))
             {
-                current_x = 0u;
+                fm_gpu_capture_display();
             }
 
-            if (current_y > 256u)
+            uint32_t serial = fm_gpu_display_capture_serial();
+            if (serial != g_b132_last_capture)
             {
-                current_y = 0u;
-            }
-
-            unsigned previous_x = g_b86_last_display_x;
-            unsigned previous_y = g_b86_last_display_y;
-
-            int have_previous =
-                previous_x != 0xFFFFFFFFu
-                &&
-                previous_y != 0xFFFFFFFFu;
-
-            int display_changed =
-                !have_previous
-                ||
-                current_x != previous_x
-                ||
-                current_y != previous_y;
-
-            int complete_guest_frame =
-                g_direct2df_active
-                &&
-                g_b85_guest_frames
-                    !=
-                    g_b85_last_latched_guest_frame;
-
-            /*
-             * B98 : mesurer les deux pages AU MOMENT OU main.c
-             * observe un changement GP1(05). B97 a montre un cas
-             * tres net : P0 presque pleine, P320 totalement vide.
-             *
-             * On garde aussi les hashes B97 pour le diagnostic.
-             */
-            uint32_t p0_nz = g_b97_p0_nonzero;
-            uint32_t p320_nz = g_b97_p320_nonzero;
-
-            if (display_changed)
-            {
-                p0_nz = 0u;
-                p320_nz = 0u;
-
-                uint32_t p0_hash = 2166136261u;
-                uint32_t p320_hash = 2166136261u;
-
-                for (unsigned py = 0u; py < 240u; py += 4u)
-                {
-                    const uint16_t *row0 = vram + py * 1024u;
-                    const uint16_t *row320 = row0 + 320u;
-
-                    for (unsigned px = 0u; px < 320u; px += 4u)
-                    {
-                        uint16_t a = row0[px];
-                        uint16_t b = row320[px];
-
-                        if ((a & 0x7FFFu) != 0u) ++p0_nz;
-                        if ((b & 0x7FFFu) != 0u) ++p320_nz;
-
-                        p0_hash ^= (uint32_t)a;
-                        p0_hash *= 16777619u;
-
-                        p320_hash ^= (uint32_t)b;
-                        p320_hash *= 16777619u;
-                    }
-                }
-
-                g_b97_p0_nonzero = p0_nz;
-                g_b97_p320_nonzero = p320_nz;
-                g_b97_p0_hash = p0_hash;
-                g_b97_p320_hash = p320_hash;
-                ++g_b97_flip_samples;
-            }
-
-            unsigned latch_x = current_x;
-            unsigned latch_y = current_y;
-            int need_latch = 0;
-
-            int b103_merge = 0;
-            unsigned b103_base_x = current_x;
-            unsigned b103_overlay_x = current_x;
-
-            int b104_decode24 = 0;
-
-            /*
-             * B104 : GP1(08) bit4 = affichage 24-bit.
-             * Dans ce mode le framebuffer est un flux RGB888 compact
-             * de 3 octets/pixel dans la VRAM, pas du BGR555.
-             *
-             * Refaire un latch lorsque le flux GP0 bouge, le mode change,
-             * la page change, ou au premier affichage.
-             */
-            if (
-                b104_24bit
-                &&
-                (
-                    !g_b84_latch_valid
-                    ||
-                    display_changed
-                    ||
-                    b104_gp0 != g_b104_last_gp0
-                    ||
-                    b104_mode != g_b104_last_mode
-                )
-            )
-            {
-                latch_x = current_x;
-                latch_y = current_y;
-                need_latch = 1;
-                b104_decode24 = 1;
-            }
-            else if (g_direct2df_active)
-            {
-                if (
-                    !g_b84_latch_valid
-                    ||
-                    complete_guest_frame
-                )
-                {
-                    need_latch = 1;
-                }
-            }
-            else if (display_changed)
-            {
-                uint32_t current_nz =
-                    current_x == 320u
-                        ? p320_nz
-                        : p0_nz;
-
-                uint32_t other_nz =
-                    current_x == 320u
-                        ? p0_nz
-                        : p320_nz;
-
-                /*
-                 * B103 :
-                 * si une page est beaucoup plus dense que l'autre,
-                 * le jeu se retrouve actuellement separe en deux
-                 * "couches" dans notre VRAM :
-                 *
-                 *   dense  = decor / fond
-                 *   sparse = UI / texte / curseur
-                 *
-                 * On reconstruit temporairement l'image complete.
-                 *
-                 * Le seuil 3/4 evite le merge quand les deux pages
-                 * sont de vrais framebuffers complets.
-                 */
-                if (
-                    p0_nz >= 512u
-                    &&
-                    p320_nz >= 64u
-                    &&
-                    (
-                        p0_nz * 4u < p320_nz * 3u
-                        ||
-                        p320_nz * 4u < p0_nz * 3u
-                    )
-                )
-                {
-                    if (p0_nz > p320_nz)
-                    {
-                        b103_base_x = 0u;
-                        b103_overlay_x = 320u;
-                        g_b103_last_base_nz = p0_nz;
-                        g_b103_last_overlay_nz = p320_nz;
-                    }
-                    else
-                    {
-                        b103_base_x = 320u;
-                        b103_overlay_x = 0u;
-                        g_b103_last_base_nz = p320_nz;
-                        g_b103_last_overlay_nz = p0_nz;
-                    }
-
-                    b103_merge = 1;
-                    latch_x = b103_base_x;
-                    latch_y = current_y;
-                    need_latch = 1;
-
-                    g_b103_last_base_x = b103_base_x;
-                    g_b103_last_overlay_x = b103_overlay_x;
-                    ++g_b103_merge_count;
-                }
-                else
-                {
-                    /*
-                     * Vrai double-buffer classique : presenter GP1.
-                     */
-                    latch_x = current_x;
-                    latch_y = current_y;
-
-                    if (current_nz > 64u)
-                    {
-                        need_latch = 1;
-                        ++g_b102_front_latches;
-                    }
-                    else if (other_nz >= 512u)
-                    {
-                        latch_x =
-                            current_x == 320u
-                                ? 0u
-                                : 320u;
-
-                        latch_y = 0u;
-                        need_latch = 1;
-                        ++g_b102_fallback_latches;
-                    }
-                    else if (!g_b84_latch_valid)
-                    {
-                        need_latch = 1;
-                        ++g_b102_front_latches;
-                    }
-
-                    if (need_latch)
-                    {
-                        ++g_b103_plain_count;
-                    }
-                }
-            }
-
-            if (display_changed)
-            {
-                g_b86_last_display_x = current_x;
-                g_b86_last_display_y = current_y;
-                ++g_b86_display_changes;
-            }
-
-            if (need_latch)
-            {
-                for (unsigned py = 0u; py < 256u; ++py)
-                {
-                    unsigned sy =
-                        (latch_y + py) & 511u;
-
-                    const uint16_t *src_row =
-                        vram
-                        +
-                        sy * 1024u
-                        +
-                        latch_x;
-
-                    uint16_t *dst_row =
-                        composite
-                        +
-                        py * 320u;
-
-                    if (b104_decode24)
-                    {
-                        /*
-                         * PS1 24-bit display :
-                         * R,G,B bytes packed back-to-back, 3 bytes/pixel.
-                         * X is still expressed in 16-bit VRAM words.
-                         */
-                        unsigned safe_x = latch_x;
-                        if (safe_x > 544u)
-                        {
-                            safe_x = 0u;
-                        }
-
-                        const uint8_t *row_bytes =
-                            ((const uint8_t *)vram)
-                            +
-                            sy * 2048u
-                            +
-                            safe_x * 2u;
-
-                        for (unsigned px = 0u; px < 320u; ++px)
-                        {
-                            const uint8_t *p =
-                                row_bytes
-                                +
-                                px * 3u;
-
-                            uint16_t r5 = (uint16_t)(p[0] >> 3);
-                            uint16_t g5 = (uint16_t)(p[1] >> 3);
-                            uint16_t b5 = (uint16_t)(p[2] >> 3);
-
-                            dst_row[px] =
-                                r5
-                                |
-                                (uint16_t)(g5 << 5)
-                                |
-                                (uint16_t)(b5 << 10);
-                        }
-                    }
-                    else if (!b103_merge)
-                    {
-                        memcpy(
-                            dst_row,
-                            src_row,
-                            320u * sizeof(uint16_t)
-                        );
-                    }
-                    else
-                    {
-                        const uint16_t *base_row =
-                            vram
-                            +
-                            sy * 1024u
-                            +
-                            b103_base_x;
-
-                        const uint16_t *overlay_row =
-                            vram
-                            +
-                            sy * 1024u
-                            +
-                            b103_overlay_x;
-
-                        /*
-                         * Noir = transparent uniquement pour ce merge
-                         * de bring-up. Les elements utiles vus en B101
-                         * (texte, cadres, curseur) sont non noirs.
-                         */
-                        for (unsigned px = 0u; px < 320u; ++px)
-                        {
-                            uint16_t over = overlay_row[px];
-
-                            dst_row[px] =
-                                (over & 0x7FFFu) != 0u
-                                    ? over
-                                    : base_row[px];
-                        }
-                    }
-                }
-
-                g_b84_latch_x = latch_x;
-                g_b84_latch_y = latch_y;
-
-                g_b87_last_source_x = latch_x;
-                g_b87_last_source_y = latch_y;
-
-                g_b84_last_dma_sample =
-                    g_b78_dma_wait_samples;
-
-                g_b85_last_latched_guest_frame =
-                    g_b85_guest_frames;
-
+                g_b132_last_capture = serial;
                 g_b84_latch_valid = 1u;
                 g_b86_present_dirty = 1u;
                 ++g_b84_latch_count;
-
-                if (b104_decode24)
-                {
-                    ++g_b104_rgb24_latches;
-                }
+                g_b84_latch_x = fm_gpu_display_x();
+                g_b84_latch_y = fm_gpu_display_y();
+                g_b85_last_latched_guest_frame = g_b85_guest_frames;
             }
-
-            g_b104_last_gp0 = b104_gp0;
-            g_b104_last_mode = b104_mode;
+            g_b104_last_gp0 = gp0;
+            g_b104_last_mode = mode;
         }
 
 
@@ -14261,7 +13910,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B131-DIRTY-FRAME-PACING\n");
+            printf("BUILD B132-NATIVE-MENU-FRAME\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -14297,6 +13946,11 @@ int main(void)
                 (unsigned long)g_b86_present_count,
                 (unsigned long)g_b74_hit_menu_draw_cb
             );
+
+            printf("PAGE native:%lu xy:%lu/%lu merge:OFF\n",
+                (unsigned long)g_b132_last_capture,
+                (unsigned long)g_b84_latch_x,
+                (unsigned long)g_b84_latch_y);
 
             printf(
                 "PACING swap/dirty/skip:%lu/%lu/%lu\n",

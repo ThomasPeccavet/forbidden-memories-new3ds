@@ -13,6 +13,13 @@ void fm_gpu_init(
     uint16_t *vram
 );
 
+/* B132: caller-owned 320x256 display snapshot, latched on GP1(05).
+ * Rebind after fm_gpu_init(). Serial remains monotonic across resets.
+ * Explicit capture supports same-page video/direct rendering. */
+void fm_gpu_set_display_capture(uint16_t *pixels);
+void fm_gpu_capture_display(void);
+uint32_t fm_gpu_display_capture_serial(void);
+
 /*
  * Port GP0 :
  *

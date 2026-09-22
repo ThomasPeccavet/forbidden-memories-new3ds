@@ -29,6 +29,12 @@ typedef enum FMGpuState
 
 static uint16_t *g_vram = NULL;
 
+/* B132: capture the selected page at GP1(05), before the next backbuffer
+ * can be cleared/drawn. The caller owns the 320x256 RGB555 destination. */
+static uint16_t *g_display_capture = NULL;
+static uint32_t g_display_capture_serial = 0;
+
+
 
 static FMGpuState g_state =
     FM_GPU_IDLE;
@@ -4060,6 +4066,7 @@ void fm_gpu_init(
 {
     g_vram =
         vram;
+    g_display_capture = NULL;
 
 
     g_state =
@@ -4572,6 +4579,49 @@ void fm_gpu_gp0_write(
  * ============================================================
  */
 
+void fm_gpu_set_display_capture(uint16_t *pixels)
+{
+    g_display_capture = pixels;
+}
+
+uint32_t fm_gpu_display_capture_serial(void)
+{
+    return g_display_capture_serial;
+}
+
+void fm_gpu_capture_display(void)
+{
+    if (!g_vram || !g_display_capture) return;
+
+    for (unsigned y = 0; y < 256u; ++y)
+    {
+        unsigned sy = (g_display_y + y) & 511u;
+        const uint16_t *row = g_vram + sy * 1024u;
+        uint16_t *dst = g_display_capture + y * 320u;
+        if (g_display_mode & 0x10u)
+        {
+            const uint8_t *bytes = (const uint8_t *)row;
+            for (unsigned x = 0; x < 320u; ++x)
+            {
+                unsigned offset = g_display_x * 2u + x * 3u;
+                unsigned r = bytes[offset & 2047u] >> 3;
+                unsigned g = bytes[(offset + 1u) & 2047u] >> 3;
+                unsigned b = bytes[(offset + 2u) & 2047u] >> 3;
+                dst[x] = (uint16_t)(r | (g << 5) | (b << 10));
+            }
+        }
+        else
+        {
+            unsigned first = 1024u - g_display_x;
+            if (first > 320u) first = 320u;
+            memcpy(dst, row + g_display_x, first * sizeof(uint16_t));
+            if (first < 320u)
+                memcpy(dst + first, row, (320u - first) * sizeof(uint16_t));
+        }
+    }
+    ++g_display_capture_serial;
+}
+
 void fm_gpu_gp1_write(
     uint32_t value
 )
@@ -4712,7 +4762,7 @@ void fm_gpu_gp1_write(
                 &
                 0x1FFu;
 
-
+            fm_gpu_capture_display();
             break;
         }
 
