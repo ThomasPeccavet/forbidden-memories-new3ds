@@ -10547,8 +10547,12 @@ int main(void)
                     dispatch_address
                     & 0x1FFFFFFFu;
 
-                /* B91 : mesurer le cout reel du handoff courant. */
+                /*
+                 * B130: diagnostic handoff timer is disabled in release.
+                 */
+#if !defined(NDEBUG)
                 uint64_t b91_handoff_start_ms = osGetTime();
+#endif
 
 
                 /*
@@ -12929,39 +12933,12 @@ int main(void)
                      * de src->org, ce qui explique les boucles de GsSortOt.
                      */
                     /*
-                     * B115: time repair, early submission and merge separately.
-                     * No rendering behavior is changed in this build.
+                     * B130 PERF CLEAN:
+                     * keep the corrected OT repair and verified C GsSortOt,
+                     * but do not time every phase.
                      */
-                    uint64_t b115_t0 = osGetTime();
-
                     fm_repair_ot_sentinel(cpu, src_ot);
                     fm_repair_ot_sentinel(cpu, dst_ot);
-
-                    uint64_t b115_t1 = osGetTime();
-
-                    uint32_t b115_nodes = 0u;
-                    uint32_t b115_packets = 0u;
-                    uint32_t b115_words = 0u;
-                    uint32_t b115_draw = 0u;
-                    uint32_t b115_env = 0u;
-                    uint32_t b115_other = 0u;
-
-                    /*
-                     * B117 - NORMAL OT PATH TEST
-                     *
-                     * Do NOT submit the source OT here. GsSortOt must splice
-                     * it into the destination and the existing
-                     * GsDrawOt/DrawOTag -> DMA2 path must be the single place
-                     * that reaches GP0.
-                     *
-                     * This is intentionally the only behavioral difference
-                     * from B116. If visuals remain complete while the long
-                     * P phase disappears, the direct source submission was
-                     * redundant and expensive.
-                     */
-                    uint64_t b115_t2 = osGetTime();
-
-                    int b119_sort_code = 2;
 
                     int b115_native_ok =
                         fm_try_c_gssortot(
@@ -12980,39 +12957,7 @@ int main(void)
                                 dst_ot,
                                 &native_result
                             );
-
-                        b119_sort_code =
-                            b115_native_ok
-                                ? 1
-                                : g_sort_native_last_code;
                     }
-
-                    uint64_t b115_t3 = osGetTime();
-
-                    uint32_t b115_repair_ms =
-                        (uint32_t)(b115_t1 - b115_t0);
-
-                    uint32_t b115_submit_ms =
-                        (uint32_t)(b115_t2 - b115_t1);
-
-                    uint32_t b115_merge_ms =
-                        (uint32_t)(b115_t3 - b115_t2);
-
-                    b115_record_sort(
-                        b115_t3,
-                        b115_repair_ms,
-                        b115_submit_ms,
-                        b115_merge_ms,
-                        src_ot,
-                        dst_ot,
-                        b115_nodes,
-                        b115_packets,
-                        b115_words,
-                        b115_draw,
-                        b115_env,
-                        b115_other,
-                        b119_sort_code
-                    );
 
                     if (b115_native_ok)
                     {
@@ -13191,6 +13136,7 @@ int main(void)
                         ++g_b91_fast_block_cap;
                     }
 
+#if !defined(NDEBUG)
                     {
                         uint32_t b91_handoff_ms =
                             (uint32_t)(osGetTime() - b91_handoff_start_ms);
@@ -13201,6 +13147,7 @@ int main(void)
                             g_b91_slow_handoff_pc = dispatch_address;
                         }
                     }
+#endif
 
                     if (!game_running)
                     {
@@ -14267,62 +14214,36 @@ int main(void)
 
             /*
              * =================================================
-             * B55 - affichage COMPACT
+             * B130 - PERF CLEAN
              * =================================================
-             *
-             * B54 contenait les bonnes informations, mais elles
-             * etaient poussees hors de l'ecran par les anciennes
-             * lignes de diagnostic. On affiche ici uniquement les
-             * donnees necessaires pour identifier l'opcode qui
-             * bloque 801680F4.
              */
-            int b100_off_x = 0;
-            int b100_off_y = 0;
-            int b100_area_x1 = 0;
-            int b100_area_y1 = 0;
-            int b100_area_x2 = 0;
-            int b100_area_y2 = 0;
-            uint32_t b100_e3 = 0u;
-            uint32_t b100_e4 = 0u;
-            uint32_t b100_e5 = 0u;
-            uint32_t b100_gp105 = 0u;
-            uint32_t b100_last_e3 = 0u;
-            uint32_t b100_last_e4 = 0u;
-            uint32_t b100_last_e5 = 0u;
-            uint32_t b100_last_gp105 = 0u;
+            FMDmaDebugStats b130_dma = {0};
+            fm_memory_dma_debug(&b130_dma);
 
-            fm_gpu_b100_env_get(
-                &b100_off_x,
-                &b100_off_y,
-                &b100_area_x1,
-                &b100_area_y1,
-                &b100_area_x2,
-                &b100_area_y2,
-                &b100_e3,
-                &b100_e4,
-                &b100_e5,
-                &b100_gp105,
-                &b100_last_e3,
-                &b100_last_e4,
-                &b100_last_e5,
-                &b100_last_gp105
-            );
-
-            printf("BUILD B129-FAST-VRAM-FILL\n");
+            printf("BUILD B130-PERF-CLEAN\n");
 
             printf(
-                "RUN:%c CPU:%08lX RA:%08lX F:%lu I:%s\n",
+                "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
                 game_running ? 'Y' : 'N',
-                cpu ? (unsigned long)cpu->pc : 0ul,
-                cpu ? (unsigned long)cpu->gpr[31] : 0ul,
                 (unsigned long)frame,
-                interp_ran
-                    ? fm_interp_stop_name(interp.reason)
-                    : "NONE"
+                cpu ? (unsigned long)cpu->pc : 0ul,
+                (unsigned)fm_memory_read_byte(0x801847C0u)
             );
 
             printf(
-                "SCHED ms:%lu max:%lu hand:%lu sliceY:%lu\n",
+                "LOOP avg/max/>20/>33:%llu/%lu/%lu/%lu ms\n",
+                (unsigned long long)(
+                    g_b110_loop_samples
+                        ? g_b110_loop_sum_ms / g_b110_loop_samples
+                        : 0u
+                ),
+                (unsigned long)g_b110_loop_max_ms,
+                (unsigned long)g_b110_loop_over20,
+                (unsigned long)g_b110_loop_over33
+            );
+
+            printf(
+                "SCHED slice/max:%lu/%lu hand:%lu yields:%lu\n",
                 (unsigned long)g_b16_slice_last_ms,
                 (unsigned long)g_b16_slice_max_ms,
                 (unsigned long)g_b16_last_handoffs,
@@ -14330,491 +14251,51 @@ int main(void)
             );
 
             printf(
-                "BUDGET native:%lu interp:%lu direct:%lu\n",
-                (unsigned long)g_b85_probe_budget_continues,
-                (unsigned long)g_b84_budget_continues,
-                (unsigned long)g_direct2df_active
-            );
-
-            printf(
-                "B91 E/B:%lu/%lu I:%llu Y/C:%lu/%lu\n",
-                (unsigned long)g_b91_fast_entries,
-                (unsigned long)g_b91_fast_blocks,
-                (unsigned long long)g_b91_fast_instructions,
-                (unsigned long)g_b91_fast_time_yields,
-                (unsigned long)g_b91_fast_block_cap
-            );
-
-            printf(
-                "B91 blk:%lu max:%lu slow:%lu@%08lX out:%lu\n",
-                (unsigned long)g_b91_last_block_ms,
-                (unsigned long)g_b91_max_block_ms,
-                (unsigned long)g_b91_slow_handoff_ms,
-                (unsigned long)g_b91_slow_handoff_pc,
-                (unsigned long)g_b91_fast_exits_resident
-            );
-
-            printf(
-                "B93 HLE917:%lu fb:%lu last/max:%lu/%lu out:%lu\n",
-                (unsigned long)g_b93_917f8_hle_calls,
-                (unsigned long)g_b93_917f8_fallbacks,
-                (unsigned long)g_b93_917f8_last_ms,
-                (unsigned long)g_b93_917f8_max_ms,
-                (unsigned long)g_b93_917f8_last_out
-            );
-
-            printf(
-                "FLIP now:%lu,%lu src:%lu,%lu changes:%lu\n",
-                (unsigned long)fm_gpu_display_x(),
-                (unsigned long)fm_gpu_display_y(),
-                (unsigned long)g_b87_last_source_x,
-                (unsigned long)g_b87_last_source_y,
-                (unsigned long)g_b86_display_changes
-            );
-
-            printf(
-                "B97 P0:%lu/%08lX P320:%lu/%08lX S:%lu\n",
-                (unsigned long)g_b97_p0_nonzero,
-                (unsigned long)g_b97_p0_hash,
-                (unsigned long)g_b97_p320_nonzero,
-                (unsigned long)g_b97_p320_hash,
-                (unsigned long)g_b97_flip_samples
-            );
-
-            printf(
-                "B98 F0:%lu F320:%lu normal:%lu\n",
-                (unsigned long)g_b98_force_p0,
-                (unsigned long)g_b98_force_p320,
-                (unsigned long)g_b98_normal_latch
-            );
-
-            printf(
-                "B100 O:%d,%d A:%d,%d-%d,%d E:%lu/%lu/%lu G:%lu\n",
-                b100_off_x,
-                b100_off_y,
-                b100_area_x1,
-                b100_area_y1,
-                b100_area_x2,
-                b100_area_y2,
-                (unsigned long)b100_e3,
-                (unsigned long)b100_e4,
-                (unsigned long)b100_e5,
-                (unsigned long)b100_gp105
-            );
-
-            printf(
-                "B100 RAW %08lX %08lX %08lX %08lX\n",
-                (unsigned long)b100_last_e3,
-                (unsigned long)b100_last_e4,
-                (unsigned long)b100_last_e5,
-                (unsigned long)b100_last_gp105
-            );
-
-            printf(
-                "B101 OFSDRAW:%lu\n",
-                (unsigned long)fm_gpu_b101_offset_draw_packets()
-            );
-
-            printf(
-                "B102 FRONT/FALL:%lu/%lu MB:%lu/%lu\n",
-                (unsigned long)g_b102_front_latches,
-                (unsigned long)g_b102_fallback_latches,
-                (unsigned long)g_b102_menu_bridge_active,
-                (unsigned long)g_b102_menu_bridge_cleanup
-            );
-
-            printf(
-                "B102 PAD R/H/E/P:%04lX/%04lX/%04lX/%04lX K:%u/%u\n",
-                (unsigned long)(fm_memory_read_word(0x8009C70Cu) & 0xFFFFu),
-                (unsigned long)(fm_memory_read_word(0x8009C710u) & 0xFFFFu),
-                (unsigned long)(fm_memory_read_word(0x8009C72Cu) & 0xFFFFu),
-                (unsigned long)(fm_memory_read_word(0x8009C728u) & 0xFFFFu),
-                (unsigned)fm_memory_read_byte(0x8009C66Cu),
-                (unsigned)fm_memory_read_byte(0x8009C670u)
-            );
-
-            printf(
-                "B103 MIX/P:%lu/%lu X:%lu+%lu NZ:%lu/%lu\n",
-                (unsigned long)g_b103_merge_count,
-                (unsigned long)g_b103_plain_count,
-                (unsigned long)g_b103_last_base_x,
-                (unsigned long)g_b103_last_overlay_x,
-                (unsigned long)g_b103_last_base_nz,
-                (unsigned long)g_b103_last_overlay_nz
-            );
-
-            printf(
-                "B103 NAME h/i/c/p:%lu/%lu/%lu/%08lX\n",
-                (unsigned long)g_b103_name_hits,
-                (unsigned long)g_b103_name_injected,
-                (unsigned long)g_b103_name_cleanups,
-                (unsigned long)g_b103_name_pending_mask
-            );
-
-            printf(
-                "B104 MODE:%02lX 24:%u W:%u L:%lu\n",
-                (unsigned long)fm_gpu_display_mode_raw(),
-                (unsigned)fm_gpu_display_24bit(),
-                (unsigned)fm_gpu_display_width(),
-                (unsigned long)g_b104_rgb24_latches
-            );
-
-            printf(
-                "B104 MDEC R/I/O/IS/OS:%lu/%lu/%lu/%lu/%lu\n",
-                (unsigned long)g_b104_mdec_reset,
-                (unsigned long)g_b104_mdec_in,
-                (unsigned long)g_b104_mdec_out,
-                (unsigned long)g_b104_mdec_in_sync,
-                (unsigned long)g_b104_mdec_out_sync
-            );
-
-            printf(
-                "B105 PERF S/R/V/W/L:%lu/%lu/%lu/%lu/%lu\n",
-                (unsigned long)g_b16_slice_last_ms,
-                (unsigned long)g_b105_render_ms,
-                (unsigned long)g_b105_vblank_ms,
-                (unsigned long)g_b105_work_ms,
-                (unsigned long)g_b105_loop_ms
-            );
-
-            printf(
-                "B105 BUD ms/op:%lu/%lu\n",
-                (unsigned long)g_b105_slice_budget_ms,
-                (unsigned long)g_b105_probe_budget
-            );
-
-            printf(
-                "B106 PRE/GFX/WAIT:%lu/%lu/%lu\n",
-                (unsigned long)g_b106_pre_gfx_ms,
-                (unsigned long)g_b106_gfx_ms,
-                (unsigned long)g_b106_wait_ms
-            );
-
-            printf(
-                "B108 VS 0/N/I/W:%lu/%lu/%lu/%lu L/T:%lu/%lu\n",
-                (unsigned long)g_b108_vsync_mode0,
-                (unsigned long)g_b108_vsync_modeN,
-                (unsigned long)g_b108_vsync_immediate,
-                (unsigned long)g_b108_vsync_waited,
-                (unsigned long)g_b108_vsync_last_sync_frame,
-                (unsigned long)g_b108_vsync_last_target
-            );
-
-            /*
-             * B111 - cadence guest vs host over the same debug window.
-             * 100 means one completed guest frame per host frame.
-             * A very low value with LOOP ~17 ms proves "slow motion"
-             * rather than a host framerate bottleneck.
-             */
-            g_b111_host_delta =
-                frame - g_b111_prev_host_frame;
-
-            g_b111_guest_delta =
-                g_b85_guest_frames - g_b111_prev_guest_frame;
-
-            g_b111_guest_per_100_host =
-                g_b111_host_delta
-                    ? (g_b111_guest_delta * 100u) / g_b111_host_delta
-                    : 0u;
-
-            printf(
-                "B111 CAD H/G:%lu/%lu ratio:%lu%%\n",
-                (unsigned long)g_b111_host_delta,
-                (unsigned long)g_b111_guest_delta,
-                (unsigned long)g_b111_guest_per_100_host
-            );
-
-            g_b111_prev_host_frame = frame;
-            g_b111_prev_guest_frame = g_b85_guest_frames;
-
-            {
-                B110ProbeStat p0 = {0};
-                B110ProbeStat p1 = {0};
-                B110ProbeStat p2 = {0};
-
-                b110_get_rank(0u, &p0);
-                b110_get_rank(1u, &p1);
-                b110_get_rank(2u, &p2);
-
-                printf(
-                    "B110 LOOP A/M/>20/>33:%lu/%lu/%lu/%lu\n",
-                    (unsigned long)(
-                        g_b110_loop_samples
-                            ? (g_b110_loop_sum_ms / g_b110_loop_samples)
-                            : 0u
-                    ),
-                    (unsigned long)g_b110_loop_max_ms,
-                    (unsigned long)g_b110_loop_over20,
-                    (unsigned long)g_b110_loop_over33
-                );
-
-                printf(
-                    "B110 MAX %luus %08lX>%08lX\n",
-                    (unsigned long)g_b110_probe_max_us,
-                    (unsigned long)g_b110_probe_max_start,
-                    (unsigned long)g_b110_probe_max_end
-                );
-
-                printf(
-                    "B110 P0 %08lX>%08lX h:%lu t:%lluus m:%lu\n",
-                    (unsigned long)p0.start_pc,
-                    (unsigned long)p0.end_pc,
-                    (unsigned long)p0.hits,
-                    (unsigned long long)p0.total_us,
-                    (unsigned long)p0.max_us
-                );
-
-                printf(
-                    "B110 P1 %08lX>%08lX h:%lu t:%lluus m:%lu\n",
-                    (unsigned long)p1.start_pc,
-                    (unsigned long)p1.end_pc,
-                    (unsigned long)p1.hits,
-                    (unsigned long long)p1.total_us,
-                    (unsigned long)p1.max_us
-                );
-
-                printf(
-                    "B110 P2 %08lX>%08lX h:%lu t:%lluus m:%lu\n",
-                    (unsigned long)p2.start_pc,
-                    (unsigned long)p2.end_pc,
-                    (unsigned long)p2.hits,
-                    (unsigned long long)p2.total_us,
-                    (unsigned long)p2.max_us
-                );
-            }
-
-            printf(
-                "DELAY latch/wait:%lu/%lu total:%lu\n",
-                (unsigned long)g_b87_delayed_latches,
-                (unsigned long)g_b87_first_flip_waits,
-                (unsigned long)g_b84_latch_count
-            );
-
-            printf(
-                "PRESENT done/skip/dirty:%lu/%lu/%lu\n",
+                "GPU words:%llu present:%lu draw:%lu\n",
+                (unsigned long long)gpu_debug.gp0_words,
                 (unsigned long)g_b86_present_count,
-                (unsigned long)g_b86_skipped_presents,
-                (unsigned long)g_b86_present_dirty
-            );
-
-            printf(
-                "GFRAME:%lu sentinel:%lu MENU U:%lu draw:%lu\n",
-                (unsigned long)g_b85_guest_frames,
-                (unsigned long)g_b85_sentinel_hits,
-                (unsigned long)g_b73_hit_menu_update,
                 (unsigned long)g_b74_hit_menu_draw_cb
             );
 
             printf(
-                "MENU SEL:%lu D:%lu ENT:%lu DIRECTbad:%lu\n",
-                (unsigned long)fm_memory_read_byte(0x801847C0u),
-                (unsigned long)g_b73_hit_menu_destroy,
-                (unsigned long)g_b75_menu_entrance_bridge,
-                (unsigned long)g_b79_direct_bad
+                "FAST rect:%lu quadT/G:%lu/%lu fill:%lu/%lu\n",
+                (unsigned long)gpu_debug.b124_rect_hits,
+                (unsigned long)gpu_debug.b125_texquad_hits,
+                (unsigned long)gpu_debug.b125_gouraud_hits,
+                (unsigned long)gpu_debug.b129_fill_hits,
+                (unsigned long)gpu_debug.b129_fill_fallbacks
             );
 
             printf(
-                "GPU words:%llu DMA2:%lu\n",
-                (unsigned long long)gpu_debug.gp0_words,
-                (unsigned long)g_b78_dma_wait_samples
+                "SEEN 2C/2E/3A:%lu/%lu/%lu mode:%d/%d/%d\n",
+                (unsigned long)gpu_debug.b126_seen_2c,
+                (unsigned long)gpu_debug.b126_seen_2e,
+                (unsigned long)gpu_debug.b126_seen_3a,
+                gpu_debug.b126_scale,
+                gpu_debug.b126_wide,
+                gpu_debug.b126_filter
             );
 
             printf(
-                "B115 1s c:%lu sum R/P/M:%llu/%llu/%llu\n",
-                (unsigned long)g_b115_last_calls,
-                (unsigned long long)g_b115_last_repair_ms,
-                (unsigned long long)g_b115_last_submit_ms,
-                (unsigned long long)g_b115_last_merge_ms
+                "FILL px:%llu zero:%llu max:%lu\n",
+                (unsigned long long)gpu_debug.b129_fill_pixels,
+                (unsigned long long)gpu_debug.b129_fill_zero_pixels,
+                (unsigned long)gpu_debug.b129_fill_max_pixels
             );
 
             printf(
-                "B115 max R/P/M:%lu/%lu/%lu slow:%lu\n",
-                (unsigned long)g_b115_last_repair_max_ms,
-                (unsigned long)g_b115_last_submit_max_ms,
-                (unsigned long)g_b115_last_merge_max_ms,
-                (unsigned long)g_b115_slow_total_ms
+                "DMA2 LL:%lu last N/W:%lu/%lu cycle:%lu\n",
+                (unsigned long)b130_dma.dma2_linked_transfer_count,
+                (unsigned long)b130_dma.dma2_last_nodes,
+                (unsigned long)b130_dma.dma2_last_words,
+                (unsigned long)b130_dma.dma2_cycle_abort_count
             );
 
             printf(
-                "B115 slow R/P/M:%lu/%lu/%lu N/P/W:%lu/%lu/%lu\n",
-                (unsigned long)g_b115_slow_repair_ms,
-                (unsigned long)g_b115_slow_submit_ms,
-                (unsigned long)g_b115_slow_merge_ms,
-                (unsigned long)g_b115_slow_nodes,
-                (unsigned long)g_b115_slow_packets,
-                (unsigned long)g_b115_slow_words
+                "OT empty:%lu skipRun max:%lu PROFILERS:OFF\n",
+                (unsigned long)b130_dma.dma2_last_empty_ot_nodes,
+                (unsigned long)b130_dma.dma2_empty_fast_max
             );
-
-            printf(
-                "B115 OT:%08lX>%08lX D/E/O:%lu/%lu/%lu C:%ld\n",
-                (unsigned long)g_b115_slow_src,
-                (unsigned long)g_b115_slow_dst,
-                (unsigned long)g_b115_slow_draw,
-                (unsigned long)g_b115_slow_env,
-                (unsigned long)g_b115_slow_other,
-                (long)g_b115_slow_native_code
-            );
-
-            printf(
-                "B119 Csort c/ok/fb:%lu/%lu/%lu N:%lu/%lu code:%ld\n",
-                (unsigned long)g_b119_csort_calls,
-                (unsigned long)g_b119_csort_ok,
-                (unsigned long)g_b119_csort_fallbacks,
-                (unsigned long)g_b119_csort_last_nodes,
-                (unsigned long)g_b119_csort_max_nodes,
-                (long)g_b119_csort_last_code
-            );
-
-            {
-                FMDmaDebugStats b118_dma = {0};
-                fm_memory_dma_debug(&b118_dma);
-
-                printf(
-                    "B118 DMA2 LL:%lu last N/W:%lu/%lu max:%lu/%lu\n",
-                    (unsigned long)b118_dma.dma2_linked_transfer_count,
-                    (unsigned long)b118_dma.dma2_last_nodes,
-                    (unsigned long)b118_dma.dma2_last_words,
-                    (unsigned long)b118_dma.dma2_max_nodes,
-                    (unsigned long)b118_dma.dma2_max_words
-                );
-
-                printf(
-                    "B118 CYCLE:%lu @%06lX CHCR:%08lX\n",
-                    (unsigned long)b118_dma.dma2_cycle_abort_count,
-                    (unsigned long)b118_dma.dma2_last_cycle_addr,
-                    (unsigned long)b118_dma.dma2_chcr
-                );
-
-                printf(
-                    "B120 DMA ms L/M:%lu/%lu avg:%llu >20/>33:%lu/%lu\n",
-                    (unsigned long)b118_dma.dma2_linked_last_ms,
-                    (unsigned long)b118_dma.dma2_linked_max_ms,
-                    (unsigned long long)(
-                        b118_dma.dma2_linked_transfer_count
-                            ? b118_dma.dma2_linked_total_ms
-                                / b118_dma.dma2_linked_transfer_count
-                            : 0u
-                    ),
-                    (unsigned long)b118_dma.dma2_linked_over20,
-                    (unsigned long)b118_dma.dma2_linked_over33
-                );
-
-                printf(
-                    "B120 empty OT:%lu/%lu wraps:%lu\n",
-                    (unsigned long)b118_dma.dma2_last_empty_ot_nodes,
-                    (unsigned long)b118_dma.dma2_max_empty_ot_nodes,
-                    (unsigned long)b118_dma.dma2_visit_wrap_clears
-                );
-
-                printf(
-                    "B121 skip runs:%lu nodes:%llu last/max:%lu/%lu\n",
-                    (unsigned long)b118_dma.dma2_empty_fast_runs,
-                    (unsigned long long)b118_dma.dma2_empty_fast_nodes,
-                    (unsigned long)b118_dma.dma2_empty_fast_last,
-                    (unsigned long)b118_dma.dma2_empty_fast_max
-                );
-
-                {
-                    FMGpuOpcodePerf b122_p0 = {0};
-                    FMGpuOpcodePerf b122_p1 = {0};
-                    FMGpuOpcodePerf b122_p2 = {0};
-                    uint64_t b122_exec_us = 0u;
-                    uint64_t b122_upload_us = 0u;
-                    uint64_t b122_upload_words = 0u;
-
-                    fm_gpu_b122_rank(0u, &b122_p0);
-                    fm_gpu_b122_rank(1u, &b122_p1);
-                    fm_gpu_b122_rank(2u, &b122_p2);
-
-                    fm_gpu_b122_totals(
-                        &b122_exec_us,
-                        &b122_upload_us,
-                        &b122_upload_words
-                    );
-
-                    printf(
-                        "B122 GPU ms exec/up:%llu/%llu upW:%llu\n",
-                        (unsigned long long)(b122_exec_us / 1000u),
-                        (unsigned long long)(b122_upload_us / 1000u),
-                        (unsigned long long)b122_upload_words
-                    );
-
-                    printf(
-                        "B122 P0 %02X c:%lu sum:%llums max:%luus\n",
-                        (unsigned)b122_p0.opcode,
-                        (unsigned long)b122_p0.calls,
-                        (unsigned long long)(b122_p0.total_us / 1000u),
-                        (unsigned long)b122_p0.max_us
-                    );
-
-                    printf(
-                        "B122 P1 %02X c:%lu sum:%llums max:%luus\n",
-                        (unsigned)b122_p1.opcode,
-                        (unsigned long)b122_p1.calls,
-                        (unsigned long long)(b122_p1.total_us / 1000u),
-                        (unsigned long)b122_p1.max_us
-                    );
-
-                    printf(
-                        "B122 P2 %02X c:%lu sum:%llums max:%luus\n",
-                        (unsigned)b122_p2.opcode,
-                        (unsigned long)b122_p2.calls,
-                        (unsigned long long)(b122_p2.total_us / 1000u),
-                        (unsigned long)b122_p2.max_us
-                    );
-
-                    printf(
-                        "B124 rect h/f:%lu/%lu px:%llu tex:%llu\n",
-                        (unsigned long)gpu_debug.b124_rect_hits,
-                        (unsigned long)gpu_debug.b124_rect_fallbacks,
-                        (unsigned long long)gpu_debug.b124_rect_pixels,
-                        (unsigned long long)gpu_debug.b124_rect_texels
-                    );
-
-                    printf(
-                        "B125 quad T/G/f:%lu/%lu/%lu px:%llu\n",
-                        (unsigned long)gpu_debug.b125_texquad_hits,
-                        (unsigned long)gpu_debug.b125_gouraud_hits,
-                        (unsigned long)gpu_debug.b125_fallbacks,
-                        (unsigned long long)gpu_debug.b125_pixels
-                    );
-
-                    printf(
-                        "B126 tag:%lu seen 2C/2E/3A:%lu/%lu/%lu\n",
-                        (unsigned long)fm_gpu_b126_build_tag(),
-                        (unsigned long)gpu_debug.b126_seen_2c,
-                        (unsigned long)gpu_debug.b126_seen_2e,
-                        (unsigned long)gpu_debug.b126_seen_3a
-                    );
-
-                    printf(
-                        "B126 try T/G:%lu/%lu mode S/W/F:%d/%d/%d rej:%lX\n",
-                        (unsigned long)gpu_debug.b126_try_t,
-                        (unsigned long)gpu_debug.b126_try_g,
-                        gpu_debug.b126_scale,
-                        gpu_debug.b126_wide,
-                        gpu_debug.b126_filter,
-                        (unsigned long)gpu_debug.b126_reject_mask
-                    );
-
-                    printf(
-                        "B127 stats:LIVE\n"
-                    );
-
-                    printf(
-                        "B128 raster:PLANE16\n"
-                    );
-
-                    printf(
-                        "B129 fill h/f:%lu/%lu px:%llu zero:%llu max:%lu\n",
-                        (unsigned long)gpu_debug.b129_fill_hits,
-                        (unsigned long)gpu_debug.b129_fill_fallbacks,
-                        (unsigned long long)gpu_debug.b129_fill_pixels,
-                        (unsigned long long)gpu_debug.b129_fill_zero_pixels,
-                        (unsigned long)gpu_debug.b129_fill_max_pixels
-                    );
-                }
-            }
 
             /*
              * Les anciens diagnostics restent dans le fichier pour

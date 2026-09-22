@@ -4367,9 +4367,6 @@ void fm_gpu_gp0_write(
 
     if (g_state == FM_GPU_VRAM_WRITE)
     {
-        uint64_t b122_upload_start =
-            svcGetSystemTick();
-
         ++g_upload_data_words;
 
 
@@ -4475,13 +4472,6 @@ void fm_gpu_gp0_write(
                 1;
         }
 
-        g_b122_upload_ticks +=
-            svcGetSystemTick()
-            -
-            b122_upload_start;
-
-        ++g_b122_upload_words;
-
         return;
     }
 
@@ -4564,23 +4554,11 @@ void fm_gpu_gp0_write(
         g_cmd_need
     )
     {
-        uint8_t b122_opcode =
-            (uint8_t)(g_cmd[0] >> 24);
-
-        uint64_t b122_start =
-            svcGetSystemTick();
-
+        /* B130 PERF CLEAN: execute without per-command timer reads. */
         execute_command();
-
-        b122_record_opcode(
-            b122_opcode,
-            svcGetSystemTick() - b122_start
-        );
-
 
         g_cmd_have =
             0;
-
 
         g_cmd_need =
             0;
