@@ -5372,6 +5372,174 @@ ot_done:
 
 /*
  * ============================================================
+ * B134 - lightweight source-OT menu text recovery
+ * ============================================================
+ *
+ * B116 proves the complete menu labels exist when the source OT is submitted
+ * directly, but submitting the whole source OT costs several FPS. B133 also
+ * showed that blindly restoring the full submission on top of the optimized
+ * renderer is both expensive and insufficient.
+ *
+ * Instead, walk the source OT without rasterizing its heavy primitives and
+ * forward only:
+ *   - GPU draw-environment commands E1..E6 needed by sprites;
+ *   - fixed 8x8 / 16x16 textured sprites (74..77 / 7C..7F);
+ *   - small variable textured rectangles (64..67, <= 32x32).
+ *
+ * The normal GsSortOt -> DMA2 path remains authoritative for everything else.
+ */
+static uint32_t g_b134_text_submit_calls = 0u;
+static uint32_t g_b134_text_submit_packets = 0u;
+static uint32_t g_b134_text_submit_words = 0u;
+
+static int fm_submit_ot_menu_text(
+    CPUState *cpu,
+    uint32_t start_tag
+)
+{
+    enum
+    {
+        B134_MAX_NODES = 4096,
+        B134_RECENT = 128
+    };
+
+    uint32_t recent[B134_RECENT];
+    uint32_t recent_count = 0u;
+    uint32_t node = start_tag;
+    uint32_t submitted = 0u;
+
+    ++g_b134_text_submit_calls;
+
+    if (!cpu || start_tag == 0u)
+    {
+        return 0;
+    }
+
+    for (uint32_t nodes = 0u; nodes < B134_MAX_NODES; ++nodes)
+    {
+        uint32_t phys = node & 0x1FFFFFFFu;
+
+        if (phys >= 0x00200000u || (phys & 3u) != 0u)
+        {
+            break;
+        }
+
+        uint32_t check_count =
+            recent_count < B134_RECENT
+                ? recent_count
+                : B134_RECENT;
+
+        for (uint32_t i = 0u; i < check_count; ++i)
+        {
+            uint32_t index =
+                (recent_count - 1u - i)
+                & (B134_RECENT - 1u);
+
+            if (recent[index] == phys)
+            {
+                return submitted != 0u;
+            }
+        }
+
+        recent[recent_count & (B134_RECENT - 1u)] = phys;
+        ++recent_count;
+
+        uint32_t guest_node = 0x80000000u | phys;
+        uint32_t header = cpu->read_word(guest_node);
+        uint32_t count = header >> 24;
+        uint32_t next24 = header & 0x00FFFFFFu;
+
+        if (count != 0u)
+        {
+            uint32_t end_phys = phys + 4u + count * 4u;
+
+            if (end_phys > 0x00200000u)
+            {
+                break;
+            }
+
+            uint32_t first_word =
+                cpu->read_word(guest_node + 4u);
+
+            uint32_t opcode = first_word >> 24;
+            int forward = 0;
+
+            if (opcode >= 0xE1u && opcode <= 0xE6u)
+            {
+                forward = 1;
+            }
+            else if (
+                (opcode >= 0x74u && opcode <= 0x77u)
+                ||
+                (opcode >= 0x7Cu && opcode <= 0x7Fu)
+            )
+            {
+                forward = 1;
+            }
+            else if (
+                opcode >= 0x64u
+                &&
+                opcode <= 0x67u
+                &&
+                count >= 4u
+            )
+            {
+                uint32_t size =
+                    cpu->read_word(guest_node + 16u);
+
+                uint32_t w = size & 0xFFFFu;
+                uint32_t h = (size >> 16) & 0xFFFFu;
+
+                if (
+                    w != 0u
+                    &&
+                    h != 0u
+                    &&
+                    w <= 32u
+                    &&
+                    h <= 32u
+                )
+                {
+                    forward = 1;
+                }
+            }
+
+            if (forward)
+            {
+                for (uint32_t i = 0u; i < count; ++i)
+                {
+                    fm_gpu_gp0_write(
+                        cpu->read_word(
+                            guest_node + 4u + i * 4u
+                        )
+                    );
+                }
+
+                ++g_b134_text_submit_packets;
+                g_b134_text_submit_words += count;
+                ++submitted;
+            }
+        }
+
+        if (next24 == 0x00FFFFFFu)
+        {
+            break;
+        }
+
+        if (next24 >= 0x00200000u || (next24 & 3u) != 0u)
+        {
+            break;
+        }
+
+        node = 0x80000000u | next24;
+    }
+
+    return submitted != 0u;
+}
+
+
+/*
+ * ============================================================
  * Fade / transition bridge
  * ============================================================
  *
@@ -12964,6 +13132,19 @@ int main(void)
                     fm_repair_ot_sentinel(cpu, src_ot);
                     fm_repair_ot_sentinel(cpu, dst_ot);
 
+                    /*
+                     * B134: recover only likely font/small-sprite primitives
+                     * from the source OT. This avoids the full B116/B133
+                     * duplicate submission that drops the port back to ~4 FPS.
+                     */
+                    if (g_hle_85d98_src_tag != 0u)
+                    {
+                        fm_submit_ot_menu_text(
+                            cpu,
+                            g_hle_85d98_src_tag
+                        );
+                    }
+
                     int b115_native_ok =
                         fm_try_c_gssortot(
                             cpu,
@@ -13910,7 +14091,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B132-NATIVE-MENU-FRAME\n");
+            printf("BUILD B134-MENU-TEXT-FAST\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -13951,6 +14132,13 @@ int main(void)
                 (unsigned long)g_b132_last_capture,
                 (unsigned long)g_b84_latch_x,
                 (unsigned long)g_b84_latch_y);
+
+            printf(
+                "B134 textOT c/p/w:%lu/%lu/%lu\n",
+                (unsigned long)g_b134_text_submit_calls,
+                (unsigned long)g_b134_text_submit_packets,
+                (unsigned long)g_b134_text_submit_words
+            );
 
             printf(
                 "PACING swap/dirty/skip:%lu/%lu/%lu\n",
