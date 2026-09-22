@@ -1820,6 +1820,7 @@ static uint32_t g_b1358_vsync_completions = 0u;
 static uint32_t g_b1359_prev_swap = 0u;
 static uint32_t g_b1359_prev_vsc = 0u;
 static uint64_t g_b1359_prev_gp0 = 0u;
+static uint64_t g_b13513_prev_pixels = 0u;
 
 
 /*
@@ -14763,7 +14764,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.12-TEXCTX-FAST (BASE B131)\n");
+            printf("BUILD B135.13-VFP-GRADIENTS (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -14819,6 +14820,9 @@ int main(void)
                 uint64_t d_gp0 =
                     gpu_debug.gp0_words - g_b1359_prev_gp0;
 
+                uint64_t d_pixels =
+                    gpu_debug.b125_pixels - g_b13513_prev_pixels;
+
                 printf(
                     "PERF pre/rend/vb/gfx/wait:%lu/%lu/%lu/%lu/%lu ms\n",
                     (unsigned long)g_b106_pre_gfx_ms,
@@ -14829,10 +14833,11 @@ int main(void)
                 );
 
                 printf(
-                    "D120 swap/vsc/gp0:%lu/%lu/%llu\n",
+                    "D120 swap/vsc/gp0/pix:%lu/%lu/%llu/%llu\n",
                     (unsigned long)d_swap,
                     (unsigned long)d_vsc,
-                    (unsigned long long)d_gp0
+                    (unsigned long long)d_gp0,
+                    (unsigned long long)d_pixels
                 );
 
                 printf(
@@ -14846,6 +14851,7 @@ int main(void)
                 g_b1359_prev_swap = g_b131_swap_count;
                 g_b1359_prev_vsc = g_b1358_vsync_completions;
                 g_b1359_prev_gp0 = gpu_debug.gp0_words;
+                g_b13513_prev_pixels = gpu_debug.b125_pixels;
             }
 
             printf(
