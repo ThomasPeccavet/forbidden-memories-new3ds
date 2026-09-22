@@ -12,6 +12,28 @@ extern void gte_execute(
     uint32_t cmd
 );
 
+extern uint32_t gte_read_data(
+    CPUState *cpu,
+    uint8_t reg
+);
+
+extern uint32_t gte_read_ctrl(
+    CPUState *cpu,
+    uint8_t reg
+);
+
+extern void gte_write_data(
+    CPUState *cpu,
+    uint8_t reg,
+    uint32_t value
+);
+
+extern void gte_write_ctrl(
+    CPUState *cpu,
+    uint8_t reg,
+    uint32_t value
+);
+
 
 /*
  * ============================================================
@@ -867,7 +889,7 @@ static int exec_normal(
                 set_reg(
                     cpu,
                     rt,
-                    cpu->gte_data[rd]
+                    gte_read_data(cpu, (uint8_t)rd)
                 );
 
                 return 0;
@@ -882,7 +904,7 @@ static int exec_normal(
                 set_reg(
                     cpu,
                     rt,
-                    cpu->gte_ctrl[rd]
+                    gte_read_ctrl(cpu, (uint8_t)rd)
                 );
 
                 return 0;
@@ -894,8 +916,11 @@ static int exec_normal(
              */
             if (cop_rs == 0x04)
             {
-                cpu->gte_data[rd] =
-                    rt_v;
+                gte_write_data(
+                    cpu,
+                    (uint8_t)rd,
+                    rt_v
+                );
 
                 return 0;
             }
@@ -906,8 +931,11 @@ static int exec_normal(
              */
             if (cop_rs == 0x06)
             {
-                cpu->gte_ctrl[rd] =
-                    rt_v;
+                gte_write_ctrl(
+                    cpu,
+                    (uint8_t)rd,
+                    rt_v
+                );
 
                 return 0;
             }
@@ -1392,10 +1420,13 @@ static int exec_normal(
                 rs_v + simm;
 
 
-            cpu->gte_data[rt] =
+            gte_write_data(
+                cpu,
+                (uint8_t)rt,
                 cpu->read_word(
                     addr
-                );
+                )
+            );
 
 
             return 0;
@@ -1413,7 +1444,10 @@ static int exec_normal(
 
             cpu->write_word(
                 addr,
-                cpu->gte_data[rt]
+                gte_read_data(
+                    cpu,
+                    (uint8_t)rt
+                )
             );
 
 
