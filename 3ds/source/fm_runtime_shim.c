@@ -3373,27 +3373,22 @@ void gte_execute(
 }
 
 
+/*
+ * B135.4 - hook de precision GTE.
+ *
+ * Dans PSXRecomp amont ce hook est uniquement une aide PGXP/precision :
+ * il ne fait PAS partie de la semantique SWC2 et ne doit jamais arreter
+ * l'execution. Le vrai store guest a deja lieu dans le code genere.
+ *
+ * Le runtime 3DS n'embarque pas le moteur PGXP, donc le comportement
+ * correct ici est un no-op. C'est particulierement important pour les
+ * registres hors SXY (ex. reg 11 / IR3) : l'amont les ignore egalement.
+ */
 void gte_precision_store_word(
     uint32_t addr,
     uint8_t reg
 )
 {
-    uint32_t info =
-        (
-            addr
-            &
-            0x00FFFFFFu
-        )
-        |
-        (
-            (uint32_t)reg
-            <<
-            24
-        );
-
-
-    fm_probe_stop(
-        FM_STOP_GTE_STORE,
-        info
-    );
+    (void)addr;
+    (void)reg;
 }
