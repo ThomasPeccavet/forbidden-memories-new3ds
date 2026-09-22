@@ -14763,7 +14763,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.10-TRI-FASTPATH (BASE B131)\n");
+            printf("BUILD B135.11-SHADED-TEX-FAST (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -14834,6 +14834,26 @@ int main(void)
                     (unsigned long)d_vsc,
                     (unsigned long long)d_gp0
                 );
+
+                {
+                    FMGpuOpcodePerf p0 = {0};
+                    FMGpuOpcodePerf p1 = {0};
+                    FMGpuOpcodePerf p2 = {0};
+
+                    fm_gpu_b122_rank(0u, &p0);
+                    fm_gpu_b122_rank(1u, &p1);
+                    fm_gpu_b122_rank(2u, &p2);
+
+                    printf(
+                        "GP0 HOT:%02X/%lu %02X/%lu %02X/%lu us\n",
+                        (unsigned)p0.opcode,
+                        (unsigned long)p0.total_us,
+                        (unsigned)p1.opcode,
+                        (unsigned long)p1.total_us,
+                        (unsigned)p2.opcode,
+                        (unsigned long)p2.total_us
+                    );
+                }
 
                 g_b1359_prev_swap = g_b131_swap_count;
                 g_b1359_prev_vsc = g_b1358_vsync_completions;
