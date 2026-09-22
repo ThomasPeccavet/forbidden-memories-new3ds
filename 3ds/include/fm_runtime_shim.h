@@ -127,6 +127,8 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
     uint32_t check_budget,
     uint32_t phys_begin,
     uint32_t phys_end,
+    uint32_t phys2_begin,
+    uint32_t phys2_end,
     uint32_t max_dispatches,
     uint32_t *out_dispatches
 );
