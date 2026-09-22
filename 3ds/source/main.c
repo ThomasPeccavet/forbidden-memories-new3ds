@@ -2097,7 +2097,14 @@ static uint32_t g_b105_render_ms = 0u;
 static uint32_t g_b105_vblank_ms = 0u;
 static uint32_t g_b105_work_ms = 0u;
 static uint32_t g_b105_loop_ms = 0u;
-static uint32_t g_b105_probe_budget = 64000u;
+/*
+ * B135.21 - B135.20 moved most Pharaoh-map work from the interpreter to
+ * native generated ARM code. A 64K checkpoint quantum can now keep a single
+ * fm_runtime_probe() alive for ~40 ms before main.c gets a chance to enforce
+ * the 12 ms host slice. Use an 8K quantum so the outer scheduler can recover
+ * control roughly every ~5 ms on the measured map workload.
+ */
+static uint32_t g_b105_probe_budget = 8192u;
 static uint32_t g_b105_slice_budget_ms = 12u;
 
 static uint32_t g_b106_pre_gfx_ms = 0u;
@@ -15062,7 +15069,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.20-HOT-MAP-SEEDS (BASE B131)\n");
+            printf("BUILD B135.21-NATIVE-QUANTUM (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15094,11 +15101,12 @@ int main(void)
             );
 
             printf(
-                "SCHED slice/max:%lu/%lu hand:%lu yields:%lu\n",
+                "SCHED slice/max:%lu/%lu hand:%lu yields:%lu pb:%lu\n",
                 (unsigned long)g_b16_slice_last_ms,
                 (unsigned long)g_b16_slice_max_ms,
                 (unsigned long)g_b16_last_handoffs,
-                (unsigned long)g_b84_budget_yields
+                (unsigned long)g_b84_budget_yields,
+                (unsigned long)g_b105_probe_budget
             );
 
             printf(
