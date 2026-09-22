@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "cpu_state.h"
@@ -74,6 +75,17 @@ typedef struct FMInterpResult
  *
  * delay slot inclus.
  */
+/*
+ * B135.18 - bind the PS1 RAM backing so the hot fallback interpreter can
+ * fetch resident code and ordinary RAM data without a function-pointer
+ * round trip through the full MMIO decoder on every MIPS instruction.
+ */
+void fm_interp_bind_ram(
+    uint8_t *ram,
+    size_t ram_size
+);
+
+
 FMInterpResult fm_interp_run_block(
     CPUState *cpu,
     uint32_t max_instructions
