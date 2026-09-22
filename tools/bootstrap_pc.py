@@ -84,6 +84,27 @@ SEEDS = [
 
 
     # --------------------------------------------------------
+    # B135.20 - Pharaoh map hot resident entries / continuations
+    #
+    # B135.19 measured ~1.9M interpreted MIPS instructions per
+    # 120 host loops in 0x800342B0..0x80035AC8.  These addresses
+    # are reached as computed/internal continuations, so ordinary
+    # direct-JAL discovery does not make them dispatcher entries.
+    #
+    # Force them into the static recompiler.  The generator knows
+    # how to turn valid mid-function seeds into CPS continuations
+    # or split pieces while preserving fall-through.
+    # --------------------------------------------------------
+
+    0x800342B0,
+    0x80034A14,
+    0x80034BE4,
+    0x80034C74,
+    0x80035794,
+    0x80035988,
+
+
+    # --------------------------------------------------------
     # libapi / interruptions
     #
     # Une partie de ces fonctions est atteinte par pointeurs
