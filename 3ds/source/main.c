@@ -1842,6 +1842,33 @@ static uint32_t g_b13516_exit_weight[4] = {0u};
 static uint32_t g_b13516_exit_samples = 0u;
 static uint32_t g_b13516_exit_seen = 0u;
 
+/*
+ * B135.17 - fast R3000A block chaining for the resident Pharaoh-map code.
+ *
+ * B135.16 proved the dominant chain exits are 034A14 / 034BE4 / 035988:
+ * all are INSIDE the map region, but they are labels/basic blocks that the
+ * static PSXRecomp dispatcher does not expose as function entries.
+ *
+ * Returning to main.c after every interpreted basic block is therefore pure
+ * overhead. Chain those blocks locally until the PC leaves the map region or
+ * the host 12 ms slice expires.
+ */
+static uint32_t g_b13517_interp_entries = 0u;
+static uint64_t g_b13517_interp_blocks = 0u;
+static uint32_t g_b13517_interp_max = 0u;
+static uint32_t g_b13517_interp_time_yields = 0u;
+
+
+static int b13517_is_map_interp_pc(uint32_t pc)
+{
+    uint32_t phys = pc & 0x1FFFFFFFu;
+
+    return
+        phys >= 0x000342B0u
+        &&
+        phys < 0x00035AC8u;
+}
+
 
 static void b13516_note_chain_exit(uint32_t pc)
 {
@@ -13981,41 +14008,127 @@ int main(void)
                      * par cet interpreteur. 128 instructions/frame etait
                      * la principale cause du ralenti massif.
                      */
-                    interp =
-                        fm_interp_run_block(
-                            cpu,
-                            g_direct2df_active
-                                ? 8192u
-                                : 8192u
-                        );
-
-                    interp_ran = 1;
-
-                    if (
-                        interp.reason
-                        == FM_INTERP_BLOCK_DONE
-                    )
+                    /*
+                     * B135.17:
+                     * The hot map PCs reported by B135.16 are internal
+                     * labels unknown to psx_dispatch_game_compiled(). Run
+                     * consecutive R3000A basic blocks here instead of
+                     * bouncing through main.c hundreds of times per slice.
+                     */
+                    if (b13517_is_map_interp_pc(cpu->pc))
                     {
-                        static_miss = 0;
-                        continue;
+                        uint32_t b13517_blocks = 0u;
+                        int b13517_time_yield = 0;
+
+                        ++g_b13517_interp_entries;
+
+                        while (
+                            game_running
+                            &&
+                            b13517_is_map_interp_pc(cpu->pc)
+                            &&
+                            b13517_blocks < 1024u
+                        )
+                        {
+                            interp =
+                                fm_interp_run_block(
+                                    cpu,
+                                    8192u
+                                );
+
+                            interp_ran = 1;
+                            ++b13517_blocks;
+                            ++g_b13517_interp_blocks;
+
+                            if (
+                                interp.reason == FM_INTERP_BLOCK_DONE
+                                ||
+                                interp.reason == FM_INTERP_BUDGET
+                            )
+                            {
+                                if (
+                                    interp.reason == FM_INTERP_BUDGET
+                                )
+                                {
+                                    ++g_b84_budget_continues;
+                                }
+
+                                /*
+                                 * Keep timer reads sparse in the hot path.
+                                 */
+                                if (
+                                    (b13517_blocks & 31u) == 0u
+                                    &&
+                                    (osGetTime() - b16_slice_start_ms)
+                                        >= g_b105_slice_budget_ms
+                                )
+                                {
+                                    b13517_time_yield = 1;
+                                    ++g_b13517_interp_time_yields;
+                                    break;
+                                }
+
+                                continue;
+                            }
+
+                            break;
+                        }
+
+                        if (b13517_blocks > g_b13517_interp_max)
+                        {
+                            g_b13517_interp_max = b13517_blocks;
+                        }
+
+                        if (b13517_time_yield)
+                        {
+                            static_miss = 0;
+                            ++g_b84_budget_yields;
+                            break;
+                        }
+
+                        if (
+                            interp.reason == FM_INTERP_BLOCK_DONE
+                            ||
+                            interp.reason == FM_INTERP_BUDGET
+                        )
+                        {
+                            static_miss = 0;
+                            continue;
+                        }
                     }
-
-                    if (
-                        interp.reason
-                        == FM_INTERP_BUDGET
-                    )
+                    else
                     {
-                        /*
-                         * B84 : le PC de l'interpreteur est deja avance.
-                         * Reprendre une nouvelle tranche au lieu d'attendre
-                         * obligatoirement la frame 3DS suivante.
-                         *
-                         * La garde 12 ms au debut du handoff empeche toute
-                         * monopolisation du thread.
-                         */
-                        static_miss = 0;
-                        ++g_b84_budget_continues;
-                        continue;
+                        interp =
+                            fm_interp_run_block(
+                                cpu,
+                                8192u
+                            );
+
+                        interp_ran = 1;
+
+                        if (
+                            interp.reason
+                            == FM_INTERP_BLOCK_DONE
+                        )
+                        {
+                            static_miss = 0;
+                            continue;
+                        }
+
+                        if (
+                            interp.reason
+                            == FM_INTERP_BUDGET
+                        )
+                        {
+                            /*
+                             * B84 : le PC de l'interpreteur est deja avance.
+                             * Reprendre une nouvelle tranche au lieu d'attendre
+                             * obligatoirement la frame 3DS suivante.
+                             */
+                            static_miss = 0;
+                            ++g_b84_budget_continues;
+                            continue;
+                        }
                     }
 
                     /*
@@ -14905,7 +15018,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.16-EXIT-PC-DIAG (BASE B131)\n");
+            printf("BUILD B135.17-INTERP-CHAIN (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -14990,15 +15103,19 @@ int main(void)
                 );
 
                 printf(
-                    "EXIT:%06lX/%lu %06lX/%lu %06lX/%lu %06lX/%lu\n",
+                    "ICHN ent/blk/max/y:%lu/%llu/%lu/%lu\n",
+                    (unsigned long)g_b13517_interp_entries,
+                    (unsigned long long)g_b13517_interp_blocks,
+                    (unsigned long)g_b13517_interp_max,
+                    (unsigned long)g_b13517_interp_time_yields
+                );
+
+                printf(
+                    "EXIT top:%06lX/%lu %06lX/%lu\n",
                     (unsigned long)g_b13516_exit_pc[0],
                     (unsigned long)g_b13516_exit_weight[0],
                     (unsigned long)g_b13516_exit_pc[1],
-                    (unsigned long)g_b13516_exit_weight[1],
-                    (unsigned long)g_b13516_exit_pc[2],
-                    (unsigned long)g_b13516_exit_weight[2],
-                    (unsigned long)g_b13516_exit_pc[3],
-                    (unsigned long)g_b13516_exit_weight[3]
+                    (unsigned long)g_b13516_exit_weight[1]
                 );
 
                 g_b1359_prev_swap = g_b131_swap_count;
