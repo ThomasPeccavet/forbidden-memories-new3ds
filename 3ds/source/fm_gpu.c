@@ -99,6 +99,14 @@ static uint32_t g_b125_gouraud_hits = 0u;
 static uint32_t g_b125_fallbacks = 0u;
 static uint64_t g_b125_pixels = 0u;
 
+/*
+ * B135.10 - the Palace map uses triangle families rather than the quad
+ * families that B125 originally accelerated. Reuse the already validated
+ * fixed-point triangle rasterizers directly.
+ */
+static uint32_t g_b13510_textri_hits = 0u;
+static uint32_t g_b13510_gourtri_hits = 0u;
+
 /* B126 - direct proof of opcode flow and linked object version. */
 static uint32_t g_b126_seen_2c = 0u;
 static uint32_t g_b126_seen_2e = 0u;
@@ -1632,6 +1640,44 @@ static void b125_gouraud_triangle(
 }
 
 
+static int b13510_try_textured_triangle(
+    uint8_t opcode,
+    int x0, int y0, int u0, int v0,
+    int x1, int y1, int u1, int v1,
+    int x2, int y2, int u2, int v2,
+    int clx,
+    int cly,
+    uint16_t texpage,
+    uint32_t command,
+    int raw_texture
+)
+{
+    if (
+        !b125_native_mode_ready()
+        ||
+        (opcode & 0xFCu) != 0x24u
+    )
+    {
+        return 0;
+    }
+
+    ++g_b13510_textri_hits;
+
+    b125_textured_triangle(
+        x0,y0,u0,v0,
+        x1,y1,u1,v1,
+        x2,y2,u2,v2,
+        clx,cly,
+        texpage,
+        command,
+        raw_texture,
+        (opcode & 0x02u) != 0
+    );
+
+    return 1;
+}
+
+
 static int b125_try_textured_quad(
     uint8_t opcode,
     int x0, int y0, int u0, int v0,
@@ -1682,6 +1728,36 @@ static int b125_try_textured_quad(
         command,
         raw_texture,
         semi
+    );
+
+    return 1;
+}
+
+
+static int b13510_try_gouraud_triangle(
+    uint8_t opcode,
+    int x0, int y0, uint16_t c0,
+    int x1, int y1, uint16_t c1,
+    int x2, int y2, uint16_t c2
+)
+{
+    if (
+        !b125_native_mode_ready()
+        ||
+        (opcode & 0xFCu) != 0x30u
+    )
+    {
+        return 0;
+    }
+
+    ++g_b13510_gourtri_hits;
+
+    b125_gouraud_triangle(
+        x0,y0,c0,
+        x1,y1,c1,
+        x2,y2,c2,
+        (opcode & 0x02u) != 0,
+        (g_texpage >> 5) & 3u
     );
 
     return 1;
@@ -2962,6 +3038,27 @@ static void execute_command(void)
             );
 
 
+            if (!quad)
+            {
+                if (
+                    b13510_try_textured_triangle(
+                        opcode,
+                        x0,y0,u0,v0,
+                        x1,y1,u1,v1,
+                        x2,y2,u2,v2,
+                        clut_x(clut),
+                        clut_y(clut),
+                        g_texpage,
+                        g_cmd[0],
+                        raw
+                    )
+                )
+                {
+                    g_has_frame = 1;
+                    return;
+                }
+            }
+
             if (quad)
             {
                 int x3 =
@@ -3118,6 +3215,22 @@ static void execute_command(void)
             int y2 =
                 (coord_y(g_cmd[5]) + g_offset_y);
 
+
+            if (!quad)
+            {
+                if (
+                    b13510_try_gouraud_triangle(
+                        opcode,
+                        x0,y0,c0,
+                        x1,y1,c1,
+                        x2,y2,c2
+                    )
+                )
+                {
+                    g_has_frame = 1;
+                    return;
+                }
+            }
 
             if (quad)
             {
@@ -5347,10 +5460,10 @@ void fm_gpu_b127_perf_snapshot(
         g_b124_rect_texels;
 
     out->b125_texquad_hits =
-        g_b125_texquad_hits;
+        g_b125_texquad_hits + g_b13510_textri_hits;
 
     out->b125_gouraud_hits =
-        g_b125_gouraud_hits;
+        g_b125_gouraud_hits + g_b13510_gourtri_hits;
 
     out->b125_fallbacks =
         g_b125_fallbacks;
