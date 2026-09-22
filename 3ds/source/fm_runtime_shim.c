@@ -2187,12 +2187,145 @@ void gte_write_ctrl(
 }
 
 
+/*
+ * ============================================================
+ * B135 - premier opcode GTE natif : GPF (0x3D)
+ * ============================================================
+ *
+ * B131 s'arrete volontairement dans gte_execute() pour toute commande
+ * COP2 non couverte par les HLE B62. La scene de Simon Muran atteint
+ * FUN_80088BD8 (PC observe 80088CD0), qui emet 0x0198003D : GPF.
+ *
+ * On implemente uniquement GPF ici. Les autres commandes conservent le
+ * fail-stop historique afin de ne pas masquer le prochain verrou.
+ */
+static int32_t fm_b135_gte_s16(uint32_t value)
+{
+    return (int32_t)(int16_t)(value & 0xFFFFu);
+}
+
+
+static int32_t fm_b135_gte_sat_ir(
+    int64_t value,
+    int lm,
+    uint32_t flag_bit,
+    uint32_t *flags
+)
+{
+    int64_t lo = lm ? 0 : -32768;
+
+    if (value < lo)
+    {
+        *flags |= flag_bit;
+        return (int32_t)lo;
+    }
+
+    if (value > 32767)
+    {
+        *flags |= flag_bit;
+        return 32767;
+    }
+
+    return (int32_t)value;
+}
+
+
+static uint32_t fm_b135_gte_sat_color(
+    int64_t value,
+    uint32_t flag_bit,
+    uint32_t *flags
+)
+{
+    if (value < 0)
+    {
+        *flags |= flag_bit;
+        return 0u;
+    }
+
+    if (value > 255)
+    {
+        *flags |= flag_bit;
+        return 255u;
+    }
+
+    return (uint32_t)value;
+}
+
+
+static void fm_b135_gte_gpf(
+    CPUState *cpu,
+    uint32_t cmd
+)
+{
+    int sf = (int)((cmd >> 19) & 1u);
+    int lm = (int)((cmd >> 10) & 1u);
+
+    int64_t ir0 = fm_b135_gte_s16(cpu->gte_data[8]);
+    int64_t ir1 = fm_b135_gte_s16(cpu->gte_data[9]);
+    int64_t ir2 = fm_b135_gte_s16(cpu->gte_data[10]);
+    int64_t ir3 = fm_b135_gte_s16(cpu->gte_data[11]);
+
+    int64_t mac1 = ir0 * ir1;
+    int64_t mac2 = ir0 * ir2;
+    int64_t mac3 = ir0 * ir3;
+
+    if (sf)
+    {
+        mac1 >>= 12;
+        mac2 >>= 12;
+        mac3 >>= 12;
+    }
+
+    cpu->gte_data[25] = (uint32_t)(int32_t)mac1;
+    cpu->gte_data[26] = (uint32_t)(int32_t)mac2;
+    cpu->gte_data[27] = (uint32_t)(int32_t)mac3;
+
+    uint32_t flags = 0u;
+
+    int32_t out1 = fm_b135_gte_sat_ir(mac1, lm, 1u << 24, &flags);
+    int32_t out2 = fm_b135_gte_sat_ir(mac2, lm, 1u << 23, &flags);
+    int32_t out3 = fm_b135_gte_sat_ir(mac3, lm, 1u << 22, &flags);
+
+    cpu->gte_data[9]  = (uint32_t)out1;
+    cpu->gte_data[10] = (uint32_t)out2;
+    cpu->gte_data[11] = (uint32_t)out3;
+
+    uint32_t r = fm_b135_gte_sat_color(mac1 >> 4, 1u << 21, &flags);
+    uint32_t g = fm_b135_gte_sat_color(mac2 >> 4, 1u << 20, &flags);
+    uint32_t b = fm_b135_gte_sat_color(mac3 >> 4, 1u << 19, &flags);
+    uint32_t code = cpu->gte_data[6] & 0xFF000000u;
+
+    cpu->gte_data[20] = cpu->gte_data[21];
+    cpu->gte_data[21] = cpu->gte_data[22];
+    cpu->gte_data[22] = code | (b << 16) | (g << 8) | r;
+
+    if (flags != 0u)
+    {
+        flags |= 0x80000000u;
+    }
+
+    cpu->gte_ctrl[31] = flags;
+}
+
+
 void gte_execute(
     CPUState *cpu,
     uint32_t cmd
 )
 {
-    (void)cpu;
+    if (
+        cpu != NULL
+        &&
+        (cmd & 0x3Fu) == 0x3Du
+    )
+    {
+        fm_b135_gte_gpf(
+            cpu,
+            cmd
+        );
+
+        return;
+    }
 
 
     fm_probe_stop(
