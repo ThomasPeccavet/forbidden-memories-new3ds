@@ -620,6 +620,119 @@ static inline uint16_t b124_vram_get(int x, int y)
 }
 
 
+/*
+ * B135.12 - hoist texture-page/window/CLUT decode out of the inner pixel
+ * loop. The Palace scene hits tens of thousands of textured primitives;
+ * recalculating these invariant fields for every pixel wastes a large
+ * amount of ARM11 time.
+ */
+typedef struct B13512TexCtx
+{
+    int tpx;
+    int tpy;
+    int clx;
+    int cly;
+    unsigned depth;
+    unsigned mask_x;
+    unsigned mask_y;
+    unsigned off_x;
+    unsigned off_y;
+} B13512TexCtx;
+
+
+static inline B13512TexCtx b13512_texctx(
+    int clx,
+    int cly,
+    uint16_t texpage
+)
+{
+    B13512TexCtx ctx;
+
+    ctx.tpx = (texpage & 0x0Fu) * 64;
+    ctx.tpy = ((texpage >> 4) & 1u) * 256;
+    ctx.clx = clx;
+    ctx.cly = cly;
+    ctx.depth = (texpage >> 7) & 3u;
+
+    ctx.mask_x = g_texture_window & 0x1Fu;
+    ctx.mask_y = (g_texture_window >> 5) & 0x1Fu;
+    ctx.off_x = (g_texture_window >> 10) & 0x1Fu;
+    ctx.off_y = (g_texture_window >> 15) & 0x1Fu;
+
+    return ctx;
+}
+
+
+static inline uint16_t b13512_fetch_texel_ctx(
+    int u,
+    int v,
+    const B13512TexCtx *ctx
+)
+{
+    if (ctx->mask_x | ctx->mask_y)
+    {
+        u =
+            (u & ~(int)(ctx->mask_x * 8u))
+            |
+            (int)((ctx->off_x & ctx->mask_x) * 8u);
+
+        v =
+            (v & ~(int)(ctx->mask_y * 8u))
+            |
+            (int)((ctx->off_y & ctx->mask_y) * 8u);
+    }
+
+    u &= 0xFF;
+    v &= 0xFF;
+
+    if (ctx->depth == 0u)
+    {
+        uint16_t packed =
+            b124_vram_get(
+                ctx->tpx + (u >> 2),
+                ctx->tpy + v
+            );
+
+        int index =
+            (packed >> ((u & 3) * 4))
+            &
+            0x0F;
+
+        return
+            b124_vram_get(
+                ctx->clx + index,
+                ctx->cly
+            );
+    }
+
+    if (ctx->depth == 1u)
+    {
+        uint16_t packed =
+            b124_vram_get(
+                ctx->tpx + (u >> 1),
+                ctx->tpy + v
+            );
+
+        int index =
+            (packed >> ((u & 1) * 8))
+            &
+            0xFF;
+
+        return
+            b124_vram_get(
+                ctx->clx + index,
+                ctx->cly
+            );
+    }
+
+    return
+        b124_vram_get(
+            ctx->tpx + u,
+            ctx->tpy + v
+        );
+}
+
+
 static inline uint16_t b124_blend(
     uint16_t back,
     uint16_t front,
@@ -680,101 +793,18 @@ static inline uint16_t b124_fetch_texel(
     uint16_t texpage
 )
 {
-    unsigned mask_x =
-        g_texture_window
-        &
-        0x1Fu;
-
-    unsigned mask_y =
-        (g_texture_window >> 5)
-        &
-        0x1Fu;
-
-    unsigned off_x =
-        (g_texture_window >> 10)
-        &
-        0x1Fu;
-
-    unsigned off_y =
-        (g_texture_window >> 15)
-        &
-        0x1Fu;
-
-    if (mask_x | mask_y)
-    {
-        u =
-            (u & ~(int)(mask_x * 8u))
-            |
-            (int)((off_x & mask_x) * 8u);
-
-        v =
-            (v & ~(int)(mask_y * 8u))
-            |
-            (int)((off_y & mask_y) * 8u);
-    }
-
-    u &= 0xFF;
-    v &= 0xFF;
-
-    int tpx =
-        (texpage & 0x0Fu)
-        *
-        64;
-
-    int tpy =
-        ((texpage >> 4) & 1u)
-        *
-        256;
-
-    int depth =
-        (texpage >> 7)
-        &
-        3u;
-
-    if (depth == 0)
-    {
-        uint16_t packed =
-            b124_vram_get(
-                tpx + (u >> 2),
-                tpy + v
-            );
-
-        int index =
-            (packed >> ((u & 3) * 4))
-            &
-            0x0F;
-
-        return
-            b124_vram_get(
-                clx + index,
-                cly
-            );
-    }
-
-    if (depth == 1)
-    {
-        uint16_t packed =
-            b124_vram_get(
-                tpx + (u >> 1),
-                tpy + v
-            );
-
-        int index =
-            (packed >> ((u & 1) * 8))
-            &
-            0xFF;
-
-        return
-            b124_vram_get(
-                clx + index,
-                cly
-            );
-    }
+    B13512TexCtx ctx =
+        b13512_texctx(
+            clx,
+            cly,
+            texpage
+        );
 
     return
-        b124_vram_get(
-            tpx + u,
-            tpy + v
+        b13512_fetch_texel_ctx(
+            u,
+            v,
+            &ctx
         );
 }
 
@@ -875,6 +905,13 @@ static int b124_try_textured_rect(
         *
         (uint64_t)(y1 - y0);
 
+    B13512TexCtx texctx =
+        b13512_texctx(
+            clx,
+            cly,
+            texpage
+        );
+
     for (int py = y0; py < y1; ++py)
     {
         int tv =
@@ -897,12 +934,10 @@ static int b124_try_textured_rect(
         for (int px = x0; px < x1; ++px, ++dst)
         {
             uint16_t texel =
-                b124_fetch_texel(
+                b13512_fetch_texel_ctx(
                     tu,
                     tv,
-                    clx,
-                    cly,
-                    texpage
+                    &texctx
                 );
 
             tu =
@@ -1307,6 +1342,13 @@ static void b125_textured_triangle(
         &
         3u;
 
+    B13512TexCtx texctx =
+        b13512_texctx(
+            clx,
+            cly,
+            texpage
+        );
+
     int ys = y0;
     int ye = y2;
 
@@ -1393,12 +1435,10 @@ static void b125_textured_triangle(
         for (int x = sx; x < ex; ++x, ++dst)
         {
             uint16_t texel =
-                b124_fetch_texel(
+                b13512_fetch_texel_ctx(
                     (u_fp >> 16) & 0xFF,
                     (v_fp >> 16) & 0xFF,
-                    clx,
-                    cly,
-                    texpage
+                    &texctx
                 );
 
             b125_put_textured(
@@ -1728,6 +1768,13 @@ static void b13511_shaded_textured_triangle(
 
     int semi_mode = (texpage >> 5) & 3u;
 
+    B13512TexCtx texctx =
+        b13512_texctx(
+            clx,
+            cly,
+            texpage
+        );
+
     int ys = y0;
     int ye = y2;
     if (ys < g_draw_y1) ys = g_draw_y1;
@@ -1785,12 +1832,10 @@ static void b13511_shaded_textured_triangle(
         for (int x = sx; x < ex; ++x, ++dst)
         {
             uint16_t texel =
-                b124_fetch_texel(
+                b13512_fetch_texel_ctx(
                     (u_fp >> 16) & 0xFF,
                     (v_fp >> 16) & 0xFF,
-                    clx,
-                    cly,
-                    texpage
+                    &texctx
                 );
 
             int mr = r_fp >> 16;
