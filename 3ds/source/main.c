@@ -9711,6 +9711,21 @@ int main(void)
         osSetSpeedupEnable(
             true
         );
+
+        /*
+         * B135.38: if core #2 is unavailable to this 3DSX/exheader,
+         * the GT34 worker falls back to system core #1.  New3DS benefits
+         * from a substantially larger application share on that core.
+         */
+        APT_SetAppCpuTimeLimit(
+            80u
+        );
+    }
+    else
+    {
+        APT_SetAppCpuTimeLimit(
+            30u
+        );
     }
 
 
@@ -15156,7 +15171,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.37-PERF-CLEAN2 (BASE B131)\n");
+            printf("BUILD B135.38-MT-GT34 (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15474,6 +15489,28 @@ int main(void)
                         (unsigned long)g34_d1,
                         (unsigned long)g34_d2
                     );
+
+                    {
+                        int mt_ready = 0;
+                        int mt_core = -1;
+                        uint32_t mt_jobs = 0u;
+                        uint64_t mt_worker_pixels = 0u;
+
+                        fm_gpu_b13538_mt_stats(
+                            &mt_ready,
+                            &mt_core,
+                            &mt_jobs,
+                            &mt_worker_pixels
+                        );
+
+                        printf(
+                            "G34 MT r/c/j/wp:%d/%d/%lu/%llu\n",
+                            mt_ready,
+                            mt_core,
+                            (unsigned long)mt_jobs,
+                            (unsigned long long)mt_worker_pixels
+                        );
+                    }
                 }
             }
 
