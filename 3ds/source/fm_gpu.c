@@ -171,6 +171,46 @@ static uint64_t g_b13534_raster_ticks = 0u;
 static uint32_t g_b13534_samples = 0u;
 static uint32_t g_b13534_tri_calls = 0u;
 
+/*
+ * B135.35 - exact RGB555 modulation LUTs for the GT34 inner loop.
+ *
+ * Each channel is only 5 bits, and Gouraud modulation is also 5 bits after
+ * the PS1 color conversion.  Three 32x32 tables replace three multiplies,
+ * shifts and saturation tests per visible texel.  6 KiB total, L1 friendly.
+ */
+static uint16_t g_b13535_mod_r[32][32];
+static uint16_t g_b13535_mod_g[32][32];
+static uint16_t g_b13535_mod_b[32][32];
+
+static uint32_t g_b13535_depth_hits[3] = {0u,0u,0u};
+
+static void b13535_init_mod_lut(void)
+{
+    for (unsigned mod = 0u; mod < 32u; ++mod)
+    {
+        for (unsigned tex = 0u; tex < 32u; ++tex)
+        {
+            unsigned v =
+                (tex * mod) >> 4;
+
+            if (v > 31u)
+            {
+                v = 31u;
+            }
+
+            g_b13535_mod_r[mod][tex] =
+                (uint16_t)v;
+
+            g_b13535_mod_g[mod][tex] =
+                (uint16_t)(v << 5);
+
+            g_b13535_mod_b[mod][tex] =
+                (uint16_t)(v << 10);
+        }
+    }
+}
+
+
 static uint64_t b122_ticks_to_us(uint64_t ticks)
 {
     return
@@ -1902,17 +1942,32 @@ static void b13511_shaded_textured_triangle(
         (texctx.mask_x | texctx.mask_y) == 0u;
 
     uint16_t b13533_clut[256];
+    uint8_t b13535_clut_r[16];
+    uint8_t b13535_clut_g[16];
+    uint8_t b13535_clut_b[16];
 
     if (b13533_fast && texctx.depth == 0u)
     {
         for (unsigned i = 0u; i < 16u; ++i)
         {
-            b13533_clut[i] =
+            uint16_t texel =
                 g_vram[
                     ((unsigned)texctx.cly & 511u) * 1024u
                     +
                     (((unsigned)texctx.clx + i) & 1023u)
                 ];
+
+            b13533_clut[i] =
+                texel;
+
+            b13535_clut_r[i] =
+                (uint8_t)(texel & 31u);
+
+            b13535_clut_g[i] =
+                (uint8_t)((texel >> 5) & 31u);
+
+            b13535_clut_b[i] =
+                (uint8_t)((texel >> 10) & 31u);
         }
     }
     else if (b13533_fast && texctx.depth == 1u)
@@ -1931,6 +1986,13 @@ static void b13511_shaded_textured_triangle(
     if (b13533_fast)
     {
         ++g_b13533_34_fast_hits;
+
+        unsigned d =
+            texctx.depth < 2u
+                ? texctx.depth
+                : 2u;
+
+        ++g_b13535_depth_hits[d];
     }
 
     int ys = y0;
@@ -1997,17 +2059,19 @@ static void b13511_shaded_textured_triangle(
             g_b13533_34_fast_pixels +=
                 (uint64_t)(ex - sx);
 
-            int last_key = -1;
-            uint16_t packed = 0u;
-
-            for (int x = sx; x < ex; ++x, ++dst)
+            /*
+             * B135.35: texture depth is invariant for the whole primitive.
+             * Keep it outside the pixel loop, and use exact channel LUTs.
+             */
+            if (texctx.depth == 0u)
             {
-                int tu = (u_fp >> 16) & 0xFF;
-                int tv = (v_fp >> 16) & 0xFF;
-                uint16_t texel;
+                int last_key = -1;
+                uint16_t packed = 0u;
 
-                if (texctx.depth == 0u)
+                for (int x = sx; x < ex; ++x, ++dst)
                 {
+                    int tu = (u_fp >> 16) & 0xFF;
+                    int tv = (v_fp >> 16) & 0xFF;
                     int key =
                         (tv << 6)
                         |
@@ -2026,13 +2090,50 @@ static void b13511_shaded_textured_triangle(
                             key;
                     }
 
-                    texel =
-                        b13533_clut[
-                            (packed >> ((tu & 3) * 4)) & 0x0F
-                        ];
+                    unsigned ci =
+                        (unsigned)(
+                            (packed >> ((tu & 3) * 4))
+                            &
+                            0x0F
+                        );
+
+                    uint16_t texel =
+                        b13533_clut[ci];
+
+                    if (texel != 0u)
+                    {
+                        int mr = r_fp >> 16;
+                        int mg = g_fp >> 16;
+                        int mb = b_fp >> 16;
+
+                        if ((unsigned)mr > 31u) mr = mr < 0 ? 0 : 31;
+                        if ((unsigned)mg > 31u) mg = mg < 0 ? 0 : 31;
+                        if ((unsigned)mb > 31u) mb = mb < 0 ? 0 : 31;
+
+                        *dst =
+                            g_b13535_mod_r[mr][b13535_clut_r[ci]]
+                            |
+                            g_b13535_mod_g[mg][b13535_clut_g[ci]]
+                            |
+                            g_b13535_mod_b[mb][b13535_clut_b[ci]];
+                    }
+
+                    u_fp += du_dx;
+                    v_fp += dv_dx;
+                    r_fp += dr_dx;
+                    g_fp += dg_dx;
+                    b_fp += db_dx;
                 }
-                else if (texctx.depth == 1u)
+            }
+            else if (texctx.depth == 1u)
+            {
+                int last_key = -1;
+                uint16_t packed = 0u;
+
+                for (int x = sx; x < ex; ++x, ++dst)
                 {
+                    int tu = (u_fp >> 16) & 0xFF;
+                    int tv = (v_fp >> 16) & 0xFF;
                     int key =
                         (tv << 7)
                         |
@@ -2051,59 +2152,74 @@ static void b13511_shaded_textured_triangle(
                             key;
                     }
 
-                    texel =
+                    uint16_t texel =
                         b13533_clut[
                             (packed >> ((tu & 1) * 8)) & 0xFF
                         ];
+
+                    if (texel != 0u)
+                    {
+                        int mr = r_fp >> 16;
+                        int mg = g_fp >> 16;
+                        int mb = b_fp >> 16;
+
+                        if ((unsigned)mr > 31u) mr = mr < 0 ? 0 : 31;
+                        if ((unsigned)mg > 31u) mg = mg < 0 ? 0 : 31;
+                        if ((unsigned)mb > 31u) mb = mb < 0 ? 0 : 31;
+
+                        *dst =
+                            g_b13535_mod_r[mr][texel & 31u]
+                            |
+                            g_b13535_mod_g[mg][(texel >> 5) & 31u]
+                            |
+                            g_b13535_mod_b[mb][(texel >> 10) & 31u];
+                    }
+
+                    u_fp += du_dx;
+                    v_fp += dv_dx;
+                    r_fp += dr_dx;
+                    g_fp += dg_dx;
+                    b_fp += db_dx;
                 }
-                else
+            }
+            else
+            {
+                for (int x = sx; x < ex; ++x, ++dst)
                 {
-                    texel =
+                    int tu = (u_fp >> 16) & 0xFF;
+                    int tv = (v_fp >> 16) & 0xFF;
+
+                    uint16_t texel =
                         g_vram[
                             (size_t)(texctx.tpy + tv) * 1024u
                             +
                             (size_t)((texctx.tpx + tu) & 1023)
                         ];
-                }
 
-                if (texel != 0u)
-                {
-                    int mr = r_fp >> 16;
-                    int mg = g_fp >> 16;
-                    int mb = b_fp >> 16;
+                    if (texel != 0u)
+                    {
+                        int mr = r_fp >> 16;
+                        int mg = g_fp >> 16;
+                        int mb = b_fp >> 16;
 
-                    if ((unsigned)mr > 31u) mr = mr < 0 ? 0 : 31;
-                    if ((unsigned)mg > 31u) mg = mg < 0 ? 0 : 31;
-                    if ((unsigned)mb > 31u) mb = mb < 0 ? 0 : 31;
+                        if ((unsigned)mr > 31u) mr = mr < 0 ? 0 : 31;
+                        if ((unsigned)mg > 31u) mg = mg < 0 ? 0 : 31;
+                        if ((unsigned)mb > 31u) mb = mb < 0 ? 0 : 31;
 
-                    int rr =
-                        (((int)(texel & 31u)) * mr) >> 4;
-
-                    int gg =
-                        (((int)((texel >> 5) & 31u)) * mg) >> 4;
-
-                    int bb =
-                        (((int)((texel >> 10) & 31u)) * mb) >> 4;
-
-                    if (rr > 31) rr = 31;
-                    if (gg > 31) gg = 31;
-                    if (bb > 31) bb = 31;
-
-                    *dst =
-                        (uint16_t)(
-                            rr
+                        *dst =
+                            g_b13535_mod_r[mr][texel & 31u]
                             |
-                            (gg << 5)
+                            g_b13535_mod_g[mg][(texel >> 5) & 31u]
                             |
-                            (bb << 10)
-                        );
-                }
+                            g_b13535_mod_b[mb][(texel >> 10) & 31u];
+                    }
 
-                u_fp += du_dx;
-                v_fp += dv_dx;
-                r_fp += dr_dx;
-                g_fp += dg_dx;
-                b_fp += db_dx;
+                    u_fp += du_dx;
+                    v_fp += dv_dx;
+                    r_fp += dr_dx;
+                    g_fp += dg_dx;
+                    b_fp += db_dx;
+                }
             }
         }
         else
@@ -4959,6 +5075,8 @@ void fm_gpu_init(
     uint16_t *vram
 )
 {
+    b13535_init_mod_lut();
+
     g_vram =
         vram;
 
@@ -5927,6 +6045,10 @@ void fm_gpu_b13532_profile_reset(void)
     g_b13534_raster_ticks = 0u;
     g_b13534_samples = 0u;
     g_b13534_tri_calls = 0u;
+
+    g_b13535_depth_hits[0] = 0u;
+    g_b13535_depth_hits[1] = 0u;
+    g_b13535_depth_hits[2] = 0u;
 }
 
 
@@ -5936,7 +6058,10 @@ void fm_gpu_b13534_profile(
     uint32_t *samples,
     uint32_t *tri_calls,
     uint32_t *fast_hits,
-    uint64_t *fast_pixels
+    uint64_t *fast_pixels,
+    uint32_t *depth0_hits,
+    uint32_t *depth1_hits,
+    uint32_t *depth2_hits
 )
 {
     if (setup_us)
@@ -5959,6 +6084,9 @@ void fm_gpu_b13534_profile(
     if (tri_calls) *tri_calls = g_b13534_tri_calls;
     if (fast_hits) *fast_hits = g_b13533_34_fast_hits;
     if (fast_pixels) *fast_pixels = g_b13533_34_fast_pixels;
+    if (depth0_hits) *depth0_hits = g_b13535_depth_hits[0];
+    if (depth1_hits) *depth1_hits = g_b13535_depth_hits[1];
+    if (depth2_hits) *depth2_hits = g_b13535_depth_hits[2];
 }
 
 
