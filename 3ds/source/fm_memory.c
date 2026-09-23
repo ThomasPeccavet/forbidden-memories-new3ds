@@ -1358,8 +1358,38 @@ static void fm_dma2_complete(void)
 
 static void fm_dma2_linked_profile_finish(uint64_t start_ms)
 {
-    /* B130 PERF CLEAN: keep structural counters, disable timing. */
-    (void)start_ms;
+    /*
+     * B135.29 - coarse linked-list timing.
+     *
+     * Time the whole DMA2 list once, rather than timing individual GP0
+     * commands. This keeps diagnostic overhead negligible while measuring
+     * exactly the combined cost we care about here:
+     *   OT traversal + GP0 parsing + software rasterization.
+     */
+    uint32_t elapsed_ms =
+        (uint32_t)(osGetTime() - start_ms);
+
+    g_dma2_linked_last_ms =
+        elapsed_ms;
+
+    g_dma2_linked_total_ms +=
+        elapsed_ms;
+
+    if (elapsed_ms > g_dma2_linked_max_ms)
+    {
+        g_dma2_linked_max_ms =
+            elapsed_ms;
+    }
+
+    if (elapsed_ms > 20u)
+    {
+        ++g_dma2_linked_over20;
+    }
+
+    if (elapsed_ms > 33u)
+    {
+        ++g_dma2_linked_over33;
+    }
 
     if (g_dma2_last_empty_ot_nodes > g_dma2_max_empty_ot_nodes)
     {
@@ -1370,7 +1400,8 @@ static void fm_dma2_linked_profile_finish(uint64_t start_ms)
 
 static int fm_dma2_linked_list(void)
 {
-    uint64_t b120_start_ms = 0u;
+    uint64_t b120_start_ms =
+        osGetTime();
 
     /*
      * Skipped canonical ranges are remembered so a later malformed link
