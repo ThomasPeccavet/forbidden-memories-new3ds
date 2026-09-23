@@ -15153,7 +15153,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.25-IRGN-PROFILE (BASE B131)\n");
+            printf("BUILD B135.26-34D7C-NATIVE (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
