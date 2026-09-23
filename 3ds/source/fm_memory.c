@@ -1404,6 +1404,13 @@ static int fm_dma2_linked_list(void)
         osGetTime();
 
     /*
+     * B135.32: GHOT/GHOT2 must describe THIS linked list.  The previous
+     * cumulative profile mixed boot/menu/map traffic and made one-time
+     * sprites look like current frame hotspots.
+     */
+    fm_gpu_b13532_profile_reset();
+
+    /*
      * Skipped canonical ranges are remembered so a later malformed link
      * back into one of them is still detected as a cycle.
      */
