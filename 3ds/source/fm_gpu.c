@@ -162,6 +162,15 @@ static uint64_t g_b13531_flatrect_pixels = 0u;
 static uint32_t g_b13533_34_fast_hits = 0u;
 static uint64_t g_b13533_34_fast_pixels = 0u;
 
+/*
+ * B135.34 - sampled 34h phase profiler, reset for every DMA2 list.
+ */
+static int g_b13534_sample_active = 0;
+static uint64_t g_b13534_setup_ticks = 0u;
+static uint64_t g_b13534_raster_ticks = 0u;
+static uint32_t g_b13534_samples = 0u;
+static uint32_t g_b13534_tri_calls = 0u;
+
 static uint64_t b122_ticks_to_us(uint64_t ticks)
 {
     return
@@ -1777,6 +1786,13 @@ static void b13511_shaded_textured_triangle(
     int semi
 )
 {
+    ++g_b13534_tri_calls;
+
+    uint64_t b13534_begin =
+        g_b13534_sample_active
+            ? svcGetSystemTick()
+            : 0u;
+
 #define B13511_SWAP_INT(a,b) do { int _t=(a); (a)=(b); (b)=_t; } while (0)
 #define B13511_SWAP_U32(a,b) do { uint32_t _t=(a); (a)=(b); (b)=_t; } while (0)
 
@@ -1923,6 +1939,11 @@ static void b13511_shaded_textured_triangle(
     if (ye > g_draw_y2 + 1) ye = g_draw_y2 + 1;
     if (ys < 0) ys = 0;
     if (ye > 512) ye = 512;
+
+    uint64_t b13534_raster_begin =
+        g_b13534_sample_active
+            ? svcGetSystemTick()
+            : 0u;
 
     for (int y = ys; y < ye; ++y)
     {
@@ -2122,6 +2143,20 @@ static void b13511_shaded_textured_triangle(
                 b_fp += db_dx;
             }
         }
+    }
+
+    if (g_b13534_sample_active)
+    {
+        uint64_t b13534_end =
+            svcGetSystemTick();
+
+        g_b13534_setup_ticks +=
+            b13534_raster_begin - b13534_begin;
+
+        g_b13534_raster_ticks +=
+            b13534_end - b13534_raster_begin;
+
+        ++g_b13534_samples;
     }
 
 #undef B13511_SWAP_INT
@@ -5450,7 +5485,13 @@ void fm_gpu_gp0_write(
             uint64_t sample_start =
                 svcGetSystemTick();
 
+            g_b13534_sample_active =
+                completed_opcode == 0x34u;
+
             execute_command();
+
+            g_b13534_sample_active =
+                0;
 
             b122_record_opcode(
                 completed_opcode,
@@ -5459,6 +5500,9 @@ void fm_gpu_gp0_write(
         }
         else
         {
+            g_b13534_sample_active =
+                0;
+
             execute_command();
         }
 
@@ -5874,6 +5918,47 @@ void fm_gpu_b13532_profile_reset(void)
     g_b122_upload_ticks = 0u;
     g_b122_upload_words = 0u;
     g_b13530_sample_phase = 0u;
+
+    g_b13533_34_fast_hits = 0u;
+    g_b13533_34_fast_pixels = 0u;
+
+    g_b13534_sample_active = 0;
+    g_b13534_setup_ticks = 0u;
+    g_b13534_raster_ticks = 0u;
+    g_b13534_samples = 0u;
+    g_b13534_tri_calls = 0u;
+}
+
+
+void fm_gpu_b13534_profile(
+    uint64_t *setup_us,
+    uint64_t *raster_us,
+    uint32_t *samples,
+    uint32_t *tri_calls,
+    uint32_t *fast_hits,
+    uint64_t *fast_pixels
+)
+{
+    if (setup_us)
+    {
+        *setup_us =
+            b122_ticks_to_us(
+                g_b13534_setup_ticks
+            );
+    }
+
+    if (raster_us)
+    {
+        *raster_us =
+            b122_ticks_to_us(
+                g_b13534_raster_ticks
+            );
+    }
+
+    if (samples) *samples = g_b13534_samples;
+    if (tri_calls) *tri_calls = g_b13534_tri_calls;
+    if (fast_hits) *fast_hits = g_b13533_34_fast_hits;
+    if (fast_pixels) *fast_pixels = g_b13533_34_fast_pixels;
 }
 
 
