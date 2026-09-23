@@ -103,6 +103,14 @@ SEEDS = [
     0x80035794,
     0x80035988,
 
+    # B135.22 - hot CPS continuation in FUN_8008A0D8.
+    #
+    # The verified PC runtime repeatedly shows $ra=0x8008A1C0 while the
+    # Pharaoh-map callback loop is active.  On 3DS B135.21 also lands on
+    # CPU=8008A1C0 while the scheduler still spends ~38 ms in a slice.
+    # Expose that interior return continuation to the static dispatcher.
+    0x8008A1C0,
+
 
     # --------------------------------------------------------
     # libapi / interruptions
