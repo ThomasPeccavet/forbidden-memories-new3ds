@@ -15156,7 +15156,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.31-FAST-R62 (BASE B131)\n");
+            printf("BUILD B135.32-DMA-GHOT (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
