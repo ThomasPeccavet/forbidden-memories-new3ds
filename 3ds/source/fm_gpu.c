@@ -80,6 +80,16 @@ static uint64_t g_b122_upload_ticks = 0u;
 static uint64_t g_b122_upload_words = 0u;
 
 /*
+ * B135.30 - low-overhead sampled GP0 timing.
+ *
+ * B135.29 proved a single Palace DMA2 list can spend ~50-90 ms in
+ * OT traversal + GP0 execution.  Time only one completed GP0 command
+ * out of 16 so we can rank the expensive opcode families without
+ * turning the profiler itself into the bottleneck.
+ */
+static uint32_t g_b13530_sample_phase = 0u;
+
+/*
  * B124 - native 3DS fast path for variable-size textured rectangles
  * (GP0 64h..67h). This bypasses the generic multi-target renderer when
  * scale=1, no wide mirror and nearest filtering are active.
@@ -4634,6 +4644,9 @@ void fm_gpu_init(
     g_b122_upload_words =
         0u;
 
+    g_b13530_sample_phase =
+        0u;
+
     g_b124_rect_hits =
         0u;
 
@@ -5053,8 +5066,32 @@ void fm_gpu_gp0_write(
         g_cmd_need
     )
     {
-        /* B130 PERF CLEAN: execute without per-command timer reads. */
-        execute_command();
+        /*
+         * B135.30: sample 1/16 completed commands.  The opcode is captured
+         * before execute_command() because that routine may update parser
+         * state for uploads and other GP0 families.
+         */
+        uint8_t completed_opcode =
+            (uint8_t)((g_cmd[0] >> 24) & 0xFFu);
+
+        ++g_b13530_sample_phase;
+
+        if ((g_b13530_sample_phase & 15u) == 0u)
+        {
+            uint64_t sample_start =
+                svcGetSystemTick();
+
+            execute_command();
+
+            b122_record_opcode(
+                completed_opcode,
+                svcGetSystemTick() - sample_start
+            );
+        }
+        else
+        {
+            execute_command();
+        }
 
         g_cmd_have =
             0;
