@@ -5668,6 +5668,33 @@ void fm_gpu_b122_rank(
 }
 
 
+void fm_gpu_b13532_profile_reset(void)
+{
+    memset(
+        g_b122_opcode_ticks,
+        0,
+        sizeof(g_b122_opcode_ticks)
+    );
+
+    memset(
+        g_b122_opcode_calls,
+        0,
+        sizeof(g_b122_opcode_calls)
+    );
+
+    memset(
+        g_b122_opcode_max_ticks,
+        0,
+        sizeof(g_b122_opcode_max_ticks)
+    );
+
+    g_b122_exec_ticks = 0u;
+    g_b122_upload_ticks = 0u;
+    g_b122_upload_words = 0u;
+    g_b13530_sample_phase = 0u;
+}
+
+
 void fm_gpu_b122_totals(
     uint64_t *exec_us,
     uint64_t *upload_us,
