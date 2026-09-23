@@ -777,6 +777,439 @@ static inline uint16_t b13512_fetch_texel_ctx(
 }
 
 
+/*
+ * ============================================================
+ * B135.38 - experimental multicore GT34 rasterizer
+ * ============================================================
+ *
+ * A persistent worker handles the lower half of sufficiently large opaque
+ * GP0(34h) triangles while the main thread handles the upper half.
+ * Command order is still preserved because execute_command() does not return
+ * until both halves are complete.
+ *
+ * To avoid read/write races, the multicore path is disabled whenever the
+ * primitive destination overlaps its texture page or CLUT source region.
+ */
+typedef struct B13538GT34Job
+{
+    int x0;
+    int y0;
+    int x1;
+    int y1;
+
+    int u0;
+    int v0;
+    int r0;
+    int g0;
+    int b0;
+
+    int32_t du_dx;
+    int32_t du_dy;
+    int32_t dv_dx;
+    int32_t dv_dy;
+
+    int32_t dr_dx;
+    int32_t dr_dy;
+    int32_t dg_dx;
+    int32_t dg_dy;
+    int32_t db_dx;
+    int32_t db_dy;
+
+    int32_t dx_long;
+    int32_t dx_upper;
+    int32_t dx_lower;
+
+    int draw_x1;
+    int draw_y1;
+    int draw_x2;
+    int draw_y2;
+
+    int worker_ys;
+    int worker_ye;
+
+    B13512TexCtx texctx;
+    uint16_t clut[256];
+} B13538GT34Job;
+
+
+static Thread g_b13538_thread = NULL;
+static volatile int g_b13538_thread_run = 0;
+static volatile uint32_t g_b13538_job_seq = 0u;
+static volatile uint32_t g_b13538_done_seq = 0u;
+static volatile uint32_t g_b13538_worker_pixels = 0u;
+static volatile int g_b13538_worker_core = -1;
+
+static B13538GT34Job g_b13538_job;
+
+static uint32_t g_b13538_jobs = 0u;
+static uint64_t g_b13538_worker_pixels_total = 0u;
+
+
+static uint32_t b13538_raster_range(
+    const B13538GT34Job *j,
+    int ys,
+    int ye
+)
+{
+    uint32_t pixels = 0u;
+
+    for (int y = ys; y < ye; ++y)
+    {
+        int32_t xl_fp =
+            ((int32_t)j->x0 << 16)
+            +
+            j->dx_long * (y - j->y0);
+
+        int32_t xs_fp =
+            y < j->y1
+                ? ((int32_t)j->x0 << 16)
+                    + j->dx_upper * (y - j->y0)
+                : ((int32_t)j->x1 << 16)
+                    + j->dx_lower * (y - j->y1);
+
+        int32_t left_fp =
+            xl_fp < xs_fp
+                ? xl_fp
+                : xs_fp;
+
+        int32_t right_fp =
+            xl_fp < xs_fp
+                ? xs_fp
+                : xl_fp;
+
+        int sx =
+            left_fp >> 16;
+
+        int ex =
+            right_fp >> 16;
+
+        if (sx < j->draw_x1) sx = j->draw_x1;
+        if (ex > j->draw_x2 + 1) ex = j->draw_x2 + 1;
+        if (sx < 0) sx = 0;
+        if (ex > 1024) ex = 1024;
+
+        if (sx >= ex)
+        {
+            continue;
+        }
+
+        int32_t u_fp =
+            (int32_t)(
+                ((int64_t)j->u0 << 16)
+                +
+                (int64_t)j->du_dx * (sx - j->x0)
+                +
+                (int64_t)j->du_dy * (y - j->y0)
+            );
+
+        int32_t v_fp =
+            (int32_t)(
+                ((int64_t)j->v0 << 16)
+                +
+                (int64_t)j->dv_dx * (sx - j->x0)
+                +
+                (int64_t)j->dv_dy * (y - j->y0)
+            );
+
+        int32_t r_fp =
+            (int32_t)(
+                ((int64_t)j->r0 << 16)
+                +
+                (int64_t)j->dr_dx * (sx - j->x0)
+                +
+                (int64_t)j->dr_dy * (y - j->y0)
+            );
+
+        int32_t g_fp =
+            (int32_t)(
+                ((int64_t)j->g0 << 16)
+                +
+                (int64_t)j->dg_dx * (sx - j->x0)
+                +
+                (int64_t)j->dg_dy * (y - j->y0)
+            );
+
+        int32_t b_fp =
+            (int32_t)(
+                ((int64_t)j->b0 << 16)
+                +
+                (int64_t)j->db_dx * (sx - j->x0)
+                +
+                (int64_t)j->db_dy * (y - j->y0)
+            );
+
+        uint16_t *dst =
+            g_vram
+            +
+            (size_t)y * 1024u
+            +
+            (size_t)sx;
+
+        pixels +=
+            (uint32_t)(ex - sx);
+
+        int last_key = -1;
+        uint16_t packed = 0u;
+
+        for (int x = sx; x < ex; ++x, ++dst)
+        {
+            int tu =
+                (u_fp >> 16) & 0xFF;
+
+            int tv =
+                (v_fp >> 16) & 0xFF;
+
+            uint16_t texel;
+
+            if (j->texctx.depth == 0u)
+            {
+                int key =
+                    (tv << 6)
+                    |
+                    (tu >> 2);
+
+                if (key != last_key)
+                {
+                    packed =
+                        g_vram[
+                            (size_t)(j->texctx.tpy + tv) * 1024u
+                            +
+                            (size_t)((j->texctx.tpx + (tu >> 2)) & 1023)
+                        ];
+
+                    last_key =
+                        key;
+                }
+
+                texel =
+                    j->clut[
+                        (packed >> ((tu & 3) * 4)) & 0x0F
+                    ];
+            }
+            else if (j->texctx.depth == 1u)
+            {
+                int key =
+                    (tv << 7)
+                    |
+                    (tu >> 1);
+
+                if (key != last_key)
+                {
+                    packed =
+                        g_vram[
+                            (size_t)(j->texctx.tpy + tv) * 1024u
+                            +
+                            (size_t)((j->texctx.tpx + (tu >> 1)) & 1023)
+                        ];
+
+                    last_key =
+                        key;
+                }
+
+                texel =
+                    j->clut[
+                        (packed >> ((tu & 1) * 8)) & 0xFF
+                    ];
+            }
+            else
+            {
+                texel =
+                    g_vram[
+                        (size_t)(j->texctx.tpy + tv) * 1024u
+                        +
+                        (size_t)((j->texctx.tpx + tu) & 1023)
+                    ];
+            }
+
+            if (texel != 0u)
+            {
+                int mr =
+                    r_fp >> 16;
+
+                int mg =
+                    g_fp >> 16;
+
+                int mb =
+                    b_fp >> 16;
+
+                if ((unsigned)mr > 31u) mr = mr < 0 ? 0 : 31;
+                if ((unsigned)mg > 31u) mg = mg < 0 ? 0 : 31;
+                if ((unsigned)mb > 31u) mb = mb < 0 ? 0 : 31;
+
+                int rr =
+                    (((int)(texel & 31u)) * mr) >> 4;
+
+                int gg =
+                    (((int)((texel >> 5) & 31u)) * mg) >> 4;
+
+                int bb =
+                    (((int)((texel >> 10) & 31u)) * mb) >> 4;
+
+                if (rr > 31) rr = 31;
+                if (gg > 31) gg = 31;
+                if (bb > 31) bb = 31;
+
+                *dst =
+                    (uint16_t)(
+                        rr
+                        |
+                        (gg << 5)
+                        |
+                        (bb << 10)
+                    );
+            }
+
+            u_fp += j->du_dx;
+            v_fp += j->dv_dx;
+            r_fp += j->dr_dx;
+            g_fp += j->dg_dx;
+            b_fp += j->db_dx;
+        }
+    }
+
+    return pixels;
+}
+
+
+static void b13538_worker_main(void *arg)
+{
+    (void)arg;
+
+    g_b13538_worker_core =
+        svcGetProcessorID();
+
+    uint32_t seen =
+        0u;
+
+    while (
+        __atomic_load_n(
+            &g_b13538_thread_run,
+            __ATOMIC_ACQUIRE
+        )
+    )
+    {
+        uint32_t seq =
+            __atomic_load_n(
+                &g_b13538_job_seq,
+                __ATOMIC_ACQUIRE
+            );
+
+        if (seq == seen)
+        {
+            __asm__ volatile("yield");
+            continue;
+        }
+
+        seen =
+            seq;
+
+        if (
+            !__atomic_load_n(
+                &g_b13538_thread_run,
+                __ATOMIC_ACQUIRE
+            )
+        )
+        {
+            break;
+        }
+
+        uint32_t pixels =
+            b13538_raster_range(
+                &g_b13538_job,
+                g_b13538_job.worker_ys,
+                g_b13538_job.worker_ye
+            );
+
+        __atomic_store_n(
+            &g_b13538_worker_pixels,
+            pixels,
+            __ATOMIC_RELEASE
+        );
+
+        __atomic_store_n(
+            &g_b13538_done_seq,
+            seq,
+            __ATOMIC_RELEASE
+        );
+    }
+
+    threadExit(0);
+}
+
+
+static void b13538_try_start_worker(void)
+{
+    if (g_b13538_thread)
+    {
+        return;
+    }
+
+    __atomic_store_n(
+        &g_b13538_thread_run,
+        1,
+        __ATOMIC_RELEASE
+    );
+
+    /*
+     * Prefer New3DS core #2 when the launcher/exheader permits it.
+     * Otherwise use the APT-shared system core #1.
+     */
+    g_b13538_thread =
+        threadCreate(
+            b13538_worker_main,
+            NULL,
+            16u * 1024u,
+            0x2F,
+            2,
+            false
+        );
+
+    if (!g_b13538_thread)
+    {
+        g_b13538_thread =
+            threadCreate(
+                b13538_worker_main,
+                NULL,
+                16u * 1024u,
+                0x2F,
+                1,
+                false
+            );
+    }
+
+    if (!g_b13538_thread)
+    {
+        __atomic_store_n(
+            &g_b13538_thread_run,
+            0,
+            __ATOMIC_RELEASE
+        );
+    }
+}
+
+
+static int b13538_rect_overlap(
+    int ax0,
+    int ay0,
+    int ax1,
+    int ay1,
+    int bx0,
+    int by0,
+    int bx1,
+    int by1
+)
+{
+    return
+        ax0 < bx1
+        &&
+        bx0 < ax1
+        &&
+        ay0 < by1
+        &&
+        by0 < ay1;
+}
+
+
 static inline uint16_t b124_blend(
     uint16_t back,
     uint16_t front,
@@ -1966,8 +2399,218 @@ static void b13511_shaded_textured_triangle(
             ? svcGetSystemTick()
             : 0u;
 
-    for (int y = ys; y < ye; ++y)
+    int b13538_mt_done =
+        0;
+
+    if (
+        b13533_fast
+        &&
+        g_b13538_thread
+        &&
+        ye - ys >= 4
+    )
     {
+        int minx = x0;
+        int maxx = x0;
+
+        if (x1 < minx) minx = x1;
+        if (x2 < minx) minx = x2;
+        if (x1 > maxx) maxx = x1;
+        if (x2 > maxx) maxx = x2;
+
+        int bbox_w =
+            maxx - minx + 1;
+
+        int bbox_h =
+            ye - ys;
+
+        int tex_w =
+            texctx.depth == 0u
+                ? 64
+                : (
+                    texctx.depth == 1u
+                        ? 128
+                        : 256
+                );
+
+        int tex_overlap =
+            b13538_rect_overlap(
+                minx,
+                ys,
+                maxx + 1,
+                ye,
+                texctx.tpx,
+                texctx.tpy,
+                texctx.tpx + tex_w,
+                texctx.tpy + 256
+            );
+
+        int clut_w =
+            texctx.depth == 0u
+                ? 16
+                : (
+                    texctx.depth == 1u
+                        ? 256
+                        : 0
+                );
+
+        int clut_overlap =
+            clut_w != 0
+            &&
+            b13538_rect_overlap(
+                minx,
+                ys,
+                maxx + 1,
+                ye,
+                texctx.clx,
+                texctx.cly,
+                texctx.clx + clut_w,
+                texctx.cly + 1
+            );
+
+        if (
+            bbox_w * bbox_h >= 96
+            &&
+            !tex_overlap
+            &&
+            !clut_overlap
+        )
+        {
+            B13538GT34Job *job =
+                &g_b13538_job;
+
+            job->x0 = x0;
+            job->y0 = y0;
+            job->x1 = x1;
+            job->y1 = y1;
+
+            job->u0 = u0;
+            job->v0 = v0;
+            job->r0 = r0;
+            job->g0 = g0;
+            job->b0 = b0;
+
+            job->du_dx = du_dx;
+            job->du_dy = du_dy;
+            job->dv_dx = dv_dx;
+            job->dv_dy = dv_dy;
+
+            job->dr_dx = dr_dx;
+            job->dr_dy = dr_dy;
+            job->dg_dx = dg_dx;
+            job->dg_dy = dg_dy;
+            job->db_dx = db_dx;
+            job->db_dy = db_dy;
+
+            job->dx_long = dx_long;
+            job->dx_upper = dx_upper;
+            job->dx_lower = dx_lower;
+
+            job->draw_x1 = g_draw_x1;
+            job->draw_y1 = g_draw_y1;
+            job->draw_x2 = g_draw_x2;
+            job->draw_y2 = g_draw_y2;
+
+            job->texctx =
+                texctx;
+
+            if (texctx.depth == 0u)
+            {
+                memcpy(
+                    job->clut,
+                    b13533_clut,
+                    16u * sizeof(uint16_t)
+                );
+            }
+            else if (texctx.depth == 1u)
+            {
+                memcpy(
+                    job->clut,
+                    b13533_clut,
+                    256u * sizeof(uint16_t)
+                );
+            }
+
+            int mid =
+                ys
+                +
+                (ye - ys) / 2;
+
+            job->worker_ys =
+                mid;
+
+            job->worker_ye =
+                ye;
+
+            __atomic_store_n(
+                &g_b13538_worker_pixels,
+                0u,
+                __ATOMIC_RELAXED
+            );
+
+            uint32_t seq =
+                __atomic_load_n(
+                    &g_b13538_job_seq,
+                    __ATOMIC_RELAXED
+                )
+                +
+                1u;
+
+            __atomic_store_n(
+                &g_b13538_job_seq,
+                seq,
+                __ATOMIC_RELEASE
+            );
+
+            uint32_t main_pixels =
+                b13538_raster_range(
+                    job,
+                    ys,
+                    mid
+                );
+
+            while (
+                __atomic_load_n(
+                    &g_b13538_done_seq,
+                    __ATOMIC_ACQUIRE
+                )
+                !=
+                seq
+            )
+            {
+                __asm__ volatile("yield");
+            }
+
+            uint32_t worker_pixels =
+                __atomic_load_n(
+                    &g_b13538_worker_pixels,
+                    __ATOMIC_ACQUIRE
+                );
+
+            b13537_pixels +=
+                main_pixels
+                +
+                worker_pixels;
+
+            b13537_fast_pixels +=
+                main_pixels
+                +
+                worker_pixels;
+
+            ++g_b13538_jobs;
+
+            g_b13538_worker_pixels_total +=
+                worker_pixels;
+
+            b13538_mt_done =
+                1;
+        }
+    }
+
+    if (!b13538_mt_done)
+    {
+        for (int y = ys; y < ye; ++y)
+        {
         int32_t xl_fp = ((int32_t)x0 << 16) + dx_long * (y-y0);
         int32_t xs_fp =
             y < y1
@@ -2168,6 +2811,8 @@ static void b13511_shaded_textured_triangle(
                 b_fp += db_dx;
             }
         }
+    }
+
     }
 
     g_b125_pixels +=
@@ -4932,6 +5577,8 @@ void fm_gpu_init(
     g_vram =
         vram;
 
+    b13538_try_start_worker();
+
 
     g_state =
         FM_GPU_IDLE;
@@ -5901,6 +6548,9 @@ void fm_gpu_b13532_profile_reset(void)
     g_b13535_depth_hits[0] = 0u;
     g_b13535_depth_hits[1] = 0u;
     g_b13535_depth_hits[2] = 0u;
+
+    g_b13538_jobs = 0u;
+    g_b13538_worker_pixels_total = 0u;
 }
 
 
@@ -5939,6 +6589,39 @@ void fm_gpu_b13534_profile(
     if (depth0_hits) *depth0_hits = g_b13535_depth_hits[0];
     if (depth1_hits) *depth1_hits = g_b13535_depth_hits[1];
     if (depth2_hits) *depth2_hits = g_b13535_depth_hits[2];
+}
+
+
+void fm_gpu_b13538_mt_stats(
+    int *ready,
+    int *core_id,
+    uint32_t *jobs,
+    uint64_t *worker_pixels
+)
+{
+    if (ready)
+    {
+        *ready =
+            g_b13538_thread != NULL;
+    }
+
+    if (core_id)
+    {
+        *core_id =
+            g_b13538_worker_core;
+    }
+
+    if (jobs)
+    {
+        *jobs =
+            g_b13538_jobs;
+    }
+
+    if (worker_pixels)
+    {
+        *worker_pixels =
+            g_b13538_worker_pixels_total;
+    }
 }
 
 
