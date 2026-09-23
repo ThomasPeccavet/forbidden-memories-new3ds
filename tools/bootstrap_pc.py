@@ -103,6 +103,14 @@ SEEDS = [
     0x80035794,
     0x80035988,
 
+    # B135.26 - B135.25 IRGN profiling showed that every expensive
+    # interpreter entry starts at 0x80034D7C, inside FUN_80034D30.
+    # Across 120 host loops this continuation accounts for essentially
+    # the whole ~660K interpreted-instruction load. Expose it directly
+    # to the static dispatcher so the existing resident chain can keep
+    # this path native.
+    0x80034D7C,
+
     # B135.22 - hot CPS continuation in FUN_8008A0D8.
     #
     # The verified PC runtime repeatedly shows $ra=0x8008A1C0 while the
