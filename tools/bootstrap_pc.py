@@ -103,12 +103,11 @@ SEEDS = [
     0x80035794,
     0x80035988,
 
-    # B135.26 - B135.25 IRGN profiling showed that every expensive
-    # interpreter entry starts at 0x80034D7C, inside FUN_80034D30.
-    # Across 120 host loops this continuation accounts for essentially
-    # the whole ~660K interpreted-instruction load. Expose it directly
-    # to the static dispatcher so the existing resident chain can keep
-    # this path native.
+    # B135.28 - B135.27 proved 0x80034D7C is an interior alias whose
+    # host FUN_80034D30 was never present in the generated resident set.
+    # Seed the real host entry first; then the existing interior-alias pass
+    # can attach 0x80034D7C to that generated host function.
+    0x80034D30,
     0x80034D7C,
 
     # B135.22 - hot CPS continuation in FUN_8008A0D8.
