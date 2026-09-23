@@ -139,7 +139,10 @@ void fm_gpu_b13534_profile(
     uint32_t *samples,
     uint32_t *tri_calls,
     uint32_t *fast_hits,
-    uint64_t *fast_pixels
+    uint64_t *fast_pixels,
+    uint32_t *depth0_hits,
+    uint32_t *depth1_hits,
+    uint32_t *depth2_hits
 );
 
 
