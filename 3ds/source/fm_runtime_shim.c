@@ -378,7 +378,7 @@ FMRuntimeProbeResult fm_runtime_probe(
 
 /*
  * ============================================================
- * B135.14 - chained resident probe
+ * B135.14/B135.22 - chained resident probe
  * ============================================================
  *
  * The normal main loop pays one setjmp + dispatcher/HLE scan for every
@@ -397,6 +397,8 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
     uint32_t phys_end,
     uint32_t phys2_begin,
     uint32_t phys2_end,
+    uint32_t phys3_begin,
+    uint32_t phys3_end,
     uint32_t max_dispatches,
     uint32_t *out_dispatches
 )
@@ -420,6 +422,8 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
         phys_begin >= phys_end
         ||
         phys2_begin >= phys2_end
+        ||
+        phys3_begin >= phys3_end
         ||
         max_dispatches == 0u
     )
@@ -462,7 +466,12 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
                 &&
                 phys < phys2_end;
 
-            if (!in_primary && !in_secondary)
+            int in_tertiary =
+                phys >= phys3_begin
+                &&
+                phys < phys3_end;
+
+            if (!in_primary && !in_secondary && !in_tertiary)
             {
                 break;
             }
