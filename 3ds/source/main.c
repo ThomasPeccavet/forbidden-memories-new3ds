@@ -1874,6 +1874,52 @@ static uint32_t g_b13518_late_vblank_skips = 0u;
  */
 static uint64_t g_b13519_region_instructions = 0u;
 
+/*
+ * B135.25 - profile which internal map continuations still fall back to the
+ * R3000A interpreter.  Weight by retired instructions, not only hit count,
+ * so one rare but very expensive continuation is visible immediately.
+ */
+static uint32_t g_b13525_interp_pc[8] = {0u};
+static uint32_t g_b13525_interp_hits[8] = {0u};
+static uint64_t g_b13525_interp_ins[8] = {0u};
+
+static void b13525_note_interp_entry(
+    uint32_t pc,
+    uint64_t instructions
+)
+{
+    pc &= 0x1FFFFFFFu;
+
+    unsigned empty = 8u;
+    unsigned lightest = 0u;
+
+    for (unsigned i = 0u; i < 8u; ++i)
+    {
+        if (g_b13525_interp_pc[i] == pc)
+        {
+            ++g_b13525_interp_hits[i];
+            g_b13525_interp_ins[i] += instructions;
+            return;
+        }
+
+        if (g_b13525_interp_pc[i] == 0u && empty == 8u)
+        {
+            empty = i;
+        }
+
+        if (g_b13525_interp_ins[i] < g_b13525_interp_ins[lightest])
+        {
+            lightest = i;
+        }
+    }
+
+    unsigned slot = empty != 8u ? empty : lightest;
+
+    g_b13525_interp_pc[slot] = pc;
+    g_b13525_interp_hits[slot] = 1u;
+    g_b13525_interp_ins[slot] = instructions;
+}
+
 
 static int b13517_is_map_interp_pc(uint32_t pc)
 {
@@ -14090,6 +14136,9 @@ int main(void)
                     {
                         uint32_t b13519_chunks = 0u;
                         int b13517_time_yield = 0;
+                        uint32_t b13525_entry_pc =
+                            cpu->pc & 0x1FFFFFFFu;
+                        uint64_t b13525_entry_instructions = 0u;
 
                         ++g_b13517_interp_entries;
 
@@ -14121,6 +14170,8 @@ int main(void)
                             ++b13519_chunks;
                             ++g_b13517_interp_blocks;
                             g_b13519_region_instructions +=
+                                interp.instructions;
+                            b13525_entry_instructions +=
                                 interp.instructions;
 
                             if (
@@ -14157,6 +14208,11 @@ int main(void)
                         {
                             g_b13517_interp_max = b13519_chunks;
                         }
+
+                        b13525_note_interp_entry(
+                            b13525_entry_pc,
+                            b13525_entry_instructions
+                        );
 
                         if (b13517_time_yield)
                         {
@@ -15097,7 +15153,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.24-CHAIN-QUANTUM (BASE B131)\n");
+            printf("BUILD B135.25-IRGN-PROFILE (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15211,6 +15267,44 @@ int main(void)
                     "IRGN ins:%llu\n",
                     (unsigned long long)g_b13519_region_instructions
                 );
+
+                {
+                    unsigned top1 = 0u;
+                    unsigned top2 = 0u;
+
+                    for (unsigned i = 1u; i < 8u; ++i)
+                    {
+                        if (
+                            g_b13525_interp_ins[i]
+                            >
+                            g_b13525_interp_ins[top1]
+                        )
+                        {
+                            top2 = top1;
+                            top1 = i;
+                        }
+                        else if (
+                            i != top1
+                            &&
+                            g_b13525_interp_ins[i]
+                            >
+                            g_b13525_interp_ins[top2]
+                        )
+                        {
+                            top2 = i;
+                        }
+                    }
+
+                    printf(
+                        "IRPC top:%06lX/%lu/%llu %06lX/%lu/%llu\n",
+                        (unsigned long)g_b13525_interp_pc[top1],
+                        (unsigned long)g_b13525_interp_hits[top1],
+                        (unsigned long long)g_b13525_interp_ins[top1],
+                        (unsigned long)g_b13525_interp_pc[top2],
+                        (unsigned long)g_b13525_interp_hits[top2],
+                        (unsigned long long)g_b13525_interp_ins[top2]
+                    );
+                }
 
                 printf(
                     "EXIT top:%06lX/%lu %06lX/%lu\n",
