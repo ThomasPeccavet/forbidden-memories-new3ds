@@ -152,6 +152,16 @@ static uint32_t g_b129_fill_max_pixels = 0u;
 static uint32_t g_b13531_flatrect_hits = 0u;
 static uint64_t g_b13531_flatrect_pixels = 0u;
 
+/*
+ * B135.33 - specialized opaque GP0(34h) pixel loop.
+ * The Palace per-DMA profiler shows 34h accounts for roughly 80% of a
+ * 50 ms linked list.  Cache CLUT entries per primitive and the packed
+ * 4/8-bpp texture word across adjacent pixels, and hoist all mask/window/
+ * semi/raw decisions out of the inner loop.
+ */
+static uint32_t g_b13533_34_fast_hits = 0u;
+static uint64_t g_b13533_34_fast_pixels = 0u;
+
 static uint64_t b122_ticks_to_us(uint64_t ticks)
 {
     return
@@ -1858,6 +1868,55 @@ static void b13511_shaded_textured_triangle(
             texpage
         );
 
+    /*
+     * B135.33 fast case: exact 34h semantics on the measured Palace path.
+     * 34h is opaque + modulated, and the current native renderer normally
+     * has no mask bits or texture window.  In that case all those branches
+     * are invariant and can disappear from the pixel loop.
+     */
+    int b13533_fast =
+        !raw_texture
+        &&
+        !semi
+        &&
+        !g_mask_set
+        &&
+        !g_mask_check
+        &&
+        (texctx.mask_x | texctx.mask_y) == 0u;
+
+    uint16_t b13533_clut[256];
+
+    if (b13533_fast && texctx.depth == 0u)
+    {
+        for (unsigned i = 0u; i < 16u; ++i)
+        {
+            b13533_clut[i] =
+                g_vram[
+                    ((unsigned)texctx.cly & 511u) * 1024u
+                    +
+                    (((unsigned)texctx.clx + i) & 1023u)
+                ];
+        }
+    }
+    else if (b13533_fast && texctx.depth == 1u)
+    {
+        for (unsigned i = 0u; i < 256u; ++i)
+        {
+            b13533_clut[i] =
+                g_vram[
+                    ((unsigned)texctx.cly & 511u) * 1024u
+                    +
+                    (((unsigned)texctx.clx + i) & 1023u)
+                ];
+        }
+    }
+
+    if (b13533_fast)
+    {
+        ++g_b13533_34_fast_hits;
+    }
+
     int ys = y0;
     int ye = y2;
     if (ys < g_draw_y1) ys = g_draw_y1;
@@ -1912,39 +1971,156 @@ static void b13511_shaded_textured_triangle(
 
         g_b125_pixels += (uint64_t)(ex-sx);
 
-        for (int x = sx; x < ex; ++x, ++dst)
+        if (b13533_fast)
         {
-            uint16_t texel =
-                b13512_fetch_texel_ctx(
-                    (u_fp >> 16) & 0xFF,
-                    (v_fp >> 16) & 0xFF,
-                    &texctx
+            g_b13533_34_fast_pixels +=
+                (uint64_t)(ex - sx);
+
+            int last_key = -1;
+            uint16_t packed = 0u;
+
+            for (int x = sx; x < ex; ++x, ++dst)
+            {
+                int tu = (u_fp >> 16) & 0xFF;
+                int tv = (v_fp >> 16) & 0xFF;
+                uint16_t texel;
+
+                if (texctx.depth == 0u)
+                {
+                    int key =
+                        (tv << 6)
+                        |
+                        (tu >> 2);
+
+                    if (key != last_key)
+                    {
+                        packed =
+                            g_vram[
+                                (size_t)(texctx.tpy + tv) * 1024u
+                                +
+                                (size_t)((texctx.tpx + (tu >> 2)) & 1023)
+                            ];
+
+                        last_key =
+                            key;
+                    }
+
+                    texel =
+                        b13533_clut[
+                            (packed >> ((tu & 3) * 4)) & 0x0F
+                        ];
+                }
+                else if (texctx.depth == 1u)
+                {
+                    int key =
+                        (tv << 7)
+                        |
+                        (tu >> 1);
+
+                    if (key != last_key)
+                    {
+                        packed =
+                            g_vram[
+                                (size_t)(texctx.tpy + tv) * 1024u
+                                +
+                                (size_t)((texctx.tpx + (tu >> 1)) & 1023)
+                            ];
+
+                        last_key =
+                            key;
+                    }
+
+                    texel =
+                        b13533_clut[
+                            (packed >> ((tu & 1) * 8)) & 0xFF
+                        ];
+                }
+                else
+                {
+                    texel =
+                        g_vram[
+                            (size_t)(texctx.tpy + tv) * 1024u
+                            +
+                            (size_t)((texctx.tpx + tu) & 1023)
+                        ];
+                }
+
+                if (texel != 0u)
+                {
+                    int mr = r_fp >> 16;
+                    int mg = g_fp >> 16;
+                    int mb = b_fp >> 16;
+
+                    if ((unsigned)mr > 31u) mr = mr < 0 ? 0 : 31;
+                    if ((unsigned)mg > 31u) mg = mg < 0 ? 0 : 31;
+                    if ((unsigned)mb > 31u) mb = mb < 0 ? 0 : 31;
+
+                    int rr =
+                        (((int)(texel & 31u)) * mr) >> 4;
+
+                    int gg =
+                        (((int)((texel >> 5) & 31u)) * mg) >> 4;
+
+                    int bb =
+                        (((int)((texel >> 10) & 31u)) * mb) >> 4;
+
+                    if (rr > 31) rr = 31;
+                    if (gg > 31) gg = 31;
+                    if (bb > 31) bb = 31;
+
+                    *dst =
+                        (uint16_t)(
+                            rr
+                            |
+                            (gg << 5)
+                            |
+                            (bb << 10)
+                        );
+                }
+
+                u_fp += du_dx;
+                v_fp += dv_dx;
+                r_fp += dr_dx;
+                g_fp += dg_dx;
+                b_fp += db_dx;
+            }
+        }
+        else
+        {
+            for (int x = sx; x < ex; ++x, ++dst)
+            {
+                uint16_t texel =
+                    b13512_fetch_texel_ctx(
+                        (u_fp >> 16) & 0xFF,
+                        (v_fp >> 16) & 0xFF,
+                        &texctx
+                    );
+
+                int mr = r_fp >> 16;
+                int mg = g_fp >> 16;
+                int mb = b_fp >> 16;
+
+                if (mr < 0) mr = 0; else if (mr > 31) mr = 31;
+                if (mg < 0) mg = 0; else if (mg > 31) mg = 31;
+                if (mb < 0) mb = 0; else if (mb > 31) mb = 31;
+
+                b125_put_textured(
+                    dst,
+                    texel,
+                    mr,
+                    mg,
+                    mb,
+                    raw_texture,
+                    semi,
+                    semi_mode
                 );
 
-            int mr = r_fp >> 16;
-            int mg = g_fp >> 16;
-            int mb = b_fp >> 16;
-
-            if (mr < 0) mr = 0; else if (mr > 31) mr = 31;
-            if (mg < 0) mg = 0; else if (mg > 31) mg = 31;
-            if (mb < 0) mb = 0; else if (mb > 31) mb = 31;
-
-            b125_put_textured(
-                dst,
-                texel,
-                mr,
-                mg,
-                mb,
-                raw_texture,
-                semi,
-                semi_mode
-            );
-
-            u_fp += du_dx;
-            v_fp += dv_dx;
-            r_fp += dr_dx;
-            g_fp += dg_dx;
-            b_fp += db_dx;
+                u_fp += du_dx;
+                v_fp += dv_dx;
+                r_fp += dr_dx;
+                g_fp += dg_dx;
+                b_fp += db_dx;
+            }
         }
     }
 
@@ -4889,6 +5065,12 @@ void fm_gpu_init(
         0u;
 
     g_b13531_flatrect_pixels =
+        0u;
+
+    g_b13533_34_fast_hits =
+        0u;
+
+    g_b13533_34_fast_pixels =
         0u;
 
     g_fill_suppressed = 0;
