@@ -145,6 +145,18 @@ void fm_gpu_b13534_profile(
     uint32_t *depth2_hits
 );
 
+/*
+ * B135.38 - experimental two-core GT34 raster path.
+ * Falls back to the normal single-core path when the worker cannot be
+ * created or when a primitive may read from the region it is drawing.
+ */
+void fm_gpu_b13538_mt_stats(
+    int *ready,
+    int *core_id,
+    uint32_t *jobs,
+    uint64_t *worker_pixels
+);
+
 
 /*
  * ============================================================
