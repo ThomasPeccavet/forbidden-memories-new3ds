@@ -15156,7 +15156,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.33-FAST-GT34 (BASE B131)\n");
+            printf("BUILD B135.34-SPLIT-GT34 (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15430,6 +15430,38 @@ int main(void)
                     (unsigned long long)hot1.total_us,
                     (unsigned long)hot1.max_us
                 );
+
+                {
+                    uint64_t g34_setup_us = 0u;
+                    uint64_t g34_raster_us = 0u;
+                    uint64_t g34_fast_pixels = 0u;
+                    uint32_t g34_samples = 0u;
+                    uint32_t g34_calls = 0u;
+                    uint32_t g34_fast_hits = 0u;
+
+                    fm_gpu_b13534_profile(
+                        &g34_setup_us,
+                        &g34_raster_us,
+                        &g34_samples,
+                        &g34_calls,
+                        &g34_fast_hits,
+                        &g34_fast_pixels
+                    );
+
+                    printf(
+                        "G34 S/R us:%llu/%llu n:%lu\n",
+                        (unsigned long long)g34_setup_us,
+                        (unsigned long long)g34_raster_us,
+                        (unsigned long)g34_samples
+                    );
+
+                    printf(
+                        "G34 fast:%lu/%lu px:%llu\n",
+                        (unsigned long)g34_fast_hits,
+                        (unsigned long)g34_calls,
+                        (unsigned long long)g34_fast_pixels
+                    );
+                }
             }
 
             /*
