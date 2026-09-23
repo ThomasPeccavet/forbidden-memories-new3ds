@@ -15156,7 +15156,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.28-34D30-HOST (BASE B131)\n");
+            printf("BUILD B135.29-DMA2-TIME (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15391,15 +15391,19 @@ int main(void)
             );
 
             printf(
-                "DMA2 LL:%lu last N/W:%lu/%lu cycle:%lu\n",
+                "DMA2 LL:%lu N/W:%lu/%lu ms:%lu/%lu\n",
                 (unsigned long)b130_dma.dma2_linked_transfer_count,
                 (unsigned long)b130_dma.dma2_last_nodes,
                 (unsigned long)b130_dma.dma2_last_words,
-                (unsigned long)b130_dma.dma2_cycle_abort_count
+                (unsigned long)b130_dma.dma2_linked_last_ms,
+                (unsigned long)b130_dma.dma2_linked_max_ms
             );
 
             printf(
-                "OT empty:%lu skipRun max:%lu PROFILERS:OFF\n",
+                "DMA2 >20/33:%lu/%lu cyc:%lu OT:%lu skip:%lu\n",
+                (unsigned long)b130_dma.dma2_linked_over20,
+                (unsigned long)b130_dma.dma2_linked_over33,
+                (unsigned long)b130_dma.dma2_cycle_abort_count,
                 (unsigned long)b130_dma.dma2_last_empty_ot_nodes,
                 (unsigned long)b130_dma.dma2_empty_fast_max
             );
