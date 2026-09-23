@@ -111,6 +111,17 @@ SEEDS = [
     # Expose that interior return continuation to the static dispatcher.
     0x8008A1C0,
 
+    # B135.23 - next hot exits reported by CHAIN3.
+    #
+    # 0x80057B80 is the hot loop continuation inside FUN_8005721C after
+    # the model/primitive callback returns.
+    #
+    # 0x80089DA8 is the special primitive callback stub/sentinel used by
+    # several primitive dispatch tables and was by far the hottest CHAIN3
+    # exit on B135.22.
+    0x80057B80,
+    0x80089DA8,
+
 
     # --------------------------------------------------------
     # libapi / interruptions
