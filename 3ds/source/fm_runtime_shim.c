@@ -399,6 +399,8 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
     uint32_t phys2_end,
     uint32_t phys3_begin,
     uint32_t phys3_end,
+    uint32_t phys4_begin,
+    uint32_t phys4_end,
     uint32_t max_dispatches,
     uint32_t *out_dispatches
 )
@@ -424,6 +426,8 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
         phys2_begin >= phys2_end
         ||
         phys3_begin >= phys3_end
+        ||
+        phys4_begin >= phys4_end
         ||
         max_dispatches == 0u
     )
@@ -471,7 +475,20 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
                 &&
                 phys < phys3_end;
 
-            if (!in_primary && !in_secondary && !in_tertiary)
+            int in_quaternary =
+                phys >= phys4_begin
+                &&
+                phys < phys4_end;
+
+            if (
+                !in_primary
+                &&
+                !in_secondary
+                &&
+                !in_tertiary
+                &&
+                !in_quaternary
+            )
             {
                 break;
             }
