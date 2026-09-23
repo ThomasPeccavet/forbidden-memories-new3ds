@@ -123,6 +123,12 @@ void fm_gpu_b122_totals(
     uint64_t *upload_words
 );
 
+/*
+ * B135.32 - reset the sampled GP0 profiler at the beginning of a DMA2
+ * linked list so GHOT/GHOT2 describe the most recent DMA, not the whole run.
+ */
+void fm_gpu_b13532_profile_reset(void);
+
 
 /*
  * ============================================================
