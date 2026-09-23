@@ -13892,7 +13892,15 @@ int main(void)
                             0x0008A204u,
                             0x0005721Cu,
                             0x00058860u,
-                            512u,
+                            /*
+                             * B135.24 - B135.23 reached chains as deep as
+                             * 123 dispatches and a single host slice grew to
+                             * ~39 ms.  Bound the native chain so main.c gets
+                             * frequent chances to enforce the 12 ms scheduler
+                             * budget while still amortizing setjmp/dispatcher
+                             * overhead versus the old max=4 behavior.
+                             */
+                            16u,
                             &b13514_chain_count
                         );
                 }
@@ -13925,7 +13933,7 @@ int main(void)
                                 0x0008A204u,
                                 0x0005721Cu,
                                 0x00058860u,
-                                512u,
+                                16u,
                                 &b13514_chain_count
                             );
                     }
@@ -15089,7 +15097,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.23-HOT-EXIT-CHAIN (BASE B131)\n");
+            printf("BUILD B135.24-CHAIN-QUANTUM (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
