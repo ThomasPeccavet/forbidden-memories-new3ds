@@ -142,6 +142,16 @@ static uint64_t g_b129_fill_pixels = 0u;
 static uint64_t g_b129_fill_zero_pixels = 0u;
 static uint32_t g_b129_fill_max_pixels = 0u;
 
+/*
+ * B135.31 - direct native fast path for GP0 60h..63h flat rectangles.
+ * B135.30 identified 62h (semi-transparent variable-size flat rect) as
+ * the second GPU hotspot: very few calls, but ~13x the cost of a 34h
+ * shaded textured triangle.  Avoid the generic renderer's per-pixel
+ * bounds/state/dirty bookkeeping when running native 1x 4:3.
+ */
+static uint32_t g_b13531_flatrect_hits = 0u;
+static uint64_t g_b13531_flatrect_pixels = 0u;
+
 static uint64_t b122_ticks_to_us(uint64_t ticks)
 {
     return
@@ -2235,6 +2245,162 @@ static inline void b129_fill_span(
 }
 
 
+static int b13531_try_flat_rect(
+    uint8_t opcode,
+    int x,
+    int y,
+    int w,
+    int h,
+    uint16_t color
+)
+{
+    if (
+        !g_vram
+        ||
+        sw_renderer_scale() != 1
+        ||
+        sw_wide_width() != 0
+        ||
+        (opcode & 0xFCu) != 0x60u
+    )
+    {
+        return 0;
+    }
+
+    ++g_b13531_flatrect_hits;
+
+    if (w <= 0 || h <= 0)
+    {
+        return 1;
+    }
+
+    int x0 = x;
+    int y0 = y;
+    int x1 = x + w;
+    int y1 = y + h;
+
+    if (x0 < g_draw_x1) x0 = g_draw_x1;
+    if (y0 < g_draw_y1) y0 = g_draw_y1;
+    if (x1 > g_draw_x2 + 1) x1 = g_draw_x2 + 1;
+    if (y1 > g_draw_y2 + 1) y1 = g_draw_y2 + 1;
+
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > 1024) x1 = 1024;
+    if (y1 > 512) y1 = 512;
+
+    if (x0 >= x1 || y0 >= y1)
+    {
+        return 1;
+    }
+
+    uint32_t span =
+        (uint32_t)(x1 - x0);
+
+    g_b13531_flatrect_pixels +=
+        (uint64_t)span * (uint64_t)(y1 - y0);
+
+    int semi =
+        (opcode & 0x02u) != 0;
+
+    int semi_mode =
+        (g_texpage >> 5) & 3u;
+
+    if (!semi && !g_mask_check)
+    {
+        uint16_t out =
+            g_mask_set
+                ? (uint16_t)(color | 0x8000u)
+                : color;
+
+        for (int py = y0; py < y1; ++py)
+        {
+            b129_fill_span(
+                g_vram + (size_t)py * 1024u + (size_t)x0,
+                span,
+                out
+            );
+        }
+    }
+    else
+    {
+        /*
+         * 62h on the Palace map normally uses ABR mode 0.  Its blend can
+         * be expressed directly on packed RGB555 without three extracts,
+         * three adds and three repacks per pixel.
+         */
+        uint16_t front_half =
+            (uint16_t)((color & 0x7BDEu) >> 1);
+
+        for (int py = y0; py < y1; ++py)
+        {
+            uint16_t *dst =
+                g_vram + (size_t)py * 1024u + (size_t)x0;
+
+            for (uint32_t px = 0u; px < span; ++px, ++dst)
+            {
+                uint16_t back =
+                    *dst;
+
+                if (
+                    g_mask_check
+                    &&
+                    (back & 0x8000u)
+                )
+                {
+                    continue;
+                }
+
+                uint16_t out =
+                    color;
+
+                if (semi)
+                {
+                    if (semi_mode == 0)
+                    {
+                        out =
+                            (uint16_t)(
+                                ((back & 0x7BDEu) >> 1)
+                                +
+                                front_half
+                                +
+                                (back & color & 0x0421u)
+                            );
+                    }
+                    else
+                    {
+                        out =
+                            b124_blend(
+                                back,
+                                color,
+                                semi_mode
+                            );
+                    }
+                }
+
+                if (g_mask_set)
+                {
+                    out |=
+                        0x8000u;
+                }
+
+                *dst =
+                    out;
+            }
+        }
+    }
+
+    gpu_vram_dirty_mark_rect(
+        x0,
+        y0,
+        x1 - x0,
+        y1 - y0
+    );
+
+    return 1;
+}
+
+
 static int b129_try_fill_rect(
     int x,
     int y,
@@ -4167,15 +4333,30 @@ static void execute_command(void)
 
         if (!textured)
         {
-            sw_draw_flat_rect(
-                x,
-                y,
-                w,
-                h,
+            uint16_t flat_color =
                 rgb24_to_555(
                     g_cmd[0]
+                );
+
+            if (
+                !b13531_try_flat_rect(
+                    opcode,
+                    x,
+                    y,
+                    w,
+                    h,
+                    flat_color
                 )
-            );
+            )
+            {
+                sw_draw_flat_rect(
+                    x,
+                    y,
+                    w,
+                    h,
+                    flat_color
+                );
+            }
         }
         else
         {
@@ -4702,6 +4883,12 @@ void fm_gpu_init(
         0u;
 
     g_b129_fill_max_pixels =
+        0u;
+
+    g_b13531_flatrect_hits =
+        0u;
+
+    g_b13531_flatrect_pixels =
         0u;
 
     g_fill_suppressed = 0;
