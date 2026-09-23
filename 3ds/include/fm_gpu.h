@@ -129,6 +129,19 @@ void fm_gpu_b122_totals(
  */
 void fm_gpu_b13532_profile_reset(void);
 
+/*
+ * B135.34 - split sampled GP0(34h) cost into triangle setup versus
+ * scan-conversion/pixel raster time for the current DMA2 list.
+ */
+void fm_gpu_b13534_profile(
+    uint64_t *setup_us,
+    uint64_t *raster_us,
+    uint32_t *samples,
+    uint32_t *tri_calls,
+    uint32_t *fast_hits,
+    uint64_t *fast_pixels
+);
+
 
 /*
  * ============================================================
