@@ -26,6 +26,9 @@ extern void fm_gpu_last_fill_info(
 extern void fm_gpu_b42_set_preserve_background_clears(int enabled);
 extern int fm_gpu_b42_get_preserve_background_clears(void);
 
+/* Generated PSXRecomp dispatch introspection (B135.27 diagnostic). */
+extern int psx_game_is_function_entry(uint32_t addr);
+
 
 /*
  * B100 - diagnostic leger de l'environnement de dessin PS1.
@@ -15153,7 +15156,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.26-34D7C-NATIVE (BASE B131)\n");
+            printf("BUILD B135.27-ENTRY-DIAG (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15333,6 +15336,14 @@ int main(void)
                     (unsigned long)g_b13516_exit_weight[0],
                     (unsigned long)g_b13516_exit_pc[1],
                     (unsigned long)g_b13516_exit_weight[1]
+                );
+
+                printf(
+                    "ENTRY 34D7C/D30/A14/57B80:%d/%d/%d/%d\n",
+                    psx_game_is_function_entry(0x80034D7Cu),
+                    psx_game_is_function_entry(0x80034D30u),
+                    psx_game_is_function_entry(0x80034A14u),
+                    psx_game_is_function_entry(0x80057B80u)
                 );
 
                 g_b1359_prev_swap = g_b131_swap_count;
