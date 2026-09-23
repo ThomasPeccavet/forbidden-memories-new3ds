@@ -13865,9 +13865,15 @@ int main(void)
                     )
                     ||
                     (
-                        phys >= 0x0008A0D8u
+                        phys >= 0x00089D60u
                         &&
                         phys < 0x0008A204u
+                    )
+                    ||
+                    (
+                        phys >= 0x0005721Cu
+                        &&
+                        phys < 0x00058860u
                     );
 
 #if defined(NDEBUG)
@@ -13882,8 +13888,10 @@ int main(void)
                             0x00035AC8u,
                             0x0004D260u,
                             0x0004D5B8u,
-                            0x0008A0D8u,
+                            0x00089D60u,
                             0x0008A204u,
+                            0x0005721Cu,
+                            0x00058860u,
                             512u,
                             &b13514_chain_count
                         );
@@ -13913,8 +13921,10 @@ int main(void)
                                 0x00035AC8u,
                                 0x0004D260u,
                                 0x0004D5B8u,
-                                0x0008A0D8u,
+                                0x00089D60u,
                                 0x0008A204u,
+                                0x0005721Cu,
+                                0x00058860u,
                                 512u,
                                 &b13514_chain_count
                             );
@@ -15079,7 +15089,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.22-A1C0-CHAIN (BASE B131)\n");
+            printf("BUILD B135.23-HOT-EXIT-CHAIN (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15174,7 +15184,7 @@ int main(void)
                 );
 
                 printf(
-                    "CHAIN3 e/d/m:%lu/%llu/%lu samples:%lu\n",
+                    "CHAIN4 e/d/m:%lu/%llu/%lu samples:%lu\n",
                     (unsigned long)g_b13514_chain_entries,
                     (unsigned long long)g_b13514_chain_dispatches,
                     (unsigned long)g_b13514_chain_max,
