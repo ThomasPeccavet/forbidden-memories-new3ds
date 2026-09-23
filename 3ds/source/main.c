@@ -15156,7 +15156,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.29-DMA2-TIME (BASE B131)\n");
+            printf("BUILD B135.30-GPU-SAMPLE (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15407,6 +15407,30 @@ int main(void)
                 (unsigned long)b130_dma.dma2_last_empty_ot_nodes,
                 (unsigned long)b130_dma.dma2_empty_fast_max
             );
+
+            {
+                FMGpuOpcodePerf hot0 = {0};
+                FMGpuOpcodePerf hot1 = {0};
+
+                fm_gpu_b122_rank(0u, &hot0);
+                fm_gpu_b122_rank(1u, &hot1);
+
+                printf(
+                    "GHOT %02X c/t/m:%lu/%llu/%lu\n",
+                    (unsigned)hot0.opcode,
+                    (unsigned long)hot0.calls,
+                    (unsigned long long)hot0.total_us,
+                    (unsigned long)hot0.max_us
+                );
+
+                printf(
+                    "GHOT2 %02X c/t/m:%lu/%llu/%lu\n",
+                    (unsigned)hot1.opcode,
+                    (unsigned long)hot1.calls,
+                    (unsigned long long)hot1.total_us,
+                    (unsigned long)hot1.max_us
+                );
+            }
 
             /*
              * Les anciens diagnostics restent dans le fichier pour
