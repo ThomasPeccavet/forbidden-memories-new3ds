@@ -172,44 +172,9 @@ static uint32_t g_b13534_samples = 0u;
 static uint32_t g_b13534_tri_calls = 0u;
 
 /*
- * B135.35 - exact RGB555 modulation LUTs for the GT34 inner loop.
- *
- * Each channel is only 5 bits, and Gouraud modulation is also 5 bits after
- * the PS1 color conversion.  Three 32x32 tables replace three multiplies,
- * shifts and saturation tests per visible texel.  6 KiB total, L1 friendly.
+ * B135.35/B135.36 - texture-depth distribution for the Palace GT34 path.
  */
-static uint16_t g_b13535_mod_r[32][32];
-static uint16_t g_b13535_mod_g[32][32];
-static uint16_t g_b13535_mod_b[32][32];
-
 static uint32_t g_b13535_depth_hits[3] = {0u,0u,0u};
-
-static void b13535_init_mod_lut(void)
-{
-    for (unsigned mod = 0u; mod < 32u; ++mod)
-    {
-        for (unsigned tex = 0u; tex < 32u; ++tex)
-        {
-            unsigned v =
-                (tex * mod) >> 4;
-
-            if (v > 31u)
-            {
-                v = 31u;
-            }
-
-            g_b13535_mod_r[mod][tex] =
-                (uint16_t)v;
-
-            g_b13535_mod_g[mod][tex] =
-                (uint16_t)(v << 5);
-
-            g_b13535_mod_b[mod][tex] =
-                (uint16_t)(v << 10);
-        }
-    }
-}
-
 
 static uint64_t b122_ticks_to_us(uint64_t ticks)
 {
@@ -2007,52 +1972,171 @@ static void b13511_shaded_textured_triangle(
             ? svcGetSystemTick()
             : 0u;
 
+    /*
+     * B135.36 - incremental scan conversion.
+     *
+     * The scene contains ~900 tiny GT34 triangles.  Re-evaluating five plane
+     * equations with ten signed 64-bit products on every scanline costs more
+     * than the few pixels in many spans.  Keep edge X and the five attribute
+     * planes incremental in Y.  Each visible row now needs only five native
+     * 32-bit MULs (attribute dx * clipped sx), plus ADDs.
+     */
+    int yrel =
+        ys - y0;
+
+    int32_t xl_fp =
+        (int32_t)(
+            ((int64_t)x0 << 16)
+            +
+            (int64_t)dx_long * yrel
+        );
+
+    int32_t xu_fp =
+        (int32_t)(
+            ((int64_t)x0 << 16)
+            +
+            (int64_t)dx_upper * yrel
+        );
+
+    int32_t xd_fp =
+        (int32_t)(
+            ((int64_t)x1 << 16)
+            +
+            (int64_t)dx_lower * (ys - y1)
+        );
+
+    int32_t u_row =
+        (int32_t)(
+            ((int64_t)u0 << 16)
+            -
+            (int64_t)du_dx * x0
+            +
+            (int64_t)du_dy * yrel
+        );
+
+    int32_t v_row =
+        (int32_t)(
+            ((int64_t)v0 << 16)
+            -
+            (int64_t)dv_dx * x0
+            +
+            (int64_t)dv_dy * yrel
+        );
+
+    int32_t r_row =
+        (int32_t)(
+            ((int64_t)r0 << 16)
+            -
+            (int64_t)dr_dx * x0
+            +
+            (int64_t)dr_dy * yrel
+        );
+
+    int32_t g_row =
+        (int32_t)(
+            ((int64_t)g0 << 16)
+            -
+            (int64_t)dg_dx * x0
+            +
+            (int64_t)dg_dy * yrel
+        );
+
+    int32_t b_row =
+        (int32_t)(
+            ((int64_t)b0 << 16)
+            -
+            (int64_t)db_dx * x0
+            +
+            (int64_t)db_dy * yrel
+        );
+
     for (int y = ys; y < ye; ++y)
     {
-        int32_t xl_fp = ((int32_t)x0 << 16) + dx_long * (y-y0);
         int32_t xs_fp =
             y < y1
-                ? ((int32_t)x0 << 16) + dx_upper * (y-y0)
-                : ((int32_t)x1 << 16) + dx_lower * (y-y1);
+                ? xu_fp
+                : xd_fp;
 
-        int32_t left_fp = xl_fp < xs_fp ? xl_fp : xs_fp;
-        int32_t right_fp = xl_fp < xs_fp ? xs_fp : xl_fp;
+        int32_t left_fp =
+            xl_fp < xs_fp
+                ? xl_fp
+                : xs_fp;
 
-        int sx = left_fp >> 16;
-        int ex = right_fp >> 16;
+        int32_t right_fp =
+            xl_fp < xs_fp
+                ? xs_fp
+                : xl_fp;
+
+        int sx =
+            left_fp >> 16;
+
+        int ex =
+            right_fp >> 16;
 
         if (sx < g_draw_x1) sx = g_draw_x1;
         if (ex > g_draw_x2 + 1) ex = g_draw_x2 + 1;
         if (sx < 0) sx = 0;
         if (ex > 1024) ex = 1024;
-        if (sx >= ex) continue;
+
+        if (sx >= ex)
+        {
+            xl_fp = (int32_t)((uint32_t)xl_fp + (uint32_t)dx_long);
+            xu_fp = (int32_t)((uint32_t)xu_fp + (uint32_t)dx_upper);
+            xd_fp = (int32_t)((uint32_t)xd_fp + (uint32_t)dx_lower);
+
+            u_row = (int32_t)((uint32_t)u_row + (uint32_t)du_dy);
+            v_row = (int32_t)((uint32_t)v_row + (uint32_t)dv_dy);
+            r_row = (int32_t)((uint32_t)r_row + (uint32_t)dr_dy);
+            g_row = (int32_t)((uint32_t)g_row + (uint32_t)dg_dy);
+            b_row = (int32_t)((uint32_t)b_row + (uint32_t)db_dy);
+
+            continue;
+        }
 
         int32_t u_fp =
-            (int32_t)(((int64_t)u0 << 16) +
-                      (int64_t)du_dx * (sx-x0) +
-                      (int64_t)du_dy * (y-y0));
+            (int32_t)(
+                (uint32_t)u_row
+                +
+                (uint32_t)du_dx * (uint32_t)sx
+            );
+
         int32_t v_fp =
-            (int32_t)(((int64_t)v0 << 16) +
-                      (int64_t)dv_dx * (sx-x0) +
-                      (int64_t)dv_dy * (y-y0));
+            (int32_t)(
+                (uint32_t)v_row
+                +
+                (uint32_t)dv_dx * (uint32_t)sx
+            );
 
         int32_t r_fp =
-            (int32_t)(((int64_t)r0 << 16) +
-                      (int64_t)dr_dx * (sx-x0) +
-                      (int64_t)dr_dy * (y-y0));
+            (int32_t)(
+                (uint32_t)r_row
+                +
+                (uint32_t)dr_dx * (uint32_t)sx
+            );
+
         int32_t g_fp =
-            (int32_t)(((int64_t)g0 << 16) +
-                      (int64_t)dg_dx * (sx-x0) +
-                      (int64_t)dg_dy * (y-y0));
+            (int32_t)(
+                (uint32_t)g_row
+                +
+                (uint32_t)dg_dx * (uint32_t)sx
+            );
+
         int32_t b_fp =
-            (int32_t)(((int64_t)b0 << 16) +
-                      (int64_t)db_dx * (sx-x0) +
-                      (int64_t)db_dy * (y-y0));
+            (int32_t)(
+                (uint32_t)b_row
+                +
+                (uint32_t)db_dx * (uint32_t)sx
+            );
 
         uint16_t *dst =
-            g_vram + (size_t)y * 1024u + (size_t)sx;
+            g_vram
+            +
+            (size_t)y * 1024u
+            +
+            (size_t)sx;
 
-        g_b125_pixels += (uint64_t)(ex-sx);
+        g_b125_pixels +=
+            (uint64_t)(ex - sx);
 
         if (b13533_fast)
         {
@@ -2060,8 +2144,10 @@ static void b13511_shaded_textured_triangle(
                 (uint64_t)(ex - sx);
 
             /*
-             * B135.35: texture depth is invariant for the whole primitive.
-             * Keep it outside the pixel loop, and use exact channel LUTs.
+             * B135.36: texture depth is invariant for the whole primitive.
+             * Keep it outside the pixel loop.  B135.35's 6 KiB modulation
+             * LUT regressed on ARM11 due to extra cache loads, so modulation
+             * returns to integer MULs while scanline setup is made incremental.
              */
             if (texctx.depth == 0u)
             {
@@ -2110,12 +2196,27 @@ static void b13511_shaded_textured_triangle(
                         if ((unsigned)mg > 31u) mg = mg < 0 ? 0 : 31;
                         if ((unsigned)mb > 31u) mb = mb < 0 ? 0 : 31;
 
+                        int rr =
+                            ((int)b13535_clut_r[ci] * mr) >> 4;
+
+                        int gg =
+                            ((int)b13535_clut_g[ci] * mg) >> 4;
+
+                        int bb =
+                            ((int)b13535_clut_b[ci] * mb) >> 4;
+
+                        if (rr > 31) rr = 31;
+                        if (gg > 31) gg = 31;
+                        if (bb > 31) bb = 31;
+
                         *dst =
-                            g_b13535_mod_r[mr][b13535_clut_r[ci]]
-                            |
-                            g_b13535_mod_g[mg][b13535_clut_g[ci]]
-                            |
-                            g_b13535_mod_b[mb][b13535_clut_b[ci]];
+                            (uint16_t)(
+                                rr
+                                |
+                                (gg << 5)
+                                |
+                                (bb << 10)
+                            );
                     }
 
                     u_fp += du_dx;
@@ -2167,12 +2268,27 @@ static void b13511_shaded_textured_triangle(
                         if ((unsigned)mg > 31u) mg = mg < 0 ? 0 : 31;
                         if ((unsigned)mb > 31u) mb = mb < 0 ? 0 : 31;
 
+                        int rr =
+                            ((int)(texel & 31u) * mr) >> 4;
+
+                        int gg =
+                            ((int)((texel >> 5) & 31u) * mg) >> 4;
+
+                        int bb =
+                            ((int)((texel >> 10) & 31u) * mb) >> 4;
+
+                        if (rr > 31) rr = 31;
+                        if (gg > 31) gg = 31;
+                        if (bb > 31) bb = 31;
+
                         *dst =
-                            g_b13535_mod_r[mr][texel & 31u]
-                            |
-                            g_b13535_mod_g[mg][(texel >> 5) & 31u]
-                            |
-                            g_b13535_mod_b[mb][(texel >> 10) & 31u];
+                            (uint16_t)(
+                                rr
+                                |
+                                (gg << 5)
+                                |
+                                (bb << 10)
+                            );
                     }
 
                     u_fp += du_dx;
@@ -2206,12 +2322,27 @@ static void b13511_shaded_textured_triangle(
                         if ((unsigned)mg > 31u) mg = mg < 0 ? 0 : 31;
                         if ((unsigned)mb > 31u) mb = mb < 0 ? 0 : 31;
 
+                        int rr =
+                            ((int)(texel & 31u) * mr) >> 4;
+
+                        int gg =
+                            ((int)((texel >> 5) & 31u) * mg) >> 4;
+
+                        int bb =
+                            ((int)((texel >> 10) & 31u) * mb) >> 4;
+
+                        if (rr > 31) rr = 31;
+                        if (gg > 31) gg = 31;
+                        if (bb > 31) bb = 31;
+
                         *dst =
-                            g_b13535_mod_r[mr][texel & 31u]
-                            |
-                            g_b13535_mod_g[mg][(texel >> 5) & 31u]
-                            |
-                            g_b13535_mod_b[mb][(texel >> 10) & 31u];
+                            (uint16_t)(
+                                rr
+                                |
+                                (gg << 5)
+                                |
+                                (bb << 10)
+                            );
                     }
 
                     u_fp += du_dx;
@@ -2259,6 +2390,16 @@ static void b13511_shaded_textured_triangle(
                 b_fp += db_dx;
             }
         }
+
+        xl_fp = (int32_t)((uint32_t)xl_fp + (uint32_t)dx_long);
+        xu_fp = (int32_t)((uint32_t)xu_fp + (uint32_t)dx_upper);
+        xd_fp = (int32_t)((uint32_t)xd_fp + (uint32_t)dx_lower);
+
+        u_row = (int32_t)((uint32_t)u_row + (uint32_t)du_dy);
+        v_row = (int32_t)((uint32_t)v_row + (uint32_t)dv_dy);
+        r_row = (int32_t)((uint32_t)r_row + (uint32_t)dr_dy);
+        g_row = (int32_t)((uint32_t)g_row + (uint32_t)dg_dy);
+        b_row = (int32_t)((uint32_t)b_row + (uint32_t)db_dy);
     }
 
     if (g_b13534_sample_active)
@@ -5075,8 +5216,6 @@ void fm_gpu_init(
     uint16_t *vram
 )
 {
-    b13535_init_mod_lut();
-
     g_vram =
         vram;
 
