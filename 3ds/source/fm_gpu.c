@@ -1907,32 +1907,17 @@ static void b13511_shaded_textured_triangle(
         (texctx.mask_x | texctx.mask_y) == 0u;
 
     uint16_t b13533_clut[256];
-    uint8_t b13535_clut_r[16];
-    uint8_t b13535_clut_g[16];
-    uint8_t b13535_clut_b[16];
 
     if (b13533_fast && texctx.depth == 0u)
     {
         for (unsigned i = 0u; i < 16u; ++i)
         {
-            uint16_t texel =
+            b13533_clut[i] =
                 g_vram[
                     ((unsigned)texctx.cly & 511u) * 1024u
                     +
                     (((unsigned)texctx.clx + i) & 1023u)
                 ];
-
-            b13533_clut[i] =
-                texel;
-
-            b13535_clut_r[i] =
-                (uint8_t)(texel & 31u);
-
-            b13535_clut_g[i] =
-                (uint8_t)((texel >> 5) & 31u);
-
-            b13535_clut_b[i] =
-                (uint8_t)((texel >> 10) & 31u);
         }
     }
     else if (b13533_fast && texctx.depth == 1u)
@@ -1960,6 +1945,15 @@ static void b13511_shaded_textured_triangle(
         ++g_b13535_depth_hits[d];
     }
 
+    /*
+     * B135.37: accumulate debug pixel counters locally and publish once per
+     * triangle.  The old path performed two 64-bit global read/modify/writes
+     * on every scanline, which is disproportionately expensive for the ~900
+     * tiny Palace triangles.
+     */
+    uint32_t b13537_pixels = 0u;
+    uint32_t b13537_fast_pixels = 0u;
+
     int ys = y0;
     int ye = y2;
     if (ys < g_draw_y1) ys = g_draw_y1;
@@ -1972,192 +1966,73 @@ static void b13511_shaded_textured_triangle(
             ? svcGetSystemTick()
             : 0u;
 
-    /*
-     * B135.36 - incremental scan conversion.
-     *
-     * The scene contains ~900 tiny GT34 triangles.  Re-evaluating five plane
-     * equations with ten signed 64-bit products on every scanline costs more
-     * than the few pixels in many spans.  Keep edge X and the five attribute
-     * planes incremental in Y.  Each visible row now needs only five native
-     * 32-bit MULs (attribute dx * clipped sx), plus ADDs.
-     */
-    int yrel =
-        ys - y0;
-
-    int32_t xl_fp =
-        (int32_t)(
-            ((int64_t)x0 << 16)
-            +
-            (int64_t)dx_long * yrel
-        );
-
-    int32_t xu_fp =
-        (int32_t)(
-            ((int64_t)x0 << 16)
-            +
-            (int64_t)dx_upper * yrel
-        );
-
-    int32_t xd_fp =
-        (int32_t)(
-            ((int64_t)x1 << 16)
-            +
-            (int64_t)dx_lower * (ys - y1)
-        );
-
-    int32_t u_row =
-        (int32_t)(
-            ((int64_t)u0 << 16)
-            -
-            (int64_t)du_dx * x0
-            +
-            (int64_t)du_dy * yrel
-        );
-
-    int32_t v_row =
-        (int32_t)(
-            ((int64_t)v0 << 16)
-            -
-            (int64_t)dv_dx * x0
-            +
-            (int64_t)dv_dy * yrel
-        );
-
-    int32_t r_row =
-        (int32_t)(
-            ((int64_t)r0 << 16)
-            -
-            (int64_t)dr_dx * x0
-            +
-            (int64_t)dr_dy * yrel
-        );
-
-    int32_t g_row =
-        (int32_t)(
-            ((int64_t)g0 << 16)
-            -
-            (int64_t)dg_dx * x0
-            +
-            (int64_t)dg_dy * yrel
-        );
-
-    int32_t b_row =
-        (int32_t)(
-            ((int64_t)b0 << 16)
-            -
-            (int64_t)db_dx * x0
-            +
-            (int64_t)db_dy * yrel
-        );
-
     for (int y = ys; y < ye; ++y)
     {
+        int32_t xl_fp = ((int32_t)x0 << 16) + dx_long * (y-y0);
         int32_t xs_fp =
             y < y1
-                ? xu_fp
-                : xd_fp;
+                ? ((int32_t)x0 << 16) + dx_upper * (y-y0)
+                : ((int32_t)x1 << 16) + dx_lower * (y-y1);
 
-        int32_t left_fp =
-            xl_fp < xs_fp
-                ? xl_fp
-                : xs_fp;
+        int32_t left_fp = xl_fp < xs_fp ? xl_fp : xs_fp;
+        int32_t right_fp = xl_fp < xs_fp ? xs_fp : xl_fp;
 
-        int32_t right_fp =
-            xl_fp < xs_fp
-                ? xs_fp
-                : xl_fp;
-
-        int sx =
-            left_fp >> 16;
-
-        int ex =
-            right_fp >> 16;
+        int sx = left_fp >> 16;
+        int ex = right_fp >> 16;
 
         if (sx < g_draw_x1) sx = g_draw_x1;
         if (ex > g_draw_x2 + 1) ex = g_draw_x2 + 1;
         if (sx < 0) sx = 0;
         if (ex > 1024) ex = 1024;
-
-        if (sx >= ex)
-        {
-            xl_fp = (int32_t)((uint32_t)xl_fp + (uint32_t)dx_long);
-            xu_fp = (int32_t)((uint32_t)xu_fp + (uint32_t)dx_upper);
-            xd_fp = (int32_t)((uint32_t)xd_fp + (uint32_t)dx_lower);
-
-            u_row = (int32_t)((uint32_t)u_row + (uint32_t)du_dy);
-            v_row = (int32_t)((uint32_t)v_row + (uint32_t)dv_dy);
-            r_row = (int32_t)((uint32_t)r_row + (uint32_t)dr_dy);
-            g_row = (int32_t)((uint32_t)g_row + (uint32_t)dg_dy);
-            b_row = (int32_t)((uint32_t)b_row + (uint32_t)db_dy);
-
-            continue;
-        }
+        if (sx >= ex) continue;
 
         int32_t u_fp =
-            (int32_t)(
-                (uint32_t)u_row
-                +
-                (uint32_t)du_dx * (uint32_t)sx
-            );
-
+            (int32_t)(((int64_t)u0 << 16) +
+                      (int64_t)du_dx * (sx-x0) +
+                      (int64_t)du_dy * (y-y0));
         int32_t v_fp =
-            (int32_t)(
-                (uint32_t)v_row
-                +
-                (uint32_t)dv_dx * (uint32_t)sx
-            );
+            (int32_t)(((int64_t)v0 << 16) +
+                      (int64_t)dv_dx * (sx-x0) +
+                      (int64_t)dv_dy * (y-y0));
 
         int32_t r_fp =
-            (int32_t)(
-                (uint32_t)r_row
-                +
-                (uint32_t)dr_dx * (uint32_t)sx
-            );
-
+            (int32_t)(((int64_t)r0 << 16) +
+                      (int64_t)dr_dx * (sx-x0) +
+                      (int64_t)dr_dy * (y-y0));
         int32_t g_fp =
-            (int32_t)(
-                (uint32_t)g_row
-                +
-                (uint32_t)dg_dx * (uint32_t)sx
-            );
-
+            (int32_t)(((int64_t)g0 << 16) +
+                      (int64_t)dg_dx * (sx-x0) +
+                      (int64_t)dg_dy * (y-y0));
         int32_t b_fp =
-            (int32_t)(
-                (uint32_t)b_row
-                +
-                (uint32_t)db_dx * (uint32_t)sx
-            );
+            (int32_t)(((int64_t)b0 << 16) +
+                      (int64_t)db_dx * (sx-x0) +
+                      (int64_t)db_dy * (y-y0));
 
         uint16_t *dst =
-            g_vram
-            +
-            (size_t)y * 1024u
-            +
-            (size_t)sx;
+            g_vram + (size_t)y * 1024u + (size_t)sx;
 
-        g_b125_pixels +=
-            (uint64_t)(ex - sx);
+        uint32_t b13537_span =
+            (uint32_t)(ex - sx);
+
+        b13537_pixels +=
+            b13537_span;
 
         if (b13533_fast)
         {
-            g_b13533_34_fast_pixels +=
-                (uint64_t)(ex - sx);
+            b13537_fast_pixels +=
+                b13537_span;
 
-            /*
-             * B135.36: texture depth is invariant for the whole primitive.
-             * Keep it outside the pixel loop.  B135.35's 6 KiB modulation
-             * LUT regressed on ARM11 due to extra cache loads, so modulation
-             * returns to integer MULs while scanline setup is made incremental.
-             */
-            if (texctx.depth == 0u)
+            int last_key = -1;
+            uint16_t packed = 0u;
+
+            for (int x = sx; x < ex; ++x, ++dst)
             {
-                int last_key = -1;
-                uint16_t packed = 0u;
+                int tu = (u_fp >> 16) & 0xFF;
+                int tv = (v_fp >> 16) & 0xFF;
+                uint16_t texel;
 
-                for (int x = sx; x < ex; ++x, ++dst)
+                if (texctx.depth == 0u)
                 {
-                    int tu = (u_fp >> 16) & 0xFF;
-                    int tv = (v_fp >> 16) & 0xFF;
                     int key =
                         (tv << 6)
                         |
@@ -2176,65 +2051,13 @@ static void b13511_shaded_textured_triangle(
                             key;
                     }
 
-                    unsigned ci =
-                        (unsigned)(
-                            (packed >> ((tu & 3) * 4))
-                            &
-                            0x0F
-                        );
-
-                    uint16_t texel =
-                        b13533_clut[ci];
-
-                    if (texel != 0u)
-                    {
-                        int mr = r_fp >> 16;
-                        int mg = g_fp >> 16;
-                        int mb = b_fp >> 16;
-
-                        if ((unsigned)mr > 31u) mr = mr < 0 ? 0 : 31;
-                        if ((unsigned)mg > 31u) mg = mg < 0 ? 0 : 31;
-                        if ((unsigned)mb > 31u) mb = mb < 0 ? 0 : 31;
-
-                        int rr =
-                            ((int)b13535_clut_r[ci] * mr) >> 4;
-
-                        int gg =
-                            ((int)b13535_clut_g[ci] * mg) >> 4;
-
-                        int bb =
-                            ((int)b13535_clut_b[ci] * mb) >> 4;
-
-                        if (rr > 31) rr = 31;
-                        if (gg > 31) gg = 31;
-                        if (bb > 31) bb = 31;
-
-                        *dst =
-                            (uint16_t)(
-                                rr
-                                |
-                                (gg << 5)
-                                |
-                                (bb << 10)
-                            );
-                    }
-
-                    u_fp += du_dx;
-                    v_fp += dv_dx;
-                    r_fp += dr_dx;
-                    g_fp += dg_dx;
-                    b_fp += db_dx;
+                    texel =
+                        b13533_clut[
+                            (packed >> ((tu & 3) * 4)) & 0x0F
+                        ];
                 }
-            }
-            else if (texctx.depth == 1u)
-            {
-                int last_key = -1;
-                uint16_t packed = 0u;
-
-                for (int x = sx; x < ex; ++x, ++dst)
+                else if (texctx.depth == 1u)
                 {
-                    int tu = (u_fp >> 16) & 0xFF;
-                    int tv = (v_fp >> 16) & 0xFF;
                     int key =
                         (tv << 7)
                         |
@@ -2253,104 +2076,59 @@ static void b13511_shaded_textured_triangle(
                             key;
                     }
 
-                    uint16_t texel =
+                    texel =
                         b13533_clut[
                             (packed >> ((tu & 1) * 8)) & 0xFF
                         ];
-
-                    if (texel != 0u)
-                    {
-                        int mr = r_fp >> 16;
-                        int mg = g_fp >> 16;
-                        int mb = b_fp >> 16;
-
-                        if ((unsigned)mr > 31u) mr = mr < 0 ? 0 : 31;
-                        if ((unsigned)mg > 31u) mg = mg < 0 ? 0 : 31;
-                        if ((unsigned)mb > 31u) mb = mb < 0 ? 0 : 31;
-
-                        int rr =
-                            ((int)(texel & 31u) * mr) >> 4;
-
-                        int gg =
-                            ((int)((texel >> 5) & 31u) * mg) >> 4;
-
-                        int bb =
-                            ((int)((texel >> 10) & 31u) * mb) >> 4;
-
-                        if (rr > 31) rr = 31;
-                        if (gg > 31) gg = 31;
-                        if (bb > 31) bb = 31;
-
-                        *dst =
-                            (uint16_t)(
-                                rr
-                                |
-                                (gg << 5)
-                                |
-                                (bb << 10)
-                            );
-                    }
-
-                    u_fp += du_dx;
-                    v_fp += dv_dx;
-                    r_fp += dr_dx;
-                    g_fp += dg_dx;
-                    b_fp += db_dx;
                 }
-            }
-            else
-            {
-                for (int x = sx; x < ex; ++x, ++dst)
+                else
                 {
-                    int tu = (u_fp >> 16) & 0xFF;
-                    int tv = (v_fp >> 16) & 0xFF;
-
-                    uint16_t texel =
+                    texel =
                         g_vram[
                             (size_t)(texctx.tpy + tv) * 1024u
                             +
                             (size_t)((texctx.tpx + tu) & 1023)
                         ];
-
-                    if (texel != 0u)
-                    {
-                        int mr = r_fp >> 16;
-                        int mg = g_fp >> 16;
-                        int mb = b_fp >> 16;
-
-                        if ((unsigned)mr > 31u) mr = mr < 0 ? 0 : 31;
-                        if ((unsigned)mg > 31u) mg = mg < 0 ? 0 : 31;
-                        if ((unsigned)mb > 31u) mb = mb < 0 ? 0 : 31;
-
-                        int rr =
-                            ((int)(texel & 31u) * mr) >> 4;
-
-                        int gg =
-                            ((int)((texel >> 5) & 31u) * mg) >> 4;
-
-                        int bb =
-                            ((int)((texel >> 10) & 31u) * mb) >> 4;
-
-                        if (rr > 31) rr = 31;
-                        if (gg > 31) gg = 31;
-                        if (bb > 31) bb = 31;
-
-                        *dst =
-                            (uint16_t)(
-                                rr
-                                |
-                                (gg << 5)
-                                |
-                                (bb << 10)
-                            );
-                    }
-
-                    u_fp += du_dx;
-                    v_fp += dv_dx;
-                    r_fp += dr_dx;
-                    g_fp += dg_dx;
-                    b_fp += db_dx;
                 }
+
+                if (texel != 0u)
+                {
+                    int mr = r_fp >> 16;
+                    int mg = g_fp >> 16;
+                    int mb = b_fp >> 16;
+
+                    if ((unsigned)mr > 31u) mr = mr < 0 ? 0 : 31;
+                    if ((unsigned)mg > 31u) mg = mg < 0 ? 0 : 31;
+                    if ((unsigned)mb > 31u) mb = mb < 0 ? 0 : 31;
+
+                    int rr =
+                        (((int)(texel & 31u)) * mr) >> 4;
+
+                    int gg =
+                        (((int)((texel >> 5) & 31u)) * mg) >> 4;
+
+                    int bb =
+                        (((int)((texel >> 10) & 31u)) * mb) >> 4;
+
+                    if (rr > 31) rr = 31;
+                    if (gg > 31) gg = 31;
+                    if (bb > 31) bb = 31;
+
+                    *dst =
+                        (uint16_t)(
+                            rr
+                            |
+                            (gg << 5)
+                            |
+                            (bb << 10)
+                        );
+                }
+
+                u_fp += du_dx;
+                v_fp += dv_dx;
+                r_fp += dr_dx;
+                g_fp += dg_dx;
+                b_fp += db_dx;
             }
         }
         else
@@ -2390,16 +2168,15 @@ static void b13511_shaded_textured_triangle(
                 b_fp += db_dx;
             }
         }
+    }
 
-        xl_fp = (int32_t)((uint32_t)xl_fp + (uint32_t)dx_long);
-        xu_fp = (int32_t)((uint32_t)xu_fp + (uint32_t)dx_upper);
-        xd_fp = (int32_t)((uint32_t)xd_fp + (uint32_t)dx_lower);
+    g_b125_pixels +=
+        (uint64_t)b13537_pixels;
 
-        u_row = (int32_t)((uint32_t)u_row + (uint32_t)du_dy);
-        v_row = (int32_t)((uint32_t)v_row + (uint32_t)dv_dy);
-        r_row = (int32_t)((uint32_t)r_row + (uint32_t)dr_dy);
-        g_row = (int32_t)((uint32_t)g_row + (uint32_t)dg_dy);
-        b_row = (int32_t)((uint32_t)b_row + (uint32_t)db_dy);
+    if (b13533_fast)
+    {
+        g_b13533_34_fast_pixels +=
+            (uint64_t)b13537_fast_pixels;
     }
 
     if (g_b13534_sample_active)
@@ -3531,78 +3308,14 @@ static void execute_command(void)
     if (opcode == 0x2Eu) ++g_b126_seen_2e;
     if (opcode == 0x3Au) ++g_b126_seen_3a;
 
-    ++g_b46_cmd_serial;
-
-    if (opcode == 0xE1u)
-    {
-        g_b46_last_e1_serial = g_b46_cmd_serial;
-        g_b46_last_e1_value = (uint16_t)(g_cmd[0] & 0x07FFu);
-    }
-
-    if (opcode == 0x02u && g_cmd_need >= 3u)
-    {
-        int fx = (int)(g_cmd[1] & 0x3FFu);
-        int fy = (int)((g_cmd[1] >> 16) & 0x1FFu);
-        int fw = (int)(g_cmd[2] & 0x3FFu);
-        int fh = (int)((g_cmd[2] >> 16) & 0x1FFu);
-
-        if (fx == 0 && fy == 0 && fw == 320 && fh == 256)
-        {
-            g_b46_last_fill_serial = g_b46_cmd_serial;
-        }
-    }
-
-    if (opcode == 0x64u && g_cmd_need >= 4u)
-    {
-        int sx = coord_x(g_cmd[1]) + g_offset_x;
-        int sy = coord_y(g_cmd[1]) + g_offset_y;
-        int su = (int)(g_cmd[2] & 0xFFu);
-        int sv = (int)((g_cmd[2] >> 8) & 0xFFu);
-        int sw = (int)(g_cmd[3] & 0xFFFFu);
-        int sh = (int)((g_cmd[3] >> 16) & 0xFFFFu);
-
-        if (sx == 17 && sy == 17 && su == 136 && sv == 64 && sw == 72 && sh == 72)
-        {
-            ++g_b46_sprite_hits;
-            g_b46_sprite_serial = g_b46_cmd_serial;
-            g_b46_sprite_e1 = g_b46_last_e1_value;
-            g_b46_sprite_texpage = g_texpage;
-            g_b46_sprite_off_x = g_offset_x;
-            g_b46_sprite_off_y = g_offset_y;
-
-            g_b46_sprite_e1_age =
-                g_b46_last_e1_serial != 0u
-                    ? g_b46_cmd_serial - g_b46_last_e1_serial
-                    : 0xFFFFFFFFu;
-
-            g_b46_sprite_fill_age =
-                g_b46_last_fill_serial != 0u
-                    ? g_b46_cmd_serial - g_b46_last_fill_serial
-                    : 0xFFFFFFFFu;
-
-            for (unsigned i = 0; i < 4u; ++i)
-            {
-                g_b46_sprite_cmd[i] = g_cmd[i];
-            }
-        }
-    }
-
-
-    fm_gpu_b29_capture_draw(opcode);
-
-    b44_trace_current_packet(opcode);
-
-    if (
-        opcode >= 0x20u
-        &&
-        opcode <= 0x7Fu
-        &&
-        (g_offset_x != 0 || g_offset_y != 0)
-    )
-    {
-        ++g_b101_offset_draw_packets;
-    }
-
+    /*
+     * B135.37 PERF CLEAN 2
+     *
+     * B29/B44/B46/B101 were bring-up diagnostics.  They used to capture and
+     * classify every draw command (memset/copies/bounds/provenance) even though
+     * their display has been disabled for many builds.  They have no rendering
+     * side effects, so keep them dormant on the hot GP0 path.
+     */
 
     /*
      * --------------------------------------------------------
