@@ -15269,26 +15269,35 @@ int main(void)
                 );
 
                 {
-                    unsigned top1 = 0u;
-                    unsigned top2 = 0u;
+                    unsigned top1 = 8u;
+                    unsigned top2 = 8u;
 
-                    for (unsigned i = 1u; i < 8u; ++i)
+                    for (unsigned i = 0u; i < 8u; ++i)
                     {
                         if (
+                            g_b13525_interp_pc[i] == 0u
+                            ||
+                            g_b13525_interp_ins[i] == 0u
+                        )
+                        {
+                            continue;
+                        }
+
+                        if (
+                            top1 == 8u
+                            ||
                             g_b13525_interp_ins[i]
-                            >
-                            g_b13525_interp_ins[top1]
+                                > g_b13525_interp_ins[top1]
                         )
                         {
                             top2 = top1;
                             top1 = i;
                         }
                         else if (
-                            i != top1
-                            &&
+                            top2 == 8u
+                            ||
                             g_b13525_interp_ins[i]
-                            >
-                            g_b13525_interp_ins[top2]
+                                > g_b13525_interp_ins[top2]
                         )
                         {
                             top2 = i;
@@ -15297,12 +15306,24 @@ int main(void)
 
                     printf(
                         "IRPC top:%06lX/%lu/%llu %06lX/%lu/%llu\n",
-                        (unsigned long)g_b13525_interp_pc[top1],
-                        (unsigned long)g_b13525_interp_hits[top1],
-                        (unsigned long long)g_b13525_interp_ins[top1],
-                        (unsigned long)g_b13525_interp_pc[top2],
-                        (unsigned long)g_b13525_interp_hits[top2],
-                        (unsigned long long)g_b13525_interp_ins[top2]
+                        (unsigned long)(
+                            top1 < 8u ? g_b13525_interp_pc[top1] : 0u
+                        ),
+                        (unsigned long)(
+                            top1 < 8u ? g_b13525_interp_hits[top1] : 0u
+                        ),
+                        (unsigned long long)(
+                            top1 < 8u ? g_b13525_interp_ins[top1] : 0u
+                        ),
+                        (unsigned long)(
+                            top2 < 8u ? g_b13525_interp_pc[top2] : 0u
+                        ),
+                        (unsigned long)(
+                            top2 < 8u ? g_b13525_interp_hits[top2] : 0u
+                        ),
+                        (unsigned long long)(
+                            top2 < 8u ? g_b13525_interp_ins[top2] : 0u
+                        )
                     );
                 }
 
