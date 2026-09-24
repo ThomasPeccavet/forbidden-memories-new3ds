@@ -181,6 +181,17 @@ typedef struct FMRuntimeQuickState
 void fm_runtime_quick_save(FMRuntimeQuickState *out);
 void fm_runtime_quick_load(const FMRuntimeQuickState *in);
 
+/* B135.65 - counters from generated-code dispatch-entry checkpoints. */
+void fm_runtime_b13565_entries(
+    uint32_t *e12c50,
+    uint32_t *e12f70,
+    uint32_t *e41674,
+    uint32_t *e12d60,
+    uint32_t *e85d98,
+    uint32_t *e85d08,
+    uint32_t *last_entry
+);
+
 
 /*
  * ============================================================
