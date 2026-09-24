@@ -3098,6 +3098,110 @@ static int b13557_chain_has_hand_shape(
     return 0;
 }
 
+/*
+ * B135.58 - packet lifetime and exact OT reachability.
+ *
+ * B135.57 proves that 80084978 is called for the hand but the source OT
+ * chain scan does not see a 52x60 packet. Track the two frame-buffer hand
+ * OTs independently, verify the packet immediately after 80084978 returns,
+ * then check whether the source tag can still reach its bucket/packet just
+ * before GsSortOt.
+ */
+typedef struct B13558HandSlot
+{
+    uint32_t ot;
+    uint32_t packet;
+    uint32_t bucket;
+    uint32_t pending;
+    uint32_t ret_hits;
+    uint32_t shape_ok;
+    uint32_t bucket_ok;
+    uint32_t words[6];
+} B13558HandSlot;
+
+static B13558HandSlot g_b13558_hand[2] =
+{
+    {0x800E5FD4u,0u,0u,0u,0u,0u,0u,{0u,0u,0u,0u,0u,0u}},
+    {0x800EB134u,0u,0u,0u,0u,0u,0u,{0u,0u,0u,0u,0u,0u}}
+};
+
+static uint32_t g_b13558_merge_samples = 0u;
+static uint32_t g_b13558_pre_shape = 0u;
+static uint32_t g_b13558_pre_bucket_reach = 0u;
+static uint32_t g_b13558_pre_packet_reach = 0u;
+static uint32_t g_b13558_post_shape = 0u;
+
+static uint32_t g_b13558_last_len = 0u;
+static uint32_t g_b13558_last_org = 0u;
+static uint32_t g_b13558_last_off = 0u;
+static uint32_t g_b13558_last_point = 0u;
+static uint32_t g_b13558_last_tag = 0u;
+static uint32_t g_b13558_last_bucket_word = 0u;
+static uint32_t g_b13558_last_packet_header = 0u;
+static uint32_t g_b13558_last_steps_bucket = 0u;
+static uint32_t g_b13558_last_steps_packet = 0u;
+static uint32_t g_b13558_last_stop = 0u;
+static uint32_t g_b13558_last_stop_header = 0u;
+
+static int b13558_chain_reaches(
+    CPUState *cpu,
+    uint32_t start_tag,
+    uint32_t target,
+    uint32_t *steps_out,
+    uint32_t *stop_out,
+    uint32_t *header_out
+)
+{
+    if (steps_out) *steps_out = 0u;
+    if (stop_out) *stop_out = 0u;
+    if (header_out) *header_out = 0u;
+
+    if (!cpu || start_tag == 0u || target == 0u)
+    {
+        return 0;
+    }
+
+    uint32_t target_phys = target & 0x1FFFFFu;
+    uint32_t node = start_tag;
+
+    for (uint32_t step = 0u; step < 8192u; ++step)
+    {
+        uint32_t phys = node & 0x1FFFFFu;
+
+        if (steps_out) *steps_out = step + 1u;
+
+        if (phys >= 0x00200000u || (phys & 3u) != 0u)
+        {
+            if (stop_out) *stop_out = node;
+            return 0;
+        }
+
+        uint32_t guest = 0x80000000u | phys;
+        uint32_t header = cpu->read_word(guest);
+
+        if (phys == target_phys)
+        {
+            if (stop_out) *stop_out = guest;
+            if (header_out) *header_out = header;
+            return 1;
+        }
+
+        uint32_t next = header & 0x00FFFFFFu;
+
+        if (next & 0x00800000u)
+        {
+            if (stop_out) *stop_out = guest;
+            if (header_out) *header_out = header;
+            return 0;
+        }
+
+        node = 0x80000000u | next;
+    }
+
+    if (stop_out) *stop_out = node;
+    return 0;
+}
+
 static uint32_t g_ra_8111c = 0;
 static uint32_t g_ra_82168 = 0;
 static uint32_t g_ra_8219c = 0;
@@ -3407,6 +3511,65 @@ static void fm_trace_dispatch(
                         packet & 0x1FFFFFFFu;
 
                     ++g_b13556_hand_head;
+
+                    for (uint32_t si = 0u; si < 2u; ++si)
+                    {
+                        if (g_b13558_hand[si].ot == ot)
+                        {
+                            g_b13558_hand[si].packet = packet;
+                            g_b13558_hand[si].bucket = bucket;
+                            g_b13558_hand[si].pending = 1u;
+                            break;
+                        }
+                    }
+                }
+            }
+            break;
+
+        case 0x00042538u:
+            if (cpu)
+            {
+                for (uint32_t si = 0u; si < 2u; ++si)
+                {
+                    B13558HandSlot *hs = &g_b13558_hand[si];
+
+                    if (!hs->pending || hs->packet == 0u)
+                    {
+                        continue;
+                    }
+
+                    hs->pending = 0u;
+                    ++hs->ret_hits;
+
+                    for (uint32_t wi = 0u; wi < 6u; ++wi)
+                    {
+                        hs->words[wi] =
+                            cpu->read_word(hs->packet + wi * 4u);
+                    }
+
+                    if (
+                        (hs->words[0] >> 24) == 5u
+                        &&
+                        (hs->words[1] >> 24) == 0xE1u
+                        &&
+                        ((hs->words[2] >> 24) & 0xFCu) == 0x64u
+                        &&
+                        hs->words[5] == 0x003C0034u
+                    )
+                    {
+                        ++hs->shape_ok;
+                    }
+
+                    uint32_t bw = cpu->read_word(hs->bucket);
+
+                    if (
+                        (bw & 0x00FFFFFFu)
+                        ==
+                        (hs->packet & 0x00FFFFFFu)
+                    )
+                    {
+                        ++hs->bucket_ok;
+                    }
                 }
             }
             break;
@@ -14070,8 +14233,115 @@ int main(void)
                      * keep the corrected OT repair and verified C GsSortOt,
                      * but do not time every phase.
                      */
+                    /*
+                     * B135.58 - inspect the hand source BEFORE any repair.
+                     */
+                    B13558HandSlot *b13558_hs = NULL;
+
+                    for (uint32_t si = 0u; si < 2u; ++si)
+                    {
+                        if (g_b13558_hand[si].ot == src_ot)
+                        {
+                            b13558_hs = &g_b13558_hand[si];
+                            break;
+                        }
+                    }
+
+                    if (b13558_hs)
+                    {
+                        ++g_b13558_merge_samples;
+
+                        g_b13558_last_len =
+                            cpu->read_word(src_ot + 0u);
+                        g_b13558_last_org =
+                            cpu->read_word(src_ot + 4u);
+                        g_b13558_last_off =
+                            cpu->read_word(src_ot + 8u);
+                        g_b13558_last_point =
+                            cpu->read_word(src_ot + 12u);
+                        g_b13558_last_tag =
+                            cpu->read_word(src_ot + 16u);
+
+                        if (b13558_hs->bucket != 0u)
+                        {
+                            g_b13558_last_bucket_word =
+                                cpu->read_word(b13558_hs->bucket);
+                        }
+
+                        if (b13558_hs->packet != 0u)
+                        {
+                            g_b13558_last_packet_header =
+                                cpu->read_word(b13558_hs->packet);
+                        }
+
+                        uint32_t shape_packet = 0u;
+
+                        if (
+                            b13557_chain_has_hand_shape(
+                                cpu,
+                                g_b13558_last_tag,
+                                NULL,
+                                &shape_packet
+                            )
+                        )
+                        {
+                            ++g_b13558_pre_shape;
+                        }
+
+                        uint32_t stop = 0u;
+                        uint32_t stop_header = 0u;
+
+                        if (
+                            b13558_chain_reaches(
+                                cpu,
+                                g_b13558_last_tag,
+                                b13558_hs->bucket,
+                                &g_b13558_last_steps_bucket,
+                                &stop,
+                                &stop_header
+                            )
+                        )
+                        {
+                            ++g_b13558_pre_bucket_reach;
+                        }
+
+                        g_b13558_last_stop = stop;
+                        g_b13558_last_stop_header = stop_header;
+
+                        if (
+                            b13558_chain_reaches(
+                                cpu,
+                                g_b13558_last_tag,
+                                b13558_hs->packet,
+                                &g_b13558_last_steps_packet,
+                                NULL,
+                                NULL
+                            )
+                        )
+                        {
+                            ++g_b13558_pre_packet_reach;
+                        }
+                    }
+
                     fm_repair_ot_sentinel(cpu, src_ot);
                     fm_repair_ot_sentinel(cpu, dst_ot);
+
+                    if (b13558_hs)
+                    {
+                        uint32_t post_shape_packet = 0u;
+
+                        if (
+                            b13557_chain_has_hand_shape(
+                                cpu,
+                                cpu->read_word(src_ot + 16u),
+                                NULL,
+                                &post_shape_packet
+                            )
+                        )
+                        {
+                            ++g_b13558_post_shape;
+                        }
+                    }
 
                     /*
                      * B135.56 - only scan when this GsSortOt consumes the
@@ -15821,7 +16091,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.57-HAND-CHAIN-PROOF (BASE B131)\n");
+            printf("BUILD B135.58-HAND-PACKET-LIFETIME (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -16250,76 +16520,80 @@ int main(void)
                             );
 
                             /*
-                             * B135.57 - compare the generated hand packet
-                             * against the exact source OT, merged destination
-                             * OT and DrawOTag chain.
+                             * B135.58 - exact packet lifetime.
                              */
+                            B13558HandSlot *dbg_hs =
+                                (
+                                    g_b13558_last_src == 0x800EB134u
+                                )
+                                    ? &g_b13558_hand[1]
+                                    : &g_b13558_hand[0];
+
                             printf(
-                                "CARD ctor/cb/draw:%lu/%lu/%lu\n",
-                                (unsigned long)g_b13553_hit_17e94,
+                                "CARD c/d:%lu/%lu P849 card:%lu\n",
                                 (unsigned long)g_b13553_hit_16c20,
-                                (unsigned long)g_b13553_hit_166a0
+                                (unsigned long)g_b13553_hit_166a0,
+                                (unsigned long)g_b13556_hand_84978
                             );
 
                             printf(
-                                "P849 all/card:%lu/%lu P424:%lu m:%lu\n",
-                                (unsigned long)g_b13556_hit_84978,
-                                (unsigned long)g_b13556_hand_84978,
-                                (unsigned long)g_b13556_hit_424b8,
-                                (unsigned long)g_b13556_last_424_mode
+                                "RET h/sh/b:%lu/%lu/%lu p:%06lX b:%06lX\n",
+                                (unsigned long)dbg_hs->ret_hits,
+                                (unsigned long)dbg_hs->shape_ok,
+                                (unsigned long)dbg_hs->bucket_ok,
+                                (unsigned long)(dbg_hs->packet & 0x1FFFFFu),
+                                (unsigned long)(dbg_hs->bucket & 0x1FFFFFu)
                             );
 
                             printf(
-                                "HAND p/o/b:%06lX/%06lX/%06lX pr:%lu xy:%ld,%ld\n",
-                                (unsigned long)(
-                                    g_b13556_last_packet & 0x1FFFFFu
-                                ),
-                                (unsigned long)(
-                                    g_b13556_last_ot & 0x1FFFFFu
-                                ),
-                                (unsigned long)(
-                                    g_b13556_last_bucket & 0x1FFFFFu
-                                ),
-                                (unsigned long)g_b13556_last_prio,
-                                (long)g_b13556_last_x,
-                                (long)g_b13556_last_y
+                                "PKT %08lX %08lX %08lX\n",
+                                (unsigned long)dbg_hs->words[0],
+                                (unsigned long)dbg_hs->words[1],
+                                (unsigned long)dbg_hs->words[2]
                             );
 
                             printf(
-                                "OT src c/h:%lu/%lu dsth:%lu %06lX>%06lX\n",
-                                (unsigned long)g_b13557_src_calls,
-                                (unsigned long)g_b13557_src_has,
-                                (unsigned long)g_b13557_dst_has,
-                                (unsigned long)(
-                                    g_b13557_last_src & 0x1FFFFFu
-                                ),
-                                (unsigned long)(
-                                    g_b13557_last_dst & 0x1FFFFFu
-                                )
+                                "PKT %08lX %08lX %08lX\n",
+                                (unsigned long)dbg_hs->words[3],
+                                (unsigned long)dbg_hs->words[4],
+                                (unsigned long)dbg_hs->words[5]
                             );
 
                             printf(
-                                "DRAW c/h:%lu/%lu tag:%06lX pkt:%06lX\n",
-                                (unsigned long)g_b13557_draw_calls,
-                                (unsigned long)g_b13557_draw_has,
-                                (unsigned long)(
-                                    g_b13557_last_draw_tag & 0x1FFFFFu
-                                ),
-                                (unsigned long)(
-                                    g_b13557_last_shape_packet & 0x1FFFFFu
-                                )
+                                "OT pre s/sh/br/pr:%lu/%lu/%lu/%lu\n",
+                                (unsigned long)g_b13558_merge_samples,
+                                (unsigned long)g_b13558_pre_shape,
+                                (unsigned long)g_b13558_pre_bucket_reach,
+                                (unsigned long)g_b13558_pre_packet_reach
                             );
 
                             printf(
-                                "ST src/dst/draw:%lu/%lu/%lu DMAshape:%lu\n",
-                                (unsigned long)g_b13557_last_src_steps,
-                                (unsigned long)g_b13557_last_dst_steps,
-                                (unsigned long)g_b13557_last_draw_steps,
+                                "OT L/O/F/P:%lu/%06lX/%ld/%lu tag:%06lX\n",
+                                (unsigned long)g_b13558_last_len,
+                                (unsigned long)(g_b13558_last_org & 0x1FFFFFu),
+                                (long)(int32_t)g_b13558_last_off,
+                                (unsigned long)g_b13558_last_point,
+                                (unsigned long)(g_b13558_last_tag & 0x1FFFFFu)
+                            );
+
+                            printf(
+                                "NOW bh/ph:%08lX/%08lX st:%lu/%lu\n",
+                                (unsigned long)g_b13558_last_bucket_word,
+                                (unsigned long)g_b13558_last_packet_header,
+                                (unsigned long)g_b13558_last_steps_bucket,
+                                (unsigned long)g_b13558_last_steps_packet
+                            );
+
+                            printf(
+                                "STOP:%06lX %08lX postsh:%lu DMA:%lu\n",
+                                (unsigned long)(g_b13558_last_stop & 0x1FFFFFu),
+                                (unsigned long)g_b13558_last_stop_header,
+                                (unsigned long)g_b13558_post_shape,
                                 (unsigned long)b130_dma.b13554_hand_total_hits
                             );
 
                             printf(
-                                "BASE:%06lX idx:%lu B135.57 chain proof\n",
+                                "BASE:%06lX idx:%lu B135.58 lifetime\n",
                                 (unsigned long)(
                                     cpu->read_word(0x8009C414u)
                                     & 0x1FFFFFu
