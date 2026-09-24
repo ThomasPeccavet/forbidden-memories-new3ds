@@ -15,10 +15,10 @@ jobs:
 
     steps:
       - name: Checkout project
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Checkout pinned PSXRecomp runtime
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: Unchiga/psxrecomp
           ref: 1965b2df424da03483a5370340433a862f78f103
@@ -26,7 +26,7 @@ jobs:
 
       - name: Show toolchain versions
         run: |
-          arm-none-eabi-gcc --version | head -1
+          "$DEVKITARM/bin/arm-none-eabi-gcc" --version | head -1
           3dsxtool --version || true
 
       - name: Compile all native ARM11 units
