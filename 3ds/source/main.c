@@ -17618,7 +17618,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.70-FINALIZER-DEATH-STAGE (BASE B131)\n");
+            printf("BUILD B135.71-FORCE-HAND-SUBMIT-GATE (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -18047,32 +18047,30 @@ int main(void)
                             );
 
                             /*
-                             * B135.70 - exact slot-1 hand lifetime through
-                             * FUN_80012D60.
+                             * B135.71 - correlate the live hand with the
+                             * 80012D60 submit gate, and force gate=1 only
+                             * when a valid 52x60 hand is waiting in slot 1.
                              */
-                            uint32_t h70[7] =
-                                {0u,0u,0u,0u,0u,0u,0u};
-                            uint32_t sh70[7] =
-                                {0u,0u,0u,0u,0u,0u,0u};
-                            uint32_t ot70[7] =
-                                {0u,0u,0u,0u,0u,0u,0u};
-                            uint32_t tag70[7] =
-                                {0u,0u,0u,0u,0u,0u,0u};
-                            uint32_t pkt70[7] =
-                                {0u,0u,0u,0u,0u,0u,0u};
-                            uint32_t base70 = 0u;
-                            uint32_t gate4b8_70 = 0u;
-                            uint32_t gate6a0_70 = 0u;
+                            uint32_t h71 = 0u;
+                            uint32_t g0_71 = 0u;
+                            uint32_t g1_71 = 0u;
+                            uint32_t g80_71 = 0u;
+                            uint32_t go_71 = 0u;
+                            uint32_t force71 = 0u;
+                            uint32_t pkt71 = 0u;
+                            uint32_t gb71 = 0u;
+                            uint32_t ga71 = 0u;
 
-                            fm_runtime_b13570_death_stages(
-                                h70,
-                                sh70,
-                                ot70,
-                                tag70,
-                                pkt70,
-                                &base70,
-                                &gate4b8_70,
-                                &gate6a0_70
+                            fm_runtime_b13571_gate(
+                                &h71,
+                                &g0_71,
+                                &g1_71,
+                                &g80_71,
+                                &go_71,
+                                &force71,
+                                &pkt71,
+                                &gb71,
+                                &ga71
                             );
 
                             printf(
@@ -18084,67 +18082,48 @@ int main(void)
                             );
 
                             printf(
-                                "S0 D60   h/sh:%lu/%lu ot/t:%05lX/%05lX\n",
-                                (unsigned long)h70[0],
-                                (unsigned long)sh70[0],
-                                (unsigned long)(ot70[0] & 0xFFFFFu),
-                                (unsigned long)(tag70[0] & 0xFFFFFu)
+                                "HAND@D60:%lu gate 0/1/80/o:%lu/%lu/%lu/%lu\n",
+                                (unsigned long)h71,
+                                (unsigned long)g0_71,
+                                (unsigned long)g1_71,
+                                (unsigned long)g80_71,
+                                (unsigned long)go_71
                             );
 
                             printf(
-                                "S1 85488 h/sh:%lu/%lu ot/t:%05lX/%05lX\n",
-                                (unsigned long)h70[1],
-                                (unsigned long)sh70[1],
-                                (unsigned long)(ot70[1] & 0xFFFFFu),
-                                (unsigned long)(tag70[1] & 0xFFFFFu)
+                                "FORCE:%lu last gate:%02lX>%02lX pkt:%05lX\n",
+                                (unsigned long)force71,
+                                (unsigned long)(gb71 & 0xFFu),
+                                (unsigned long)(ga71 & 0xFFu),
+                                (unsigned long)(pkt71 & 0xFFFFFu)
                             );
 
                             printf(
-                                "S2 7F8E8 h/sh:%lu/%lu ot/t:%05lX/%05lX\n",
-                                (unsigned long)h70[2],
-                                (unsigned long)sh70[2],
-                                (unsigned long)(ot70[2] & 0xFFFFFu),
-                                (unsigned long)(tag70[2] & 0xFFFFFu)
+                                "SORT G ok/f/c:%lu/%lu/%lu C ok/f/c:%lu/%lu/%lu\n",
+                                (unsigned long)g_sort_native_ok,
+                                (unsigned long)g_sort_native_fail,
+                                (unsigned long)g_sort_native_calls,
+                                (unsigned long)g_b119_csort_ok,
+                                (unsigned long)g_b119_csort_fallbacks,
+                                (unsigned long)g_b119_csort_calls
                             );
 
                             printf(
-                                "S3 12DE4 h/sh:%lu/%lu p:%05lX\n",
-                                (unsigned long)h70[3],
-                                (unsigned long)sh70[3],
-                                (unsigned long)(pkt70[3] & 0xFFFFFu)
+                                "SUBMIT 4B8:%02X 6A0:%02X base:%05lX slot1:%05lX\n",
+                                (unsigned)cpu->read_byte(0x8009C4B8u),
+                                (unsigned)cpu->read_byte(0x8009C6A0u),
+                                (unsigned long)(
+                                    cpu->read_word(0x8009C414u)
+                                    & 0xFFFFFu
+                                ),
+                                (unsigned long)(
+                                    cpu->read_word(0x8009C85Cu)
+                                    & 0xFFFFFu
+                                )
                             );
 
                             printf(
-                                "S4 35EB0 h/sh:%lu/%lu p:%05lX\n",
-                                (unsigned long)h70[4],
-                                (unsigned long)sh70[4],
-                                (unsigned long)(pkt70[4] & 0xFFFFFu)
-                            );
-
-                            printf(
-                                "S5 12E04 h/sh:%lu/%lu p:%05lX\n",
-                                (unsigned long)h70[5],
-                                (unsigned long)sh70[5],
-                                (unsigned long)(pkt70[5] & 0xFFFFFu)
-                            );
-
-                            printf(
-                                "S6 SORT1 h/sh:%lu/%lu ot/t:%05lX/%05lX\n",
-                                (unsigned long)h70[6],
-                                (unsigned long)sh70[6],
-                                (unsigned long)(ot70[6] & 0xFFFFFu),
-                                (unsigned long)(tag70[6] & 0xFFFFFu)
-                            );
-
-                            printf(
-                                "GATE 4B8/6A0:%02lX/%02lX base:%05lX\n",
-                                (unsigned long)(gate4b8_70 & 0xFFu),
-                                (unsigned long)(gate6a0_70 & 0xFFu),
-                                (unsigned long)(base70 & 0xFFFFFu)
-                            );
-
-                            printf(
-                                "BASE:%06lX idx:%lu B135.70 death-stage\n",
+                                "BASE:%06lX idx:%lu B135.71 force-gate\n",
                                 (unsigned long)(
                                     cpu->read_word(0x8009C414u)
                                     & 0x1FFFFFu
