@@ -15263,7 +15263,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.45-GENERIC-2C (BASE B131)\n");
+            printf("BUILD B135.46-GENERIC-3C (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15771,10 +15771,11 @@ int main(void)
                         );
 
                         printf(
-                            "FOLLOW n/x:%lu/%lu QGEN:%lu\n",
+                            "FOLLOW n/x:%lu/%lu Q2C/Q3C:%lu/%lu\n",
                             (unsigned long)g_b13544_follow_drawbuf,
                             (unsigned long)g_b13544_last_draw_x,
-                            (unsigned long)fm_gpu_b13545_generic_texquads()
+                            (unsigned long)fm_gpu_b13545_generic_texquads(),
+                            (unsigned long)fm_gpu_b13546_generic_3c()
                         );
                     }
 
