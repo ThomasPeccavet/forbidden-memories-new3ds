@@ -1,0 +1,17 @@
+site	frequence	cout	role_actuel	dependance_fonctionnelle	decision
+fm_runtime_shim.c:psx_check_interrupts_dispatch_entry B135.71	chaque FUN_80012D60 avec C4B8==0	jusqu'a 8192 noeuds OT; scan supprime quand gate non nul	detecter une main 52x60 et forcer C4B8=1	critique: rend le duel B135.71 fonctionnel	B135.72 conserve le filet mais lit le gate avant le scan
+fm_runtime_shim.c:psx_check_interrupts_dispatch_entry B135.65	chaque entree generee	faible: affectation + switch + compteurs	compteurs d'entrees generees	aucune	retirable apres TRACE-4B8
+fm_runtime_shim.c B135.67-.70	entrees/checkpoints de frame	zero en execution: blocs gardes sous if(0)	anciens scans de localisation	aucune	supprimer plus tard; aucun gain runtime actuel
+main.c:fm_trace_dispatch appel global	chaque handoff du dispatcher	moyen; switch tres large	bring-up historique B31-B135	oui: contient encore plusieurs anciens bridges et mutations	ne pas supprimer globalement
+main.c:fm_trace_dispatch case 80084978	chaque primitive Psy-Q	fort: lectures packet/OT, boucles B135.58/B135.63	suivi des cartes et generation B135.63	partielle: B135.64 utilise g_b13563.gen/ready/packet/bucket	reduire a l'etat minimal requis par B135.64 apres trace
+main.c:fm_trace_dispatch cases 12D60/12DE4/12E04	chaque finalizer	fort: snapshots et parcours de chaines B135.59-.62	diagnostic de duree de vie des packets	aucune directe	premier candidat PERF CLEAN apres test TRACE-4B8
+main.c:fm_trace_dispatch case 42538	chaque retour renderer concerne	moyen: relecture de packets et buckets	validation B135.58/B135.63	partielle: positionne g_b13563.ready utilise par B135.64	conserver seulement le test shape minimal de ready
+main.c:fm_trace_dispatch case 80258	chaque DrawOTag	fort si OT duel: scan de chaine	preuve B135.57	aucune	retirable
+main.c:debug b13549_obj_list_probe	chaque rafraichissement console	jusqu'a 7*96 objets	compter les objets du duel	aucune	retirable sans toucher au rendu
+main.c:HLE top-level 80085D98 diagnostics B135.56-.63	chaque tri OT	fort: plusieurs parcours bornes de la meme chaine	preuves source/destination/lifetime	partielle: le bloc B135.64 doit rester; le reste est retirable	separer B135.64 du diagnostic avant suppression
+main.c:B135.64	deuxieme couche si premier tri absent	fort seulement au defaut: scan + tri C	recuperation du premier tri de main	critique actuellement	conserver
+main.c:B135.66	chaque appel GsSortOt imbrique	tri C necessaire + deux scans diagnostiques	service HLE reentrant	tri C critique; scans avant/apres non	conserver le tri, retirer ensuite les scans de forme
+fm_memory.c:B135.54-.55	chaque noeud DMA2 avec >=5 mots	fort: cinq lectures + matcher de forme	preuve packet main dans DMA	aucune	retirable en priorite PERF CLEAN
+fm_gpu.c:B135.43	chaque rectangle texture puis chaque pixel	fort: compteurs 64 bits dans raster hot path	preuve clip/ecritures	aucune	retirable apres reference
+fm_gpu.c:B135.30/B135.34/B135.35	commandes GPU echantillonnees / GT34	faible a moyen	profilage GPU	aucune	retirable si les fast paths restent intacts
+main.c:B135.72 TRACE-4B8	entrees de 10 fonctions + 6 continuations	faible: switch, compteurs, lectures de quelques octets	ordonner les producteurs originaux de C4B8	instrumentation temporaire	conserver seulement pour le prochain essai

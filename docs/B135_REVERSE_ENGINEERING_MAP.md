@@ -193,7 +193,7 @@ La version tabulaire exploitable est `bridge_map.tsv`. Synthese :
 | B135.67-.70 | localiser la perte dans le finalizer | aucune | oui ; scans lourds deja desactives | aucun |
 | **B135.71** | gate `C4B8` ferme avec OT main vivant | effet `8001522C -> 80015C18` | **non** | retablir appel, ordre et persistance de l'ecriture originale |
 
-Point important : B135.71 inspecte jusqu'a 8 192 noeuds OT. C'est un detecteur de symptome robuste, pas une implementation originale. Le remplacer par un `C4B8=1` inconditionnel masquerait d'autres etats legitimes (`0`, `1`, `0x80`) et n'est pas acceptable.
+Point important : B135.71 inspecte jusqu'a 8 192 noeuds OT. C'est un detecteur de symptome robuste, pas une implementation originale. Le remplacer par un `C4B8=1` inconditionnel masquerait d'autres etats legitimes (`0`, `1`, `0x80`) et n'est pas acceptable. La branche experimentale B135.72 conserve ce detecteur mais lit d'abord `C4B8` : le parcours OT n'est execute que lorsque le gate vaut zero, seul cas dans lequel B135.71 peut modifier la RAM invitee.
 
 Les bridges anterieurs a B135 (CD asynchrone/callbacks, DMA, IRQ/VBlank, pad, decodeur, transitions de menu, HLE de bibliotheque et pacing B131) peuvent aussi conditionner le duel. Ils ne sont pas attribues artificiellement a B135 ; leur audit doit preceder toute conclusion selon laquelle B135.71 serait la seule divergence restante.
 

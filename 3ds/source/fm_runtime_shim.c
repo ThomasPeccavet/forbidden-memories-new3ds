@@ -166,6 +166,178 @@ static uint32_t g_b13571_last_packet = 0u;
 static uint32_t g_b13571_last_gate_before = 0u;
 static uint32_t g_b13571_last_gate_after = 0u;
 
+/*
+ * B135.72 - trace the ORIGINAL C4B8 producers without replacing them.
+ *
+ * Static analysis proves that the resident game writes DAT_8009C4B8 only
+ * through FUN_80015C18 (1), FUN_80015C28 (0), FUN_8001522C (possible 0x80),
+ * plus the one-time startup clear in FUN_80012A44.  Generated function-entry
+ * hooks see direct ARM-to-ARM calls that main.c's top-level dispatcher misses.
+ */
+static FMB13572GateTrace g_b13572_gate_trace;
+
+
+static void b13572_trace_generated_entry(
+    CPUState *cpu,
+    uint32_t phys
+)
+{
+    if (!cpu)
+    {
+        return;
+    }
+
+    switch (phys)
+    {
+        case 0x00012F70u:
+            ++g_b13572_gate_trace.entry_12f70;
+            break;
+
+        case 0x00015400u:
+            ++g_b13572_gate_trace.entry_15400;
+            break;
+
+        case 0x0001522Cu:
+            ++g_b13572_gate_trace.sequence;
+            ++g_b13572_gate_trace.entry_1522c;
+            g_b13572_gate_trace.fade_current =
+                cpu->read_byte(0x800EB24Cu);
+            g_b13572_gate_trace.fade_target =
+                cpu->read_byte(0x800EB24Du);
+            g_b13572_gate_trace.fade_flags =
+                cpu->read_byte(0x800EB24Eu);
+            g_b13572_gate_trace.fade_step =
+                cpu->read_byte(0x800EB24Fu);
+            break;
+
+        case 0x000150F4u:
+            ++g_b13572_gate_trace.entry_150f4;
+            break;
+
+        case 0x000155F8u:
+            ++g_b13572_gate_trace.sequence;
+            ++g_b13572_gate_trace.entry_155f8;
+            g_b13572_gate_trace.last_transition_pc = phys;
+            g_b13572_gate_trace.last_transition_sequence =
+                g_b13572_gate_trace.sequence;
+            break;
+
+        case 0x0001569Cu:
+            ++g_b13572_gate_trace.sequence;
+            ++g_b13572_gate_trace.entry_1569c;
+            g_b13572_gate_trace.last_transition_pc = phys;
+            g_b13572_gate_trace.last_transition_sequence =
+                g_b13572_gate_trace.sequence;
+            break;
+
+        case 0x000156F8u:
+            ++g_b13572_gate_trace.sequence;
+            ++g_b13572_gate_trace.entry_156f8;
+            g_b13572_gate_trace.last_transition_pc = phys;
+            g_b13572_gate_trace.last_transition_sequence =
+                g_b13572_gate_trace.sequence;
+            break;
+
+        case 0x000157D4u:
+            ++g_b13572_gate_trace.sequence;
+            ++g_b13572_gate_trace.entry_157d4;
+            g_b13572_gate_trace.last_transition_pc = phys;
+            g_b13572_gate_trace.last_transition_sequence =
+                g_b13572_gate_trace.sequence;
+            break;
+
+        case 0x00015C18u:
+            ++g_b13572_gate_trace.sequence;
+            ++g_b13572_gate_trace.entry_15c18;
+            g_b13572_gate_trace.last_set_sequence =
+                g_b13572_gate_trace.sequence;
+            g_b13572_gate_trace.last_set_ra = cpu->gpr[31];
+            g_b13572_gate_trace.last_set_gate_before =
+                cpu->read_byte(0x8009C4B8u);
+            break;
+
+        case 0x00015C28u:
+            ++g_b13572_gate_trace.sequence;
+            ++g_b13572_gate_trace.entry_15c28;
+            g_b13572_gate_trace.last_clear_sequence =
+                g_b13572_gate_trace.sequence;
+            g_b13572_gate_trace.last_clear_ra = cpu->gpr[31];
+            g_b13572_gate_trace.last_clear_gate_before =
+                cpu->read_byte(0x8009C4B8u);
+            break;
+
+        case 0x00012D60u:
+        {
+            ++g_b13572_gate_trace.sequence;
+            ++g_b13572_gate_trace.entry_12d60;
+            g_b13572_gate_trace.last_finalizer_sequence =
+                g_b13572_gate_trace.sequence;
+            g_b13572_gate_trace.last_finalizer_gate =
+                cpu->read_byte(0x8009C4B8u);
+            g_b13572_gate_trace.last_main_state =
+                cpu->read_byte(0x8009C60Au);
+
+            if (
+                g_b13572_gate_trace.last_clear_sequence
+                >
+                g_b13572_gate_trace.last_set_sequence
+            )
+            {
+                ++g_b13572_gate_trace.finalizer_after_clear;
+            }
+            else if (g_b13572_gate_trace.last_set_sequence != 0u)
+            {
+                ++g_b13572_gate_trace.finalizer_after_set;
+
+                if (g_b13572_gate_trace.last_finalizer_gate == 0u)
+                {
+                    ++g_b13572_gate_trace.finalizer_zero_after_set;
+                }
+            }
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+
+
+static void b13572_trace_post_call(
+    CPUState *cpu,
+    uint32_t phys
+)
+{
+    if (!cpu)
+    {
+        return;
+    }
+
+    switch (phys)
+    {
+        /* Returns from the three FUN_80015C18 calls in FUN_8001522C. */
+        case 0x00015278u:
+        case 0x000152C4u:
+        case 0x00015384u:
+            ++g_b13572_gate_trace.set_return;
+            g_b13572_gate_trace.set_return_gate =
+                cpu->read_byte(0x8009C4B8u);
+            break;
+
+        /* Returns from startup/FUN_8001522C/FUN_800155F8 clears. */
+        case 0x00012A9Cu:
+        case 0x0001531Cu:
+        case 0x00015638u:
+            ++g_b13572_gate_trace.clear_return;
+            g_b13572_gate_trace.clear_return_gate =
+                cpu->read_byte(0x8009C4B8u);
+            break;
+
+        default:
+            break;
+    }
+}
+
 
 static void b13570_sample_slot1(
     CPUState *cpu,
@@ -1196,6 +1368,14 @@ void psx_check_interrupts_at(
     uint32_t resume_pc
 )
 {
+    if (cpu)
+    {
+        b13572_trace_post_call(
+            cpu,
+            resume_pc & 0x1FFFFFFFu
+        );
+    }
+
     /*
      * B135.70 - internal checkpoints inside FUN_80012D60.
      * Sample before VBlank service can mutate any guest-visible state.
@@ -1263,6 +1443,11 @@ void psx_check_interrupts_dispatch_entry(
     uint32_t phys =
         resume_pc & 0x1FFFFFFFu;
 
+    b13572_trace_generated_entry(
+        cpu,
+        phys
+    );
+
     g_b13565_last_entry =
         resume_pc;
 
@@ -1303,36 +1488,41 @@ void psx_check_interrupts_dispatch_entry(
     {
         if (phys == 0x00012D60u)
         {
-            uint32_t slot1 =
-                cpu->read_word(0x8009C85Cu);
+            uint32_t gate =
+                cpu->read_byte(0x8009C4B8u);
 
-            uint32_t tag1 =
-                slot1 != 0u
-                    ? cpu->read_word(slot1 + 0x10u)
-                    : 0u;
-
-            uint32_t hand_packet = 0u;
-
-            if (
-                tag1 != 0u
-                &&
-                b13567_chain_has_hand_shape(
-                    cpu,
-                    tag1,
-                    &hand_packet
-                )
-            )
+            /*
+             * B135.72 PERF SAFE: B135.71 can only mutate guest state when
+             * the submit gate is exactly zero.  Do not walk up to 8192 OT
+             * nodes merely to classify an already-open gate.  If the gate
+             * later closes again, this same frame-local scan runs and keeps
+             * the original B135.71 safety behavior.
+             */
+            if (gate == 0u)
             {
-                ++g_b13571_hand_d60;
-                g_b13571_last_packet = hand_packet;
+                uint32_t slot1 =
+                    cpu->read_word(0x8009C85Cu);
 
-                uint32_t gate =
-                    cpu->read_byte(0x8009C4B8u);
+                uint32_t tag1 =
+                    slot1 != 0u
+                        ? cpu->read_word(slot1 + 0x10u)
+                        : 0u;
 
-                g_b13571_last_gate_before = gate;
+                uint32_t hand_packet = 0u;
 
-                if (gate == 0u)
+                if (
+                    tag1 != 0u
+                    &&
+                    b13567_chain_has_hand_shape(
+                        cpu,
+                        tag1,
+                        &hand_packet
+                    )
+                )
                 {
+                    ++g_b13571_hand_d60;
+                    g_b13571_last_packet = hand_packet;
+                    g_b13571_last_gate_before = gate;
                     ++g_b13571_gate0;
 
                     /*
@@ -1345,22 +1535,10 @@ void psx_check_interrupts_dispatch_entry(
                     );
 
                     ++g_b13571_forced;
-                }
-                else if (gate == 1u)
-                {
-                    ++g_b13571_gate1;
-                }
-                else if (gate == 0x80u)
-                {
-                    ++g_b13571_gate80;
-                }
-                else
-                {
-                    ++g_b13571_gate_other;
-                }
 
-                g_b13571_last_gate_after =
-                    cpu->read_byte(0x8009C4B8u);
+                    g_b13571_last_gate_after =
+                        cpu->read_byte(0x8009C4B8u);
+                }
             }
         }
         else if (0 && phys == 0x00085488u)
@@ -1804,6 +1982,17 @@ void fm_runtime_b13571_gate(
     if (last_packet) *last_packet = g_b13571_last_packet;
     if (last_before) *last_before = g_b13571_last_gate_before;
     if (last_after) *last_after = g_b13571_last_gate_after;
+}
+
+
+void fm_runtime_b13572_gate_trace(
+    FMB13572GateTrace *trace
+)
+{
+    if (trace)
+    {
+        *trace = g_b13572_gate_trace;
+    }
 }
 
 

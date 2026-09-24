@@ -17618,7 +17618,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.71-FORCE-HAND-SUBMIT-GATE (BASE B131)\n");
+            printf("BUILD B135.72-TRACE-4B8 (SAFE B135.71)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -18053,20 +18053,64 @@ int main(void)
                              */
                             uint32_t h71 = 0u;
                             uint32_t g0_71 = 0u;
-                            uint32_t g1_71 = 0u;
-                            uint32_t g80_71 = 0u;
-                            uint32_t go_71 = 0u;
                             uint32_t force71 = 0u;
                             uint32_t pkt71 = 0u;
                             uint32_t gb71 = 0u;
                             uint32_t ga71 = 0u;
 
+                            FMB13572GateTrace trace72 = {0};
+
+                            static uint32_t trace72_entry_mask = 0u;
+                            static int trace72_entry_mask_ready = 0;
+
+                            if (!trace72_entry_mask_ready)
+                            {
+                                static const uint32_t trace72_entries[] =
+                                {
+                                    0x80012F70u,
+                                    0x80015400u,
+                                    0x8001522Cu,
+                                    0x80015C18u,
+                                    0x80015C28u,
+                                    0x80012D60u,
+                                    0x800150F4u,
+                                    0x800155F8u,
+                                    0x8001569Cu,
+                                    0x800156F8u,
+                                    0x800157D4u
+                                };
+
+                                for (
+                                    unsigned ti72 = 0u;
+                                    ti72 < sizeof(trace72_entries)
+                                        / sizeof(trace72_entries[0]);
+                                    ++ti72
+                                )
+                                {
+                                    if (
+                                        psx_game_is_function_entry(
+                                            trace72_entries[ti72]
+                                        )
+                                    )
+                                    {
+                                        trace72_entry_mask |=
+                                            1u << ti72;
+                                    }
+                                }
+
+                                trace72_entry_mask_ready = 1;
+                            }
+
+                            fm_runtime_b13572_gate_trace(
+                                &trace72
+                            );
+
                             fm_runtime_b13571_gate(
                                 &h71,
                                 &g0_71,
-                                &g1_71,
-                                &g80_71,
-                                &go_71,
+                                NULL,
+                                NULL,
+                                NULL,
                                 &force71,
                                 &pkt71,
                                 &gb71,
@@ -18082,12 +18126,10 @@ int main(void)
                             );
 
                             printf(
-                                "HAND@D60:%lu gate 0/1/80/o:%lu/%lu/%lu/%lu\n",
+                                "HAND0@D60:%lu gate0:%lu force:%lu\n",
                                 (unsigned long)h71,
                                 (unsigned long)g0_71,
-                                (unsigned long)g1_71,
-                                (unsigned long)g80_71,
-                                (unsigned long)go_71
+                                (unsigned long)force71
                             );
 
                             printf(
@@ -18096,6 +18138,55 @@ int main(void)
                                 (unsigned long)(gb71 & 0xFFu),
                                 (unsigned long)(ga71 & 0xFFu),
                                 (unsigned long)(pkt71 & 0xFFFFFu)
+                            );
+
+                            printf(
+                                "T72 E 22/S/C/D:%lu/%lu/%lu/%lu\n",
+                                (unsigned long)trace72.entry_1522c,
+                                (unsigned long)trace72.entry_15c18,
+                                (unsigned long)trace72.entry_15c28,
+                                (unsigned long)trace72.entry_12d60
+                            );
+
+                            printf(
+                                "T72 Q S/C/D:%lu/%lu/%lu G:%02lX Z:%lu\n",
+                                (unsigned long)trace72.last_set_sequence,
+                                (unsigned long)trace72.last_clear_sequence,
+                                (unsigned long)trace72.last_finalizer_sequence,
+                                (unsigned long)(trace72.last_finalizer_gate & 0xFFu),
+                                (unsigned long)trace72.finalizer_zero_after_set
+                            );
+
+                            printf(
+                                "T72 RA S/C:%05lX/%05lX F:%02lX>%02lX/%02lX\n",
+                                (unsigned long)(trace72.last_set_ra & 0xFFFFFu),
+                                (unsigned long)(trace72.last_clear_ra & 0xFFFFFu),
+                                (unsigned long)(trace72.fade_current & 0xFFu),
+                                (unsigned long)(trace72.fade_target & 0xFFu),
+                                (unsigned long)(trace72.fade_flags & 0xFFu)
+                            );
+
+                            printf(
+                                "T72 RET S/C:%lu/%lu G:%02lX/%02lX ST:%02lX\n",
+                                (unsigned long)trace72.set_return,
+                                (unsigned long)trace72.clear_return,
+                                (unsigned long)(trace72.set_return_gate & 0xFFu),
+                                (unsigned long)(trace72.clear_return_gate & 0xFFu),
+                                (unsigned long)(trace72.last_main_state & 0xFFu)
+                            );
+
+                            printf(
+                                "T72 F up/u2/dn/off/w:%lu/%lu/%lu/%lu/%lu\n",
+                                (unsigned long)trace72.entry_1569c,
+                                (unsigned long)trace72.entry_156f8,
+                                (unsigned long)trace72.entry_157d4,
+                                (unsigned long)trace72.entry_155f8,
+                                (unsigned long)trace72.entry_150f4
+                            );
+
+                            printf(
+                                "T72 MAP:%03lX expected:7FF\n",
+                                (unsigned long)(trace72_entry_mask & 0x7FFu)
                             );
 
                             printf(

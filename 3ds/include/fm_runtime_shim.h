@@ -265,6 +265,60 @@ void fm_runtime_b13571_gate(
     uint32_t *last_after
 );
 
+/*
+ * B135.72 - lightweight ordering trace for the original submit-gate state.
+ *
+ * This intentionally records function entries and a few post-call
+ * continuations only.  It performs no OT/VRAM scan and does not alter guest
+ * memory.  B135.71 remains the functional safety net during this experiment.
+ */
+typedef struct FMB13572GateTrace
+{
+    uint32_t sequence;
+
+    uint32_t entry_12f70;
+    uint32_t entry_15400;
+    uint32_t entry_1522c;
+    uint32_t entry_15c18;
+    uint32_t entry_15c28;
+    uint32_t entry_12d60;
+    uint32_t entry_150f4;
+    uint32_t entry_155f8;
+    uint32_t entry_1569c;
+    uint32_t entry_156f8;
+    uint32_t entry_157d4;
+
+    uint32_t set_return;
+    uint32_t clear_return;
+    uint32_t set_return_gate;
+    uint32_t clear_return_gate;
+
+    uint32_t last_set_sequence;
+    uint32_t last_clear_sequence;
+    uint32_t last_finalizer_sequence;
+    uint32_t last_set_ra;
+    uint32_t last_clear_ra;
+    uint32_t last_set_gate_before;
+    uint32_t last_clear_gate_before;
+    uint32_t last_finalizer_gate;
+    uint32_t last_main_state;
+    uint32_t last_transition_pc;
+    uint32_t last_transition_sequence;
+
+    uint32_t finalizer_after_set;
+    uint32_t finalizer_after_clear;
+    uint32_t finalizer_zero_after_set;
+
+    uint32_t fade_current;
+    uint32_t fade_target;
+    uint32_t fade_flags;
+    uint32_t fade_step;
+} FMB13572GateTrace;
+
+void fm_runtime_b13572_gate_trace(
+    FMB13572GateTrace *trace
+);
+
 
 /*
  * ============================================================
