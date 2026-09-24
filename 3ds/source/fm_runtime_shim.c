@@ -63,6 +63,71 @@ static uint32_t g_b13567_last_shape_packet = 0u;
 static uint32_t g_b13567_last_4b8 = 0u;
 static uint32_t g_b13567_last_6a0 = 0u;
 
+/*
+ * B135.68 - scan ALL four current GsOTs at three exact pipeline stages:
+ *   12F70 entry  = before object rendering
+ *   12CB8 entry  = immediately after 12F70 returned
+ *   12D60 entry  = immediately after VSync wait, before finalization
+ *
+ * Bit n in each mask means DAT_8009C858[n] currently reaches at least one
+ * 52x60 hand sprite packet.
+ */
+static uint32_t g_b13568_pre_entries = 0u;
+static uint32_t g_b13568_post_entries = 0u;
+static uint32_t g_b13568_fin_entries = 0u;
+static uint32_t g_b13568_pre_any = 0u;
+static uint32_t g_b13568_post_any = 0u;
+static uint32_t g_b13568_fin_any = 0u;
+static uint32_t g_b13568_last_pre_mask = 0u;
+static uint32_t g_b13568_last_post_mask = 0u;
+static uint32_t g_b13568_last_fin_mask = 0u;
+static uint32_t g_b13568_last_ptr[4] = {0u,0u,0u,0u};
+static uint32_t g_b13568_last_base = 0u;
+
+static uint32_t b13568_scan_current_ots(
+    CPUState *cpu
+)
+{
+    if (!cpu)
+    {
+        return 0u;
+    }
+
+    uint32_t mask = 0u;
+
+    g_b13568_last_base =
+        cpu->read_word(0x8009C414u);
+
+    for (unsigned i = 0u; i < 4u; ++i)
+    {
+        uint32_t ot =
+            cpu->read_word(0x8009C858u + i * 4u);
+
+        g_b13568_last_ptr[i] = ot;
+
+        if (ot == 0u)
+        {
+            continue;
+        }
+
+        uint32_t tag =
+            cpu->read_word(ot + 0x10u);
+
+        if (
+            b13567_chain_has_hand_shape(
+                cpu,
+                tag,
+                NULL
+            )
+        )
+        {
+            mask |= (1u << i);
+        }
+    }
+
+    return mask;
+}
+
 static int b13567_chain_has_hand_shape(
     CPUState *cpu,
     uint32_t start_tag,
@@ -1082,6 +1147,43 @@ void psx_check_interrupts_dispatch_entry(
     }
 
     /*
+     * B135.68 - exact render -> wait -> finalizer stage masks.
+     */
+    if (cpu && phys == 0x00012F70u)
+    {
+        ++g_b13568_pre_entries;
+        g_b13568_last_pre_mask =
+            b13568_scan_current_ots(cpu);
+
+        if (g_b13568_last_pre_mask != 0u)
+        {
+            ++g_b13568_pre_any;
+        }
+    }
+    else if (cpu && phys == 0x00012CB8u)
+    {
+        ++g_b13568_post_entries;
+        g_b13568_last_post_mask =
+            b13568_scan_current_ots(cpu);
+
+        if (g_b13568_last_post_mask != 0u)
+        {
+            ++g_b13568_post_any;
+        }
+    }
+    else if (cpu && phys == 0x00012D60u)
+    {
+        ++g_b13568_fin_entries;
+        g_b13568_last_fin_mask =
+            b13568_scan_current_ots(cpu);
+
+        if (g_b13568_last_fin_mask != 0u)
+        {
+            ++g_b13568_fin_any;
+        }
+    }
+
+    /*
      * B135.67 - inspect the current frame OTs at generated function entry.
      */
     if (cpu && phys == 0x00012D60u)
@@ -1217,6 +1319,41 @@ void fm_runtime_b13567_pipeline(
     if (last_4b8) *last_4b8 = g_b13567_last_4b8;
     if (last_6a0) *last_6a0 = g_b13567_last_6a0;
 }
+
+void fm_runtime_b13568_stages(
+    uint32_t *pre_entries,
+    uint32_t *pre_any,
+    uint32_t *post_entries,
+    uint32_t *post_any,
+    uint32_t *fin_entries,
+    uint32_t *fin_any,
+    uint32_t *pre_mask,
+    uint32_t *post_mask,
+    uint32_t *fin_mask,
+    uint32_t *base,
+    uint32_t ptrs[4]
+)
+{
+    if (pre_entries) *pre_entries = g_b13568_pre_entries;
+    if (pre_any) *pre_any = g_b13568_pre_any;
+    if (post_entries) *post_entries = g_b13568_post_entries;
+    if (post_any) *post_any = g_b13568_post_any;
+    if (fin_entries) *fin_entries = g_b13568_fin_entries;
+    if (fin_any) *fin_any = g_b13568_fin_any;
+    if (pre_mask) *pre_mask = g_b13568_last_pre_mask;
+    if (post_mask) *post_mask = g_b13568_last_post_mask;
+    if (fin_mask) *fin_mask = g_b13568_last_fin_mask;
+    if (base) *base = g_b13568_last_base;
+
+    if (ptrs)
+    {
+        for (unsigned i = 0u; i < 4u; ++i)
+        {
+            ptrs[i] = g_b13568_last_ptr[i];
+        }
+    }
+}
+
 
 
 /*
