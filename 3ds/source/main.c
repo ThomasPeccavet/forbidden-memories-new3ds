@@ -2923,6 +2923,99 @@ static uint32_t g_b13553_hit_17e94 = 0u;
 static uint32_t g_b13553_hit_16c20 = 0u;
 static uint32_t g_b13553_hit_166a0 = 0u;
 
+/*
+ * B135.56 - prove the exact path of the 52x60 hand primitive.
+ *
+ * 800166A0 ultimately calls 800424B8.  In mode 1, 800424B8 calls
+ * 80084978, which allocates a packet at DAT_800FF5C4 and links it
+ * directly into a GsOT bucket.  Track those exact packet addresses and
+ * then inspect the source/destination OT around our 80085D98 HLE.
+ */
+#define B13556_HAND_SLOTS 16u
+static uint32_t g_b13556_hit_424b8 = 0u;
+static uint32_t g_b13556_last_424_mode = 0u;
+static uint32_t g_b13556_hit_84978 = 0u;
+static uint32_t g_b13556_hand_84978 = 0u;
+static uint32_t g_b13556_hand_packet[B13556_HAND_SLOTS] = {0u};
+static uint32_t g_b13556_hand_head = 0u;
+static uint32_t g_b13556_last_packet = 0u;
+static uint32_t g_b13556_last_ot = 0u;
+static uint32_t g_b13556_last_bucket = 0u;
+static uint32_t g_b13556_last_prio = 0u;
+static int32_t g_b13556_last_x = 0;
+static int32_t g_b13556_last_y = 0;
+static uint32_t g_b13556_last_ra = 0u;
+
+static uint32_t g_b13556_merge_rel = 0u;
+static uint32_t g_b13556_merge_src_has = 0u;
+static uint32_t g_b13556_merge_dst_has = 0u;
+static uint32_t g_b13556_last_src_has = 0u;
+static uint32_t g_b13556_last_dst_has = 0u;
+static uint32_t g_b13556_last_src_steps = 0u;
+static uint32_t g_b13556_last_dst_steps = 0u;
+
+static int b13556_chain_contains_hand(
+    CPUState *cpu,
+    uint32_t start_tag,
+    uint32_t *steps_out
+)
+{
+    if (steps_out)
+    {
+        *steps_out = 0u;
+    }
+
+    if (!cpu || start_tag == 0u)
+    {
+        return 0;
+    }
+
+    uint32_t node = start_tag;
+
+    for (uint32_t step = 0u; step < 8192u; ++step)
+    {
+        uint32_t phys = node & 0x1FFFFFFFu;
+
+        if (steps_out)
+        {
+            *steps_out = step + 1u;
+        }
+
+        if (phys >= 0x00200000u || (phys & 3u) != 0u)
+        {
+            return 0;
+        }
+
+        for (uint32_t i = 0u; i < B13556_HAND_SLOTS; ++i)
+        {
+            if (
+                g_b13556_hand_packet[i] != 0u
+                &&
+                g_b13556_hand_packet[i] == phys
+            )
+            {
+                return 1;
+            }
+        }
+
+        uint32_t header =
+            cpu->read_word(0x80000000u | phys);
+
+        uint32_t next =
+            header & 0x00FFFFFFu;
+
+        if (next & 0x00800000u)
+        {
+            return 0;
+        }
+
+        node =
+            0x80000000u | next;
+    }
+
+    return 0;
+}
+
 static uint32_t g_ra_8111c = 0;
 static uint32_t g_ra_82168 = 0;
 static uint32_t g_ra_8219c = 0;
@@ -3168,6 +3261,74 @@ static void fm_trace_dispatch(
 
     switch (phys)
     {
+        case 0x000424B8u:
+            ++g_b13556_hit_424b8;
+            if (cpu)
+            {
+                g_b13556_last_424_mode =
+                    cpu->gpr[7] >> 16;
+            }
+            break;
+
+        case 0x00084978u:
+            ++g_b13556_hit_84978;
+
+            if (cpu)
+            {
+                uint32_t d = cpu->gpr[4];
+                int32_t x = (int16_t)cpu->read_half(d + 4u);
+                int32_t y = (int16_t)cpu->read_half(d + 6u);
+                uint32_t w = cpu->read_half(d + 8u);
+                uint32_t h = cpu->read_half(d + 10u);
+
+                if (w == 52u && h == 60u)
+                {
+                    uint32_t packet =
+                        cpu->read_word(0x800FF5C4u);
+
+                    uint32_t ot =
+                        cpu->gpr[5];
+
+                    uint32_t prio =
+                        cpu->gpr[6] & 0xFFFFu;
+
+                    uint32_t org =
+                        cpu->read_word(ot + 4u);
+
+                    int32_t offset =
+                        (int32_t)cpu->read_word(ot + 8u);
+
+                    uint32_t bucket =
+                        org
+                        +
+                        (
+                            (
+                                (uint32_t)(
+                                    (int32_t)prio - offset
+                                )
+                            )
+                            << 2
+                        );
+
+                    ++g_b13556_hand_84978;
+                    g_b13556_last_packet = packet;
+                    g_b13556_last_ot = ot;
+                    g_b13556_last_bucket = bucket;
+                    g_b13556_last_prio = prio;
+                    g_b13556_last_x = x;
+                    g_b13556_last_y = y;
+                    g_b13556_last_ra = cpu->gpr[31];
+
+                    g_b13556_hand_packet[
+                        g_b13556_hand_head % B13556_HAND_SLOTS
+                    ] =
+                        packet & 0x1FFFFFFFu;
+
+                    ++g_b13556_hand_head;
+                }
+            }
+            break;
+
         case 0x00017E94u:
             ++g_b13553_hit_17e94;
             break;
@@ -13806,6 +13967,37 @@ int main(void)
                     fm_repair_ot_sentinel(cpu, dst_ot);
 
                     /*
+                     * B135.56 - only scan when this GsSortOt consumes the
+                     * same GsOT that most recently received a 52x60 hand
+                     * packet.  This keeps the diagnostic cheap.
+                     */
+                    int b13556_rel =
+                        (
+                            g_b13556_last_ot != 0u
+                            &&
+                            src_ot == g_b13556_last_ot
+                        );
+
+                    if (b13556_rel)
+                    {
+                        ++g_b13556_merge_rel;
+
+                        g_b13556_last_src_has =
+                            b13556_chain_contains_hand(
+                                cpu,
+                                g_hle_85d98_src_tag,
+                                &g_b13556_last_src_steps
+                            )
+                                ? 1u
+                                : 0u;
+
+                        if (g_b13556_last_src_has)
+                        {
+                            ++g_b13556_merge_src_has;
+                        }
+                    }
+
+                    /*
                      * B135.48 fidelity test:
                      *
                      * The first-duel reference is known-good on the PC runtime,
@@ -13834,6 +14026,23 @@ int main(void)
                                 dst_ot,
                                 &native_result
                             );
+                    }
+
+                    if (b13556_rel)
+                    {
+                        g_b13556_last_dst_has =
+                            b13556_chain_contains_hand(
+                                cpu,
+                                g_hle_85d98_dst_tag,
+                                &g_b13556_last_dst_steps
+                            )
+                                ? 1u
+                                : 0u;
+
+                        if (g_b13556_last_dst_has)
+                        {
+                            ++g_b13556_merge_dst_has;
+                        }
                     }
 
                     if (b115_native_ok)
@@ -15449,7 +15658,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.55-HAND-DMA-FAMILY (BASE B131)\n");
+            printf("BUILD B135.56-HAND-OT-PROOF (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15878,11 +16087,7 @@ int main(void)
                             );
 
                             /*
-                             * B135.54 - we already proved that the five live
-                             * hand objects execute 80016C20 -> 800166A0.
-                             * Now follow the resulting 52x60 sprite packets
-                             * through the REAL DMA2 linked list and inspect
-                             * the texture/CLUT they reference in VRAM.
+                             * B135.56 - exact hand packet / OT proof.
                              */
                             printf(
                                 "CARD ctor/cb/draw:%lu/%lu/%lu\n",
@@ -15892,230 +16097,50 @@ int main(void)
                             );
 
                             printf(
-                                "HAND DMA tot/list/aft:%lu/%lu/%lu n:%lu\n",
-                                (unsigned long)b130_dma.b13554_hand_total_hits,
-                                (unsigned long)b130_dma.b13554_hand_last_list_hits,
-                                (unsigned long)b130_dma.b13554_hand_after_payloads,
-                                (unsigned long)b130_dma.b13554_hand_last_node_ordinal
+                                "P849 all/card:%lu/%lu P424:%lu m:%lu\n",
+                                (unsigned long)g_b13556_hit_84978,
+                                (unsigned long)g_b13556_hand_84978,
+                                (unsigned long)g_b13556_hit_424b8,
+                                (unsigned long)g_b13556_last_424_mode
                             );
 
                             printf(
-                                "DRAW off:%d,%d prim:%08lX\n",
-                                (int16_t)cpu->read_half(0x800FF444u),
-                                (int16_t)cpu->read_half(0x800FF446u),
-                                (unsigned long)cpu->read_word(0x800FF5C4u)
+                                "HAND p/o/b:%06lX/%06lX/%06lX pr:%lu\n",
+                                (unsigned long)(
+                                    g_b13556_last_packet & 0x1FFFFFu
+                                ),
+                                (unsigned long)(
+                                    g_b13556_last_ot & 0x1FFFFFu
+                                ),
+                                (unsigned long)(
+                                    g_b13556_last_bucket & 0x1FFFFFu
+                                ),
+                                (unsigned long)g_b13556_last_prio
                             );
 
-                            if (b130_dma.b13554_hand_total_hits != 0u)
-                            {
-                                uint32_t e1 =
-                                    b130_dma.b13554_hand_cmd0 & 0x7FFu;
-
-                                uint32_t xy =
-                                    b130_dma.b13554_hand_cmd2;
-
-                                uint32_t uvclut =
-                                    b130_dma.b13554_hand_cmd3;
-
-                                int hx =
-                                    (int16_t)(xy & 0xFFFFu);
-
-                                int hy =
-                                    (int16_t)(xy >> 16);
-
-                                uint32_t tu =
-                                    uvclut & 0xFFu;
-
-                                uint32_t tv =
-                                    (uvclut >> 8) & 0xFFu;
-
-                                uint32_t clut =
-                                    uvclut >> 16;
-
-                                uint32_t clut_x =
-                                    (clut & 0x3Fu) * 16u;
-
-                                uint32_t clut_y =
-                                    (clut >> 6) & 0x1FFu;
-
-                                uint32_t depth =
-                                    (e1 >> 7) & 3u;
-
-                                uint32_t page_x =
-                                    (e1 & 0x0Fu) * 64u;
-
-                                uint32_t page_y =
-                                    (e1 & 0x10u) ? 256u : 0u;
-
-                                uint32_t idx_nz = 0u;
-                                uint32_t vis_nz = 0u;
-                                uint32_t pal_nz = 0u;
-
-                                uint32_t pal_count =
-                                    depth == 0u
-                                        ? 16u
-                                        : (depth == 1u ? 256u : 0u);
-
-                                if (
-                                    pal_count != 0u
-                                    &&
-                                    clut_y < 512u
-                                    &&
-                                    clut_x + pal_count <= 1024u
-                                )
-                                {
-                                    for (
-                                        uint32_t pi = 0u;
-                                        pi < pal_count;
-                                        ++pi
-                                    )
-                                    {
-                                        if (
-                                            (
-                                                vram[
-                                                    clut_y * 1024u
-                                                    + clut_x
-                                                    + pi
-                                                ]
-                                                &
-                                                0x7FFFu
-                                            )
-                                            != 0u
-                                        )
-                                        {
-                                            ++pal_nz;
-                                        }
-                                    }
-                                }
-
-                                for (uint32_t py = 0u; py < 60u; ++py)
-                                {
-                                    uint32_t sy =
-                                        page_y
-                                        +
-                                        ((tv + py) & 0xFFu);
-
-                                    for (uint32_t px = 0u; px < 52u; ++px)
-                                    {
-                                        uint32_t sx =
-                                            (tu + px) & 0xFFu;
-
-                                        uint32_t index = 0u;
-                                        uint16_t color = 0u;
-
-                                        if (depth == 0u)
-                                        {
-                                            uint16_t tw =
-                                                vram[
-                                                    sy * 1024u
-                                                    + page_x
-                                                    + (sx >> 2)
-                                                ];
-
-                                            index =
-                                                (tw >> ((sx & 3u) * 4u))
-                                                & 0x0Fu;
-
-                                            if (
-                                                clut_y < 512u
-                                                &&
-                                                clut_x + index < 1024u
-                                            )
-                                            {
-                                                color =
-                                                    vram[
-                                                        clut_y * 1024u
-                                                        + clut_x
-                                                        + index
-                                                    ];
-                                            }
-                                        }
-                                        else if (depth == 1u)
-                                        {
-                                            uint16_t tw =
-                                                vram[
-                                                    sy * 1024u
-                                                    + page_x
-                                                    + (sx >> 1)
-                                                ];
-
-                                            index =
-                                                (tw >> ((sx & 1u) * 8u))
-                                                & 0xFFu;
-
-                                            if (
-                                                clut_y < 512u
-                                                &&
-                                                clut_x + index < 1024u
-                                            )
-                                            {
-                                                color =
-                                                    vram[
-                                                        clut_y * 1024u
-                                                        + clut_x
-                                                        + index
-                                                    ];
-                                            }
-                                        }
-                                        else if (depth == 2u)
-                                        {
-                                            color =
-                                                vram[
-                                                    sy * 1024u
-                                                    + page_x
-                                                    + sx
-                                                ];
-
-                                            index =
-                                                color & 0x7FFFu;
-                                        }
-
-                                        if (index != 0u)
-                                        {
-                                            ++idx_nz;
-                                        }
-
-                                        if ((color & 0x7FFFu) != 0u)
-                                        {
-                                            ++vis_nz;
-                                        }
-                                    }
-                                }
-
-                                printf(
-                                    "HAND pkt op:%02lX e1:%03lX xy:%d,%d\n",
-                                    (unsigned long)(
-                                        b130_dma.b13554_hand_cmd1 >> 24
-                                    ),
-                                    (unsigned long)e1,
-                                    hx,
-                                    hy
-                                );
-
-                                printf(
-                                    "HAND uv:%lu,%lu cl:%lu,%lu\n",
-                                    (unsigned long)tu,
-                                    (unsigned long)tv,
-                                    (unsigned long)clut_x,
-                                    (unsigned long)clut_y
-                                );
-
-                                printf(
-                                    "HAND tex d:%lu idx/vis/pal:%lu/%lu/%lu\n",
-                                    (unsigned long)depth,
-                                    (unsigned long)idx_nz,
-                                    (unsigned long)vis_nz,
-                                    (unsigned long)pal_nz
-                                );
-                            }
-                            else
-                            {
-                                printf("HAND pkt: not seen by DMA2\n");
-                                printf("HAND tex: n/a\n");
-                            }
+                            printf(
+                                "HAND xy:%ld,%ld ra:%06lX DMAshape:%lu\n",
+                                (long)g_b13556_last_x,
+                                (long)g_b13556_last_y,
+                                (unsigned long)(
+                                    g_b13556_last_ra & 0x1FFFFFu
+                                ),
+                                (unsigned long)b130_dma.b13554_hand_total_hits
+                            );
 
                             printf(
-                                "B135.55 hand DMA family + texture probe\n"
+                                "MERGE rel/src/dst:%lu/%lu/%lu last:%lu/%lu st:%lu/%lu\n",
+                                (unsigned long)g_b13556_merge_rel,
+                                (unsigned long)g_b13556_merge_src_has,
+                                (unsigned long)g_b13556_merge_dst_has,
+                                (unsigned long)g_b13556_last_src_has,
+                                (unsigned long)g_b13556_last_dst_has,
+                                (unsigned long)g_b13556_last_src_steps,
+                                (unsigned long)g_b13556_last_dst_steps
+                            );
+
+                            printf(
+                                "B135.56 exact 84978 + OT merge proof\n"
                             );
                         }
 
