@@ -15449,7 +15449,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.53-CARD-CB-TRACE (BASE B131)\n");
+            printf("BUILD B135.54-HAND-DMA-TEX (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15878,96 +15878,230 @@ int main(void)
                             );
 
                             /*
-                             * B135.53 - the seven active CC objects are card
-                             * display objects created by FUN_80017E94:
-                             *   callback +4C = FUN_80016C20
-                             *   FUN_80016C20 -> FUN_800166A0
-                             *
-                             * Dump their live position/card slot/state and
-                             * prove whether that renderer chain executes.
+                             * B135.54 - we already proved that the five live
+                             * hand objects execute 80016C20 -> 800166A0.
+                             * Now follow the resulting 52x60 sprite packets
+                             * through the REAL DMA2 linked list and inspect
+                             * the texture/CLUT they reference in VRAM.
                              */
-                            {
-                                int idx = oh[6];
-                                unsigned shown = 0u;
-
-                                while (
-                                    idx >= 0
-                                    && idx < 0x60
-                                    && shown < 8u
-                                )
-                                {
-                                    uint32_t obj =
-                                        0x800F1210u
-                                        +
-                                        (uint32_t)idx * 0x70u;
-
-                                    int x =
-                                        (int16_t)cpu->read_half(
-                                            obj + 0x30u
-                                        );
-
-                                    int y =
-                                        (int16_t)cpu->read_half(
-                                            obj + 0x32u
-                                        );
-
-                                    uint32_t cb4c =
-                                        cpu->read_word(obj + 0x4Cu);
-
-                                    uint32_t flags =
-                                        cpu->read_half(obj + 0x08u);
-
-                                    uint32_t b67 =
-                                        cpu->read_byte(obj + 0x67u);
-
-                                    uint32_t b68 =
-                                        cpu->read_byte(obj + 0x68u);
-
-                                    uint32_t b69 =
-                                        cpu->read_byte(obj + 0x69u);
-
-                                    uint32_t card_slot =
-                                        cpu->read_byte(obj + 0x6Au);
-
-                                    printf(
-                                        "CC%02d xy:%d,%d cb:%06lX s:%lu %lu/%lu/%lu f:%02lX\n",
-                                        idx,
-                                        x,
-                                        y,
-                                        (unsigned long)(cb4c & 0x1FFFFFu),
-                                        (unsigned long)card_slot,
-                                        (unsigned long)b67,
-                                        (unsigned long)b68,
-                                        (unsigned long)b69,
-                                        (unsigned long)(flags & 0xFFu)
-                                    );
-
-                                    idx =
-                                        (int16_t)cpu->read_half(
-                                            obj + 0x02u
-                                        );
-
-                                    ++shown;
-                                }
-                            }
-
                             printf(
-                                "CARD hit ctor/cb/draw:%lu/%lu/%lu\n",
+                                "CARD ctor/cb/draw:%lu/%lu/%lu\n",
                                 (unsigned long)g_b13553_hit_17e94,
                                 (unsigned long)g_b13553_hit_16c20,
                                 (unsigned long)g_b13553_hit_166a0
                             );
 
                             printf(
-                                "OLD 41048/31B58:%lu/%lu child:%lu/%lu\n",
-                                (unsigned long)g_b13551_hit_41048,
-                                (unsigned long)g_b13551_hit_31b58,
-                                (unsigned long)g_b13551_hit_31948,
-                                (unsigned long)g_b13551_hit_319dc
+                                "HAND DMA tot/list/aft:%lu/%lu/%lu n:%lu\n",
+                                (unsigned long)b130_dma.b13554_hand_total_hits,
+                                (unsigned long)b130_dma.b13554_hand_last_list_hits,
+                                (unsigned long)b130_dma.b13554_hand_after_payloads,
+                                (unsigned long)b130_dma.b13554_hand_last_node_ordinal
                             );
 
+                            if (b130_dma.b13554_hand_total_hits != 0u)
+                            {
+                                uint32_t e1 =
+                                    b130_dma.b13554_hand_cmd0 & 0x7FFu;
+
+                                uint32_t xy =
+                                    b130_dma.b13554_hand_cmd2;
+
+                                uint32_t uvclut =
+                                    b130_dma.b13554_hand_cmd3;
+
+                                int hx =
+                                    (int16_t)(xy & 0xFFFFu);
+
+                                int hy =
+                                    (int16_t)(xy >> 16);
+
+                                uint32_t tu =
+                                    uvclut & 0xFFu;
+
+                                uint32_t tv =
+                                    (uvclut >> 8) & 0xFFu;
+
+                                uint32_t clut =
+                                    uvclut >> 16;
+
+                                uint32_t clut_x =
+                                    (clut & 0x3Fu) * 16u;
+
+                                uint32_t clut_y =
+                                    (clut >> 6) & 0x1FFu;
+
+                                uint32_t depth =
+                                    (e1 >> 7) & 3u;
+
+                                uint32_t page_x =
+                                    (e1 & 0x0Fu) * 64u;
+
+                                uint32_t page_y =
+                                    (e1 & 0x10u) ? 256u : 0u;
+
+                                uint32_t idx_nz = 0u;
+                                uint32_t vis_nz = 0u;
+                                uint32_t pal_nz = 0u;
+
+                                uint32_t pal_count =
+                                    depth == 0u
+                                        ? 16u
+                                        : (depth == 1u ? 256u : 0u);
+
+                                if (
+                                    pal_count != 0u
+                                    &&
+                                    clut_y < 512u
+                                    &&
+                                    clut_x + pal_count <= 1024u
+                                )
+                                {
+                                    for (
+                                        uint32_t pi = 0u;
+                                        pi < pal_count;
+                                        ++pi
+                                    )
+                                    {
+                                        if (
+                                            (
+                                                vram[
+                                                    clut_y * 1024u
+                                                    + clut_x
+                                                    + pi
+                                                ]
+                                                &
+                                                0x7FFFu
+                                            )
+                                            != 0u
+                                        )
+                                        {
+                                            ++pal_nz;
+                                        }
+                                    }
+                                }
+
+                                for (uint32_t py = 0u; py < 60u; ++py)
+                                {
+                                    uint32_t sy =
+                                        page_y
+                                        +
+                                        ((tv + py) & 0xFFu);
+
+                                    for (uint32_t px = 0u; px < 52u; ++px)
+                                    {
+                                        uint32_t sx =
+                                            (tu + px) & 0xFFu;
+
+                                        uint32_t index = 0u;
+                                        uint16_t color = 0u;
+
+                                        if (depth == 0u)
+                                        {
+                                            uint16_t tw =
+                                                vram[
+                                                    sy * 1024u
+                                                    + page_x
+                                                    + (sx >> 2)
+                                                ];
+
+                                            index =
+                                                (tw >> ((sx & 3u) * 4u))
+                                                & 0x0Fu;
+
+                                            if (
+                                                clut_y < 512u
+                                                &&
+                                                clut_x + index < 1024u
+                                            )
+                                            {
+                                                color =
+                                                    vram[
+                                                        clut_y * 1024u
+                                                        + clut_x
+                                                        + index
+                                                    ];
+                                            }
+                                        }
+                                        else if (depth == 1u)
+                                        {
+                                            uint16_t tw =
+                                                vram[
+                                                    sy * 1024u
+                                                    + page_x
+                                                    + (sx >> 1)
+                                                ];
+
+                                            index =
+                                                (tw >> ((sx & 1u) * 8u))
+                                                & 0xFFu;
+
+                                            if (
+                                                clut_y < 512u
+                                                &&
+                                                clut_x + index < 1024u
+                                            )
+                                            {
+                                                color =
+                                                    vram[
+                                                        clut_y * 1024u
+                                                        + clut_x
+                                                        + index
+                                                    ];
+                                            }
+                                        }
+                                        else if (depth == 2u)
+                                        {
+                                            color =
+                                                vram[
+                                                    sy * 1024u
+                                                    + page_x
+                                                    + sx
+                                                ];
+
+                                            index =
+                                                color & 0x7FFFu;
+                                        }
+
+                                        if (index != 0u)
+                                        {
+                                            ++idx_nz;
+                                        }
+
+                                        if ((color & 0x7FFFu) != 0u)
+                                        {
+                                            ++vis_nz;
+                                        }
+                                    }
+                                }
+
+                                printf(
+                                    "HAND pkt e1:%03lX xy:%d,%d uv:%lu,%lu cl:%lu,%lu\n",
+                                    (unsigned long)e1,
+                                    hx,
+                                    hy,
+                                    (unsigned long)tu,
+                                    (unsigned long)tv,
+                                    (unsigned long)clut_x,
+                                    (unsigned long)clut_y
+                                );
+
+                                printf(
+                                    "HAND tex d:%lu idx/vis/pal:%lu/%lu/%lu\n",
+                                    (unsigned long)depth,
+                                    (unsigned long)idx_nz,
+                                    (unsigned long)vis_nz,
+                                    (unsigned long)pal_nz
+                                );
+                            }
+                            else
+                            {
+                                printf("HAND pkt: not seen by DMA2\n");
+                                printf("HAND tex: n/a\n");
+                            }
+
                             printf(
-                                "B135.53 card callback trace\n"
+                                "B135.54 hand DMA + texture probe\n"
                             );
                         }
 
