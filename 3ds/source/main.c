@@ -2914,6 +2914,15 @@ static uint32_t g_b13551_hit_31b58 = 0u;
 static uint32_t g_b13551_hit_31948 = 0u;
 static uint32_t g_b13551_hit_319dc = 0u;
 
+/*
+ * B135.53 - the active CC objects on the duel screen all point to
+ * FUN_80016C20.  FUN_80017E94 is its constructor and FUN_800166A0
+ * is the actual miniature-card renderer called by 80016C20.
+ */
+static uint32_t g_b13553_hit_17e94 = 0u;
+static uint32_t g_b13553_hit_16c20 = 0u;
+static uint32_t g_b13553_hit_166a0 = 0u;
+
 static uint32_t g_ra_8111c = 0;
 static uint32_t g_ra_82168 = 0;
 static uint32_t g_ra_8219c = 0;
@@ -3159,6 +3168,18 @@ static void fm_trace_dispatch(
 
     switch (phys)
     {
+        case 0x00017E94u:
+            ++g_b13553_hit_17e94;
+            break;
+
+        case 0x00016C20u:
+            ++g_b13553_hit_16c20;
+            break;
+
+        case 0x000166A0u:
+            ++g_b13553_hit_166a0;
+            break;
+
         case 0x00032824u:
             ++g_b13551_hit_32824;
             break;
@@ -15428,7 +15449,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.52-ACTIVE-CB-DUMP (BASE B131)\n");
+            printf("BUILD B135.53-CARD-CB-TRACE (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15857,29 +15878,16 @@ int main(void)
                             );
 
                             /*
-                             * B135.52 - stop assuming which callback owns the
-                             * missing hand.  Dump the callbacks that are
-                             * ACTUALLY attached to the active C4 and CC
-                             * objects on the current duel screen.
+                             * B135.53 - the seven active CC objects are card
+                             * display objects created by FUN_80017E94:
+                             *   callback +4C = FUN_80016C20
+                             *   FUN_80016C20 -> FUN_800166A0
                              *
-                             * A = object + 0x24 callback
-                             * B = object + 0x4C callback
-                             * Addresses are printed as 21-bit guest physical
-                             * offsets so 800xxxxx / 801xxxxx remain distinct.
+                             * Dump their live position/card slot/state and
+                             * prove whether that renderer chain executes.
                              */
-                            static const unsigned dump_lists[2] =
                             {
-                                2u, 6u
-                            };
-
-                            static const char *dump_names[2] =
-                            {
-                                "C4", "CC"
-                            };
-
-                            for (unsigned dl = 0u; dl < 2u; ++dl)
-                            {
-                                int idx = oh[dump_lists[dl]];
+                                int idx = oh[6];
                                 unsigned shown = 0u;
 
                                 while (
@@ -15893,8 +15901,15 @@ int main(void)
                                         +
                                         (uint32_t)idx * 0x70u;
 
-                                    uint32_t cb24 =
-                                        cpu->read_word(obj + 0x24u);
+                                    int x =
+                                        (int16_t)cpu->read_half(
+                                            obj + 0x30u
+                                        );
+
+                                    int y =
+                                        (int16_t)cpu->read_half(
+                                            obj + 0x32u
+                                        );
 
                                     uint32_t cb4c =
                                         cpu->read_word(obj + 0x4Cu);
@@ -15902,17 +15917,29 @@ int main(void)
                                     uint32_t flags =
                                         cpu->read_half(obj + 0x08u);
 
-                                    uint32_t layer =
-                                        cpu->read_byte(obj + 0x17u);
+                                    uint32_t b67 =
+                                        cpu->read_byte(obj + 0x67u);
+
+                                    uint32_t b68 =
+                                        cpu->read_byte(obj + 0x68u);
+
+                                    uint32_t b69 =
+                                        cpu->read_byte(obj + 0x69u);
+
+                                    uint32_t card_slot =
+                                        cpu->read_byte(obj + 0x6Au);
 
                                     printf(
-                                        "%s id:%02d A:%06lX B:%06lX F:%02lX L:%lu\n",
-                                        dump_names[dl],
+                                        "CC%02d xy:%d,%d cb:%06lX s:%lu %lu/%lu/%lu f:%02lX\n",
                                         idx,
-                                        (unsigned long)(cb24 & 0x1FFFFFu),
+                                        x,
+                                        y,
                                         (unsigned long)(cb4c & 0x1FFFFFu),
-                                        (unsigned long)(flags & 0xFFu),
-                                        (unsigned long)layer
+                                        (unsigned long)card_slot,
+                                        (unsigned long)b67,
+                                        (unsigned long)b68,
+                                        (unsigned long)b69,
+                                        (unsigned long)(flags & 0xFFu)
                                     );
 
                                     idx =
@@ -15922,18 +15949,17 @@ int main(void)
 
                                     ++shown;
                                 }
-
-                                if (shown == 0u)
-                                {
-                                    printf(
-                                        "%s empty\n",
-                                        dump_names[dl]
-                                    );
-                                }
                             }
 
                             printf(
-                                "HIT 41048/31B58:%lu/%lu child:%lu/%lu\n",
+                                "CARD hit ctor/cb/draw:%lu/%lu/%lu\n",
+                                (unsigned long)g_b13553_hit_17e94,
+                                (unsigned long)g_b13553_hit_16c20,
+                                (unsigned long)g_b13553_hit_166a0
+                            );
+
+                            printf(
+                                "OLD 41048/31B58:%lu/%lu child:%lu/%lu\n",
                                 (unsigned long)g_b13551_hit_41048,
                                 (unsigned long)g_b13551_hit_31b58,
                                 (unsigned long)g_b13551_hit_31948,
@@ -15941,7 +15967,7 @@ int main(void)
                             );
 
                             printf(
-                                "B135.52 active callback dump\n"
+                                "B135.53 card callback trace\n"
                             );
                         }
 
