@@ -124,6 +124,12 @@ static int g_b13543_last_area_y2 = 0;
 static uint32_t g_b125_texquad_hits = 0u;
 static uint32_t g_b125_gouraud_hits = 0u;
 static uint32_t g_b125_fallbacks = 0u;
+
+/*
+ * B135.45 - fidelity test for missing dialogue/card layers.
+ * Force flat textured quads (2Ch..2Fh) through the generic renderer.
+ */
+static uint32_t g_b13545_generic_texquads = 0u;
 static uint64_t g_b125_pixels = 0u;
 
 /*
@@ -3778,38 +3784,17 @@ static void execute_command(void)
 
             if (quad)
             {
-                int x3 =
-                    (coord_x(g_cmd[7]) + g_offset_x);
-
-                int y3 =
-                    (coord_y(g_cmd[7]) + g_offset_y);
-
-                int u3 =
-                    tex_u(g_cmd[8]);
-
-                int v3 =
-                    tex_v(g_cmd[8]);
-
+                /*
+                 * B135.45:
+                 *
+                 * Dialogue and duel both show large amounts of 2Ch textured
+                 * quads while their foreground/card layer is missing.  The
+                 * generic PSXRecomp triangle path is slower but older and
+                 * fidelity-oriented.  Bypass only the B125 fast quad path to
+                 * test whether its affine scan conversion is the culprit.
+                 */
                 ++g_b126_try_t;
-
-                if (
-                    b125_try_textured_quad(
-                        opcode,
-                        x0,y0,u0,v0,
-                        x1,y1,u1,v1,
-                        x2,y2,u2,v2,
-                        x3,y3,u3,v3,
-                        clut_x(clut),
-                        clut_y(clut),
-                        g_texpage,
-                        g_cmd[0],
-                        raw
-                    )
-                )
-                {
-                    g_has_frame = 1;
-                    return;
-                }
+                ++g_b13545_generic_texquads;
             }
 
             sw_draw_textured_triangle(
@@ -5065,6 +5050,9 @@ void fm_gpu_init(
         0u;
 
     g_b125_fallbacks =
+        0u;
+
+    g_b13545_generic_texquads =
         0u;
 
     g_b125_pixels =
@@ -6610,6 +6598,12 @@ void fm_gpu_debug_stats(
             1024,
             512
         );
+}
+
+
+uint32_t fm_gpu_b13545_generic_texquads(void)
+{
+    return g_b13545_generic_texquads;
 }
 
 
