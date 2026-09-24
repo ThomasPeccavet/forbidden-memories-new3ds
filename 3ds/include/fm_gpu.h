@@ -227,6 +227,25 @@ typedef struct FMGpuDebugStats
 uint32_t fm_gpu_b126_build_tag(void);
 
 /*
+ * B135.43 - textured-rectangle write probe for missing dialogue/cards.
+ */
+void fm_gpu_b13543_rect_probe(
+    uint64_t *nonzero_texels,
+    uint64_t *writes,
+    uint32_t *clip_rejects,
+    int *last_x,
+    int *last_y,
+    int *last_w,
+    int *last_h,
+    int *last_off_x,
+    int *last_off_y,
+    int *last_area_x1,
+    int *last_area_y1,
+    int *last_area_x2,
+    int *last_area_y2
+);
+
+/*
  * B127: lightweight hot-path snapshot.
  * Unlike fm_gpu_debug_stats(), this does NOT scan the 1024x512 VRAM.
  */
