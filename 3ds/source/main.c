@@ -15449,7 +15449,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.54-HAND-DMA-TEX (BASE B131)\n");
+            printf("BUILD B135.55-HAND-DMA-FAMILY (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15899,6 +15899,13 @@ int main(void)
                                 (unsigned long)b130_dma.b13554_hand_last_node_ordinal
                             );
 
+                            printf(
+                                "DRAW off:%d,%d prim:%08lX\n",
+                                (int16_t)cpu->read_half(0x800FF444u),
+                                (int16_t)cpu->read_half(0x800FF446u),
+                                (unsigned long)cpu->read_word(0x800FF5C4u)
+                            );
+
                             if (b130_dma.b13554_hand_total_hits != 0u)
                             {
                                 uint32_t e1 =
@@ -16076,10 +16083,17 @@ int main(void)
                                 }
 
                                 printf(
-                                    "HAND pkt e1:%03lX xy:%d,%d uv:%lu,%lu cl:%lu,%lu\n",
+                                    "HAND pkt op:%02lX e1:%03lX xy:%d,%d\n",
+                                    (unsigned long)(
+                                        b130_dma.b13554_hand_cmd1 >> 24
+                                    ),
                                     (unsigned long)e1,
                                     hx,
-                                    hy,
+                                    hy
+                                );
+
+                                printf(
+                                    "HAND uv:%lu,%lu cl:%lu,%lu\n",
                                     (unsigned long)tu,
                                     (unsigned long)tv,
                                     (unsigned long)clut_x,
@@ -16101,7 +16115,7 @@ int main(void)
                             }
 
                             printf(
-                                "B135.54 hand DMA + texture probe\n"
+                                "B135.55 hand DMA family + texture probe\n"
                             );
                         }
 
