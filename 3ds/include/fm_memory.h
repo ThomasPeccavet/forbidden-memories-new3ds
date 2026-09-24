@@ -108,6 +108,18 @@ typedef struct FMDmaDebugStats
     uint32_t dma2_empty_fast_last;
     uint32_t dma2_empty_fast_max;
 
+    /* B135.54 - five-card hand packet provenance through real DMA2. */
+    uint32_t b13554_hand_total_hits;
+    uint32_t b13554_hand_last_list_hits;
+    uint32_t b13554_hand_last_addr;
+    uint32_t b13554_hand_last_node_ordinal;
+    uint32_t b13554_hand_after_payloads;
+    uint32_t b13554_hand_cmd0;
+    uint32_t b13554_hand_cmd1;
+    uint32_t b13554_hand_cmd2;
+    uint32_t b13554_hand_cmd3;
+    uint32_t b13554_hand_cmd4;
+
     uint32_t dma6_transfer_count;
     uint64_t dma6_word_count;
 
