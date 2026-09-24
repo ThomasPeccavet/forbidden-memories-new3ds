@@ -74,7 +74,8 @@ CFLAGS := \
 	-MP \
 	-Iinclude \
 	-I$(CTRULIB)/include \
-	-I$(RUNTIME)/include
+	-I$(RUNTIME)/include \
+	$(EXTRA_CFLAGS)
 
 
 LDFLAGS := \

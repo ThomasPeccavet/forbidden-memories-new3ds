@@ -30,7 +30,21 @@ jobs:
           3dsxtool --version || true
 
       - name: Compile all native ARM11 units
-        run: make -C 3ds compile-check -j2
+        run: >-
+          make -C 3ds compile-check -j2
+          EXTRA_CFLAGS="-Werror=implicit-function-declaration
+          -Werror=incompatible-pointer-types
+          -Werror=int-conversion
+          -Werror=return-type
+          -Werror=format"
 
       - name: List compiled objects
         run: find 3ds/build -maxdepth 1 -name '*.o' -type f -print | sort
+
+      - name: Report object sizes and unresolved ABI imports
+        run: |
+          "$DEVKITARM/bin/arm-none-eabi-size" -t 3ds/build/*.o
+          "$DEVKITARM/bin/arm-none-eabi-nm" -u 3ds/build/*.o \
+            | sed '/:$/d' \
+            | awk '{print $NF}' \
+            | sort -u
