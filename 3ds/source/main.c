@@ -3202,6 +3202,47 @@ static int b13558_chain_reaches(
     return 0;
 }
 
+/*
+ * B135.59 - compact lifecycle event ring.
+ *
+ * The B135.58 result proved that every 52x60 hand packet and its OT
+ * bucket are valid immediately after 80084978 returns, but both are zero
+ * by the time the hand OT reaches GsSortOt.  Record the exact ordering of
+ * the frame finalizer, sort, DrawOTag, allocator switch and ClearOTagR.
+ */
+#define B13559_EVT_MAX 32u
+
+typedef struct B13559Event
+{
+    uint32_t seq;
+    uint32_t type;
+    uint32_t a;
+    uint32_t b;
+} B13559Event;
+
+static B13559Event g_b13559_evt[B13559_EVT_MAX];
+static uint32_t g_b13559_evt_head = 0u;
+static uint32_t g_b13559_evt_seq = 0u;
+
+static void b13559_log(
+    uint32_t type,
+    uint32_t a,
+    uint32_t b
+)
+{
+    B13559Event *e =
+        &g_b13559_evt[
+            g_b13559_evt_head % B13559_EVT_MAX
+        ];
+
+    e->seq = ++g_b13559_evt_seq;
+    e->type = type;
+    e->a = a;
+    e->b = b;
+
+    ++g_b13559_evt_head;
+}
+
 static uint32_t g_ra_8111c = 0;
 static uint32_t g_ra_82168 = 0;
 static uint32_t g_ra_8219c = 0;
@@ -3447,6 +3488,72 @@ static void fm_trace_dispatch(
 
     switch (phys)
     {
+        case 0x00012D60u:
+            if (cpu)
+            {
+                b13559_log(
+                    (uint32_t)'F',
+                    cpu->read_byte(0x8009C332u),
+                    cpu->read_word(0x8009C414u)
+                );
+            }
+            break;
+
+        case 0x00085D98u:
+            if (cpu)
+            {
+                b13559_log(
+                    (uint32_t)'S',
+                    cpu->gpr[4],
+                    cpu->gpr[5]
+                );
+            }
+            break;
+
+        case 0x00085D08u:
+            if (cpu)
+            {
+                b13559_log(
+                    (uint32_t)'D',
+                    cpu->gpr[4],
+                    0u
+                );
+            }
+            break;
+
+        case 0x00086248u:
+            if (cpu)
+            {
+                b13559_log(
+                    (uint32_t)'A',
+                    cpu->gpr[4],
+                    cpu->read_byte(0x8009C332u)
+                );
+            }
+            break;
+
+        case 0x00085D38u:
+            if (cpu)
+            {
+                b13559_log(
+                    (uint32_t)'I',
+                    cpu->gpr[6],
+                    cpu->read_byte(0x8009C332u)
+                );
+            }
+            break;
+
+        case 0x00080150u:
+            if (cpu)
+            {
+                b13559_log(
+                    (uint32_t)'C',
+                    cpu->gpr[4],
+                    cpu->gpr[5]
+                );
+            }
+            break;
+
         case 0x000424B8u:
             ++g_b13556_hit_424b8;
             if (cpu)
@@ -3511,6 +3618,19 @@ static void fm_trace_dispatch(
                         packet & 0x1FFFFFFFu;
 
                     ++g_b13556_hand_head;
+
+                    /*
+                     * One H event per five-card group is enough to expose the
+                     * ordering without flooding the ring.
+                     */
+                    if (x == 14 && y == 162)
+                    {
+                        b13559_log(
+                            (uint32_t)'H',
+                            ot,
+                            packet
+                        );
+                    }
 
                     for (uint32_t si = 0u; si < 2u; ++si)
                     {
@@ -3995,6 +4115,12 @@ static void fm_trace_dispatch(
             if (cpu)
             {
                 g_b78_drawotag_last_a0 = cpu->gpr[4];
+
+                b13559_log(
+                    (uint32_t)'G',
+                    cpu->gpr[4],
+                    0u
+                );
 
                 uint32_t draw_tag = cpu->gpr[4];
                 uint32_t tag0 = cpu->read_word(0x800E5FC0u + 0x10u);
@@ -16091,7 +16217,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.58-HAND-PACKET-LIFETIME (BASE B131)\n");
+            printf("BUILD B135.59-HAND-LIFECYCLE-ORDER (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -16520,7 +16646,7 @@ int main(void)
                             );
 
                             /*
-                             * B135.58 - exact packet lifetime.
+                             * B135.59 - packet lifetime + exact event order.
                              */
                             B13558HandSlot *dbg_hs =
                                 (
@@ -16530,70 +16656,99 @@ int main(void)
                                     : &g_b13558_hand[0];
 
                             printf(
-                                "CARD c/d:%lu/%lu P849 card:%lu\n",
+                                "CARD c/d:%lu/%lu P849:%lu RET:%lu/%lu/%lu\n",
                                 (unsigned long)g_b13553_hit_16c20,
                                 (unsigned long)g_b13553_hit_166a0,
-                                (unsigned long)g_b13556_hand_84978
-                            );
-
-                            printf(
-                                "RET h/sh/b:%lu/%lu/%lu p:%06lX b:%06lX\n",
+                                (unsigned long)g_b13556_hand_84978,
                                 (unsigned long)dbg_hs->ret_hits,
                                 (unsigned long)dbg_hs->shape_ok,
-                                (unsigned long)dbg_hs->bucket_ok,
+                                (unsigned long)dbg_hs->bucket_ok
+                            );
+
+                            printf(
+                                "HAND p/b:%06lX/%06lX now:%08lX/%08lX\n",
                                 (unsigned long)(dbg_hs->packet & 0x1FFFFFu),
-                                (unsigned long)(dbg_hs->bucket & 0x1FFFFFu)
+                                (unsigned long)(dbg_hs->bucket & 0x1FFFFFu),
+                                (unsigned long)g_b13558_last_packet_header,
+                                (unsigned long)g_b13558_last_bucket_word
                             );
 
                             printf(
-                                "PKT %08lX %08lX %08lX\n",
-                                (unsigned long)dbg_hs->words[0],
-                                (unsigned long)dbg_hs->words[1],
-                                (unsigned long)dbg_hs->words[2]
-                            );
-
-                            printf(
-                                "PKT %08lX %08lX %08lX\n",
-                                (unsigned long)dbg_hs->words[3],
-                                (unsigned long)dbg_hs->words[4],
-                                (unsigned long)dbg_hs->words[5]
-                            );
-
-                            printf(
-                                "OT pre s/sh/br/pr:%lu/%lu/%lu/%lu\n",
+                                "PRE s/sh/br/pr:%lu/%lu/%lu/%lu post:%lu DMA:%lu\n",
                                 (unsigned long)g_b13558_merge_samples,
                                 (unsigned long)g_b13558_pre_shape,
                                 (unsigned long)g_b13558_pre_bucket_reach,
-                                (unsigned long)g_b13558_pre_packet_reach
-                            );
-
-                            printf(
-                                "OT L/O/F/P:%lu/%06lX/%ld/%lu tag:%06lX\n",
-                                (unsigned long)g_b13558_last_len,
-                                (unsigned long)(g_b13558_last_org & 0x1FFFFFu),
-                                (long)(int32_t)g_b13558_last_off,
-                                (unsigned long)g_b13558_last_point,
-                                (unsigned long)(g_b13558_last_tag & 0x1FFFFFu)
-                            );
-
-                            printf(
-                                "NOW bh/ph:%08lX/%08lX st:%lu/%lu\n",
-                                (unsigned long)g_b13558_last_bucket_word,
-                                (unsigned long)g_b13558_last_packet_header,
-                                (unsigned long)g_b13558_last_steps_bucket,
-                                (unsigned long)g_b13558_last_steps_packet
-                            );
-
-                            printf(
-                                "STOP:%06lX %08lX postsh:%lu DMA:%lu\n",
-                                (unsigned long)(g_b13558_last_stop & 0x1FFFFFu),
-                                (unsigned long)g_b13558_last_stop_header,
+                                (unsigned long)g_b13558_pre_packet_reach,
                                 (unsigned long)g_b13558_post_shape,
                                 (unsigned long)b130_dma.b13554_hand_total_hits
                             );
 
+                            {
+                                uint32_t available =
+                                    g_b13559_evt_head < B13559_EVT_MAX
+                                        ? g_b13559_evt_head
+                                        : B13559_EVT_MAX;
+
+                                uint32_t show =
+                                    available < 16u
+                                        ? available
+                                        : 16u;
+
+                                for (
+                                    uint32_t row = 0u;
+                                    row < 4u;
+                                    ++row
+                                )
+                                {
+                                    printf("EV ");
+
+                                    for (
+                                        uint32_t col = 0u;
+                                        col < 4u;
+                                        ++col
+                                    )
+                                    {
+                                        uint32_t k = row * 4u + col;
+
+                                        if (k >= show)
+                                        {
+                                            printf("- ");
+                                            continue;
+                                        }
+
+                                        uint32_t from_oldest =
+                                            show - 1u - k;
+
+                                        uint32_t pos =
+                                            (
+                                                g_b13559_evt_head
+                                                - 1u
+                                                - from_oldest
+                                            )
+                                            %
+                                            B13559_EVT_MAX;
+
+                                        B13559Event *e =
+                                            &g_b13559_evt[pos];
+
+                                        printf(
+                                            "%c:%05lX/%05lX ",
+                                            (int)e->type,
+                                            (unsigned long)(
+                                                e->a & 0xFFFFFu
+                                            ),
+                                            (unsigned long)(
+                                                e->b & 0xFFFFFu
+                                            )
+                                        );
+                                    }
+
+                                    printf("\n");
+                                }
+                            }
+
                             printf(
-                                "BASE:%06lX idx:%lu B135.58 lifetime\n",
+                                "BASE:%06lX idx:%lu B135.59 lifecycle\n",
                                 (unsigned long)(
                                     cpu->read_word(0x8009C414u)
                                     & 0x1FFFFFu
