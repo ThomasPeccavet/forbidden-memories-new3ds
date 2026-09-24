@@ -215,6 +215,20 @@ void fm_runtime_b13567_pipeline(
     uint32_t *last_6a0
 );
 
+void fm_runtime_b13568_stages(
+    uint32_t *pre_entries,
+    uint32_t *pre_any,
+    uint32_t *post_entries,
+    uint32_t *post_any,
+    uint32_t *fin_entries,
+    uint32_t *fin_any,
+    uint32_t *pre_mask,
+    uint32_t *post_mask,
+    uint32_t *fin_mask,
+    uint32_t *base,
+    uint32_t ptrs[4]
+);
+
 
 /*
  * ============================================================
