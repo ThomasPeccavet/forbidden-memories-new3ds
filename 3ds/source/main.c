@@ -3243,6 +3243,124 @@ static void b13559_log(
     ++g_b13559_evt_head;
 }
 
+/*
+ * B135.60 - narrow the exact moment where the live hand packet dies.
+ *
+ * Stages:
+ *   0 = immediately after 80084978 returns for a hand packet
+ *   1 = entry 80012D60 (frame finalizer)
+ *   2 = 80012DE4, immediately after ResetGraph(1)
+ *   3 = 80012E04, immediately after the optional 80035EB0 path
+ *   4 = HLE entry for the hand GsSortOt, before any OT repair
+ */
+typedef struct B13560Stage
+{
+    uint32_t hits;
+    uint32_t base;
+    uint32_t src_ot;
+    uint32_t packet;
+    uint32_t bucket;
+    uint32_t packet_header;
+    uint32_t bucket_word;
+    uint32_t allocator;
+    uint32_t tag;
+    uint32_t reach_packet;
+    uint32_t reach_bucket;
+} B13560Stage;
+
+static B13560Stage g_b13560_stage[5];
+
+static void b13560_snapshot(
+    CPUState *cpu,
+    unsigned stage
+)
+{
+    if (!cpu || stage >= 5u)
+    {
+        return;
+    }
+
+    uint32_t base =
+        cpu->read_word(0x8009C414u);
+
+    B13558HandSlot *hs = NULL;
+
+    if (base == 0x800E0EB0u)
+    {
+        hs = &g_b13558_hand[0];
+    }
+    else if (base == 0x800E6010u)
+    {
+        hs = &g_b13558_hand[1];
+    }
+
+    if (!hs)
+    {
+        return;
+    }
+
+    B13560Stage *st =
+        &g_b13560_stage[stage];
+
+    ++st->hits;
+    st->base = base;
+    st->src_ot = hs->ot;
+    st->packet = hs->packet;
+    st->bucket = hs->bucket;
+    st->allocator =
+        cpu->read_word(0x800FF5C4u);
+    st->tag =
+        cpu->read_word(hs->ot + 0x10u);
+
+    st->packet_header =
+        hs->packet != 0u
+            ? cpu->read_word(hs->packet)
+            : 0u;
+
+    st->bucket_word =
+        hs->bucket != 0u
+            ? cpu->read_word(hs->bucket)
+            : 0u;
+
+    st->reach_packet = 0u;
+    st->reach_bucket = 0u;
+
+    if (st->tag != 0u)
+    {
+        if (
+            hs->packet != 0u
+            &&
+            b13558_chain_reaches(
+                cpu,
+                st->tag,
+                hs->packet,
+                NULL,
+                NULL,
+                NULL
+            )
+        )
+        {
+            st->reach_packet = 1u;
+        }
+
+        if (
+            hs->bucket != 0u
+            &&
+            b13558_chain_reaches(
+                cpu,
+                st->tag,
+                hs->bucket,
+                NULL,
+                NULL,
+                NULL
+            )
+        )
+        {
+            st->reach_bucket = 1u;
+        }
+    }
+}
+
 static uint32_t g_ra_8111c = 0;
 static uint32_t g_ra_82168 = 0;
 static uint32_t g_ra_8219c = 0;
@@ -3489,6 +3607,7 @@ static void fm_trace_dispatch(
     switch (phys)
     {
         case 0x00012D60u:
+            b13560_snapshot(cpu, 1u);
             if (cpu)
             {
                 b13559_log(
@@ -3497,6 +3616,14 @@ static void fm_trace_dispatch(
                     cpu->read_word(0x8009C414u)
                 );
             }
+            break;
+
+        case 0x00012DE4u:
+            b13560_snapshot(cpu, 2u);
+            break;
+
+        case 0x00012E04u:
+            b13560_snapshot(cpu, 3u);
             break;
 
         case 0x00085D98u:
@@ -3692,6 +3819,7 @@ static void fm_trace_dispatch(
                     }
                 }
             }
+            b13560_snapshot(cpu, 0u);
             break;
 
         case 0x00017E94u:
@@ -14326,6 +14454,21 @@ int main(void)
                     uint32_t dst_ot = cpu->gpr[5];
                     uint32_t native_result = dst_ot;
 
+                    b13559_log(
+                        (uint32_t)'S',
+                        src_ot,
+                        dst_ot
+                    );
+
+                    if (
+                        src_ot == 0x800E5FD4u
+                        ||
+                        src_ot == 0x800EB134u
+                    )
+                    {
+                        b13560_snapshot(cpu, 4u);
+                    }
+
                     ++g_hle_85d98_calls;
                     g_hle_85d98_last_src = src_ot;
                     g_hle_85d98_last_dst = dst_ot;
@@ -16217,7 +16360,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.59-HAND-LIFECYCLE-ORDER (BASE B131)\n");
+            printf("BUILD B135.60-HAND-DEATH-STAGE (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -16646,42 +16789,53 @@ int main(void)
                             );
 
                             /*
-                             * B135.59 - packet lifetime + exact event order.
+                             * B135.60 - show exactly which finalizer stage
+                             * destroys/disconnects the latest hand packet.
                              */
-                            B13558HandSlot *dbg_hs =
-                                (
-                                    g_b13557_last_src == 0x800EB134u
-                                )
-                                    ? &g_b13558_hand[1]
-                                    : &g_b13558_hand[0];
-
                             printf(
-                                "CARD c/d:%lu/%lu P849:%lu RET:%lu/%lu/%lu\n",
+                                "CARD c/d:%lu/%lu P849:%lu pre:%lu/%lu/%lu\n",
                                 (unsigned long)g_b13553_hit_16c20,
                                 (unsigned long)g_b13553_hit_166a0,
                                 (unsigned long)g_b13556_hand_84978,
-                                (unsigned long)dbg_hs->ret_hits,
-                                (unsigned long)dbg_hs->shape_ok,
-                                (unsigned long)dbg_hs->bucket_ok
-                            );
-
-                            printf(
-                                "HAND p/b:%06lX/%06lX now:%08lX/%08lX\n",
-                                (unsigned long)(dbg_hs->packet & 0x1FFFFFu),
-                                (unsigned long)(dbg_hs->bucket & 0x1FFFFFu),
-                                (unsigned long)g_b13558_last_packet_header,
-                                (unsigned long)g_b13558_last_bucket_word
-                            );
-
-                            printf(
-                                "PRE s/sh/br/pr:%lu/%lu/%lu/%lu post:%lu DMA:%lu\n",
-                                (unsigned long)g_b13558_merge_samples,
                                 (unsigned long)g_b13558_pre_shape,
                                 (unsigned long)g_b13558_pre_bucket_reach,
-                                (unsigned long)g_b13558_pre_packet_reach,
-                                (unsigned long)g_b13558_post_shape,
-                                (unsigned long)b130_dma.b13554_hand_total_hits
+                                (unsigned long)g_b13558_pre_packet_reach
                             );
+
+                            for (unsigned si = 0u; si < 5u; ++si)
+                            {
+                                B13560Stage *st =
+                                    &g_b13560_stage[si];
+
+                                printf(
+                                    "S%u h:%lu b:%05lX ph:%08lX bw:%08lX r:%lu/%lu\n",
+                                    si,
+                                    (unsigned long)st->hits,
+                                    (unsigned long)(
+                                        st->base & 0xFFFFFu
+                                    ),
+                                    (unsigned long)st->packet_header,
+                                    (unsigned long)st->bucket_word,
+                                    (unsigned long)st->reach_bucket,
+                                    (unsigned long)st->reach_packet
+                                );
+
+                                printf(
+                                    "   p:%05lX q:%05lX a:%05lX t:%05lX\n",
+                                    (unsigned long)(
+                                        st->packet & 0xFFFFFu
+                                    ),
+                                    (unsigned long)(
+                                        st->bucket & 0xFFFFFu
+                                    ),
+                                    (unsigned long)(
+                                        st->allocator & 0xFFFFFu
+                                    ),
+                                    (unsigned long)(
+                                        st->tag & 0xFFFFFu
+                                    )
+                                );
+                            }
 
                             {
                                 uint32_t available =
@@ -16690,13 +16844,13 @@ int main(void)
                                         : B13559_EVT_MAX;
 
                                 uint32_t show =
-                                    available < 16u
+                                    available < 8u
                                         ? available
-                                        : 16u;
+                                        : 8u;
 
                                 for (
                                     uint32_t row = 0u;
-                                    row < 4u;
+                                    row < 2u;
                                     ++row
                                 )
                                 {
@@ -16748,7 +16902,7 @@ int main(void)
                             }
 
                             printf(
-                                "BASE:%06lX idx:%lu B135.59 lifecycle\n",
+                                "BASE:%06lX idx:%lu B135.60 death-stage\n",
                                 (unsigned long)(
                                     cpu->read_word(0x8009C414u)
                                     & 0x1FFFFFu
