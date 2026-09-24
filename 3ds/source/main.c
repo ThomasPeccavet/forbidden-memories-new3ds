@@ -13639,8 +13639,20 @@ int main(void)
                     fm_repair_ot_sentinel(cpu, src_ot);
                     fm_repair_ot_sentinel(cpu, dst_ot);
 
+                    /*
+                     * B135.48 fidelity test:
+                     *
+                     * The first-duel reference is known-good on the PC runtime,
+                     * while 3DS is missing foreground dialogue/hand layers.
+                     * Primitive renderers and GP1(05) have now been ruled out.
+                     *
+                     * Execute the ORIGINAL guest GsSortOt first so the exact
+                     * Psy-Q ordering-table splice logic is used.  Keep the
+                     * B119 C translation only as a fallback if the guest
+                     * routine still encounters a malformed/cyclic OT.
+                     */
                     int b115_native_ok =
-                        fm_try_c_gssortot(
+                        fm_try_native_gssortot(
                             cpu,
                             src_ot,
                             dst_ot,
@@ -13650,7 +13662,7 @@ int main(void)
                     if (!b115_native_ok)
                     {
                         b115_native_ok =
-                            fm_try_native_gssortot(
+                            fm_try_c_gssortot(
                                 cpu,
                                 src_ot,
                                 dst_ot,
@@ -15271,7 +15283,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.47-GP1-PROBE (BASE B131)\n");
+            printf("BUILD B135.48-NATIVE-GSSORTOT (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15754,6 +15766,16 @@ int main(void)
                             "ENV off:%d,%d area:%d,%d-%d,%d\n",
                             env_ox, env_oy,
                             env_x1, env_y1, env_x2, env_y2
+                        );
+
+                        printf(
+                            "SORT G ok/f/c:%lu/%lu/%ld C ok/f/c:%lu/%lu/%ld\n",
+                            (unsigned long)g_sort_native_ok,
+                            (unsigned long)g_sort_native_fail,
+                            (long)g_sort_native_last_code,
+                            (unsigned long)g_b119_csort_ok,
+                            (unsigned long)g_b119_csort_fallbacks,
+                            (long)g_b119_csort_last_code
                         );
 
                         g_b13547_prev_e3 = env_e3;
