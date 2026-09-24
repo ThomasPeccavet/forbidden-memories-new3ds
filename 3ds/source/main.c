@@ -3546,6 +3546,188 @@ static void b13561_checkpoint_base(
     }
 }
 
+/*
+ * B135.62 - freeze the exact packet generation selected at finalizer entry.
+ *
+ * B135.61 still followed a mutable "latest hand packet" pointer.  If a new
+ * hand packet is emitted before the corresponding GsSortOt checkpoint, the
+ * diagnostic can compare different generations.  Freeze live -> frame at F,
+ * then inspect that exact packet at R and S.
+ */
+typedef struct B13562FrameLife
+{
+    uint32_t base;
+    uint32_t src_phys;
+
+    uint32_t live_gen;
+    uint32_t live_packet;
+    uint32_t live_bucket;
+
+    uint32_t frame_gen;
+    uint32_t frame_packet;
+    uint32_t frame_bucket;
+
+    uint32_t f_seen;
+    uint32_t f_shape;
+    uint32_t f_reach_b;
+    uint32_t f_reach_p;
+
+    uint32_t r_seen;
+    uint32_t r_shape;
+    uint32_t r_reach_b;
+    uint32_t r_reach_p;
+
+    uint32_t s_seen;
+    uint32_t s_shape;
+    uint32_t s_reach_b;
+    uint32_t s_reach_p;
+
+    uint32_t last_ph;
+    uint32_t last_bw;
+    uint32_t last_tag;
+    uint32_t last_src_raw;
+    uint32_t last_dst_raw;
+} B13562FrameLife;
+
+static B13562FrameLife g_b13562[2] =
+{
+    {
+        0x800E0EB0u, 0x000E5FD4u,
+        0u,0u,0u, 0u,0u,0u,
+        0u,0u,0u,0u, 0u,0u,0u,0u,
+        0u,0u,0u,0u, 0u,0u,0u,0u,0u
+    },
+    {
+        0x800E6010u, 0x000EB134u,
+        0u,0u,0u, 0u,0u,0u,
+        0u,0u,0u,0u, 0u,0u,0u,0u,
+        0u,0u,0u,0u, 0u,0u,0u,0u,0u
+    }
+};
+
+static B13562FrameLife *b13562_by_base(
+    uint32_t base
+)
+{
+    uint32_t phys = base & 0x1FFFFFFFu;
+
+    for (unsigned i = 0u; i < 2u; ++i)
+    {
+        if (
+            (g_b13562[i].base & 0x1FFFFFFFu)
+            == phys
+        )
+        {
+            return &g_b13562[i];
+        }
+    }
+
+    return NULL;
+}
+
+static B13562FrameLife *b13562_by_src(
+    uint32_t src
+)
+{
+    uint32_t phys = src & 0x1FFFFFFFu;
+
+    for (unsigned i = 0u; i < 2u; ++i)
+    {
+        if (g_b13562[i].src_phys == phys)
+        {
+            return &g_b13562[i];
+        }
+    }
+
+    return NULL;
+}
+
+static int b13562_packet_shape(
+    CPUState *cpu,
+    uint32_t packet,
+    uint32_t *header_out
+)
+{
+    if (header_out) *header_out = 0u;
+
+    if (!cpu || packet == 0u)
+    {
+        return 0;
+    }
+
+    uint32_t h = cpu->read_word(packet);
+
+    if (header_out) *header_out = h;
+
+    if ((h >> 24) != 5u)
+    {
+        return 0;
+    }
+
+    uint32_t c0 = cpu->read_word(packet + 4u);
+    uint32_t c1 = cpu->read_word(packet + 8u);
+    uint32_t c4 = cpu->read_word(packet + 20u);
+
+    return
+        (
+            (c0 >> 24) == 0xE1u
+            &&
+            ((c1 >> 24) & 0xFCu) == 0x64u
+            &&
+            c4 == 0x003C0034u
+        );
+}
+
+static void b13562_reach(
+    CPUState *cpu,
+    uint32_t src_ot,
+    uint32_t packet,
+    uint32_t bucket,
+    uint32_t *rb,
+    uint32_t *rp,
+    uint32_t *tag_out
+)
+{
+    if (rb) *rb = 0u;
+    if (rp) *rp = 0u;
+    if (tag_out) *tag_out = 0u;
+
+    if (!cpu || src_ot == 0u)
+    {
+        return;
+    }
+
+    uint32_t tag = cpu->read_word(src_ot + 0x10u);
+
+    if (tag_out) *tag_out = tag;
+
+    if (
+        rb
+        &&
+        bucket != 0u
+        &&
+        b13558_chain_reaches(
+            cpu, tag, bucket, NULL, NULL, NULL
+        )
+    )
+    {
+        *rb = 1u;
+    }
+
+    if (
+        rp
+        &&
+        packet != 0u
+        &&
+        b13558_chain_reaches(
+            cpu, tag, packet, NULL, NULL, NULL
+        )
+    )
+    {
+        *rp = 1u;
+    }
+}
+
 static uint32_t g_ra_8111c = 0;
 static uint32_t g_ra_82168 = 0;
 static uint32_t g_ra_8219c = 0;
@@ -3794,6 +3976,49 @@ static void fm_trace_dispatch(
         case 0x00012D60u:
             b13560_snapshot(cpu, 1u);
             b13561_checkpoint_base(cpu, 0);
+
+            if (cpu)
+            {
+                B13562FrameLife *f62 =
+                    b13562_by_base(
+                        cpu->read_word(0x8009C414u)
+                    );
+
+                if (f62 && f62->live_gen != 0u)
+                {
+                    f62->frame_gen = f62->live_gen;
+                    f62->frame_packet = f62->live_packet;
+                    f62->frame_bucket = f62->live_bucket;
+                    ++f62->f_seen;
+
+                    if (
+                        b13562_packet_shape(
+                            cpu,
+                            f62->frame_packet,
+                            &f62->last_ph
+                        )
+                    )
+                    {
+                        ++f62->f_shape;
+                    }
+
+                    if (f62->frame_bucket != 0u)
+                    {
+                        f62->last_bw =
+                            cpu->read_word(f62->frame_bucket);
+                    }
+
+                    b13562_reach(
+                        cpu,
+                        f62->base + 0x5124u,
+                        f62->frame_packet,
+                        f62->frame_bucket,
+                        &f62->f_reach_b,
+                        &f62->f_reach_p,
+                        &f62->last_tag
+                    );
+                }
+            }
             if (cpu)
             {
                 b13559_log(
@@ -3807,6 +4032,52 @@ static void fm_trace_dispatch(
         case 0x00012DE4u:
             b13560_snapshot(cpu, 2u);
             b13561_checkpoint_base(cpu, 1);
+
+            if (cpu)
+            {
+                B13562FrameLife *f62 =
+                    b13562_by_base(
+                        cpu->read_word(0x8009C414u)
+                    );
+
+                if (f62 && f62->frame_gen != 0u)
+                {
+                    ++f62->r_seen;
+
+                    if (
+                        b13562_packet_shape(
+                            cpu,
+                            f62->frame_packet,
+                            &f62->last_ph
+                        )
+                    )
+                    {
+                        ++f62->r_shape;
+                    }
+
+                    if (f62->frame_bucket != 0u)
+                    {
+                        f62->last_bw =
+                            cpu->read_word(f62->frame_bucket);
+                    }
+
+                    uint32_t rb = 0u, rp = 0u, tag = 0u;
+
+                    b13562_reach(
+                        cpu,
+                        f62->base + 0x5124u,
+                        f62->frame_packet,
+                        f62->frame_bucket,
+                        &rb,
+                        &rp,
+                        &tag
+                    );
+
+                    f62->r_reach_b += rb;
+                    f62->r_reach_p += rp;
+                    f62->last_tag = tag;
+                }
+            }
             break;
 
         case 0x00012E04u:
@@ -3953,6 +4224,16 @@ static void fm_trace_dispatch(
                             ++lf->hand_gen;
                             lf->packet = packet;
                             lf->bucket = bucket;
+                        }
+
+                        B13562FrameLife *f62 =
+                            b13562_by_src(ot);
+
+                        if (f62)
+                        {
+                            ++f62->live_gen;
+                            f62->live_packet = packet;
+                            f62->live_bucket = bucket;
                         }
                     }
 
@@ -14651,6 +14932,53 @@ int main(void)
                     uint32_t dst_ot = cpu->gpr[5];
                     uint32_t native_result = dst_ot;
 
+                    {
+                        B13562FrameLife *f62 =
+                            b13562_by_src(src_ot);
+
+                        if (f62)
+                        {
+                            ++f62->s_seen;
+                            f62->last_src_raw = src_ot;
+                            f62->last_dst_raw = dst_ot;
+
+                            if (
+                                b13562_packet_shape(
+                                    cpu,
+                                    f62->frame_packet,
+                                    &f62->last_ph
+                                )
+                            )
+                            {
+                                ++f62->s_shape;
+                            }
+
+                            if (f62->frame_bucket != 0u)
+                            {
+                                f62->last_bw =
+                                    cpu->read_word(
+                                        f62->frame_bucket
+                                    );
+                            }
+
+                            uint32_t rb = 0u, rp = 0u, tag = 0u;
+
+                            b13562_reach(
+                                cpu,
+                                src_ot,
+                                f62->frame_packet,
+                                f62->frame_bucket,
+                                &rb,
+                                &rp,
+                                &tag
+                            );
+
+                            f62->s_reach_b += rb;
+                            f62->s_reach_p += rp;
+                            f62->last_tag = tag;
+                        }
+                    }
+
                     b13559_log(
                         (uint32_t)'S',
                         src_ot,
@@ -16634,7 +16962,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.61-SAME-FRAME-LIFETIME (BASE B131)\n");
+            printf("BUILD B135.62-FROZEN-HAND-FRAME (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -17063,63 +17391,68 @@ int main(void)
                             );
 
                             /*
-                             * B135.61 - same-generation, same-buffer proof.
+                             * B135.62 - frozen generation per framebuffer.
                              */
                             printf(
-                                "CARD c/d:%lu/%lu P849:%lu\n",
+                                "CARD c/d:%lu/%lu P849:%lu DMA:%lu\n",
                                 (unsigned long)g_b13553_hit_16c20,
                                 (unsigned long)g_b13553_hit_166a0,
-                                (unsigned long)g_b13556_hand_84978
+                                (unsigned long)g_b13556_hand_84978,
+                                (unsigned long)b130_dma.b13554_hand_total_hits
                             );
 
                             for (unsigned bi = 0u; bi < 2u; ++bi)
                             {
-                                B13561Life *lf =
-                                    &g_b13561_life[bi];
+                                B13562FrameLife *f62 =
+                                    &g_b13562[bi];
 
                                 printf(
-                                    "B%u gen/use:%lu/%lu F:%lu/%lu R:%lu/%lu\n",
+                                    "B%u g/f:%lu/%lu F sh/r:%lu %lu/%lu\n",
                                     bi,
-                                    (unsigned long)lf->hand_gen,
-                                    (unsigned long)lf->consumed_gen,
-                                    (unsigned long)lf->f_seen,
-                                    (unsigned long)lf->f_alive,
-                                    (unsigned long)lf->r_seen,
-                                    (unsigned long)lf->r_alive
+                                    (unsigned long)f62->live_gen,
+                                    (unsigned long)f62->frame_gen,
+                                    (unsigned long)f62->f_shape,
+                                    (unsigned long)f62->f_reach_b,
+                                    (unsigned long)f62->f_reach_p
                                 );
 
                                 printf(
-                                    "   S:%lu ok/dead:%lu/%lu reach:%lu/%lu\n",
-                                    (unsigned long)lf->s_seen,
-                                    (unsigned long)lf->s_alive,
-                                    (unsigned long)lf->s_dead,
-                                    (unsigned long)lf->last_s_reach_bucket,
-                                    (unsigned long)lf->last_s_reach_packet
+                                    "   R:%lu sh/r:%lu %lu/%lu S:%lu sh:%lu\n",
+                                    (unsigned long)f62->r_seen,
+                                    (unsigned long)f62->r_shape,
+                                    (unsigned long)f62->r_reach_b,
+                                    (unsigned long)f62->r_reach_p,
+                                    (unsigned long)f62->s_seen,
+                                    (unsigned long)f62->s_shape
                                 );
 
                                 printf(
-                                    "   p/b:%05lX/%05lX ph/bw:%08lX/%08lX\n",
+                                    "   Sr:%lu/%lu p/b:%05lX/%05lX\n",
+                                    (unsigned long)f62->s_reach_b,
+                                    (unsigned long)f62->s_reach_p,
                                     (unsigned long)(
-                                        lf->packet & 0xFFFFFu
+                                        f62->frame_packet & 0xFFFFFu
                                     ),
                                     (unsigned long)(
-                                        lf->bucket & 0xFFFFFu
+                                        f62->frame_bucket & 0xFFFFFu
+                                    )
+                                );
+
+                                printf(
+                                    "   ph/bw:%08lX/%08lX src:%05lX dst:%05lX\n",
+                                    (unsigned long)f62->last_ph,
+                                    (unsigned long)f62->last_bw,
+                                    (unsigned long)(
+                                        f62->last_src_raw & 0xFFFFFu
                                     ),
-                                    (unsigned long)lf->last_s_packet_header,
-                                    (unsigned long)lf->last_s_bucket_word
+                                    (unsigned long)(
+                                        f62->last_dst_raw & 0xFFFFFu
+                                    )
                                 );
                             }
 
                             printf(
-                                "RAW pre sh/br/pr:%lu/%lu/%lu DMA:%lu\n",
-                                (unsigned long)g_b13558_pre_shape,
-                                (unsigned long)g_b13558_pre_bucket_reach,
-                                (unsigned long)g_b13558_pre_packet_reach,
-                                (unsigned long)b130_dma.b13554_hand_total_hits
-                            );
-
-                            printf(
-                                "BASE:%06lX idx:%lu B135.61 same-frame\n",
+                                "BASE:%06lX idx:%lu B135.62 frozen\n",
                                 (unsigned long)(
                                     cpu->read_word(0x8009C414u)
                                     & 0x1FFFFFu
