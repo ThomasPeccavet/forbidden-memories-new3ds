@@ -1825,6 +1825,16 @@ static uint32_t g_b1359_prev_vsc = 0u;
 static uint64_t g_b1359_prev_gp0 = 0u;
 static uint64_t g_b13513_prev_pixels = 0u;
 
+/*
+ * B135.40 - duel/dialogue 2D-layer probe.
+ * Track textured sprites/quads and sampled occupancy of the two 320-wide
+ * framebuffer pages so we can tell "not drawn" from "drawn on other page".
+ */
+static uint32_t g_b13540_prev_rect = 0u;
+static uint32_t g_b13540_prev_quad = 0u;
+static uint32_t g_b13540_prev_2c = 0u;
+static uint32_t g_b13540_prev_3a = 0u;
+
 /* B135.19 - interval counters for the continuous map interpreter. */
 static uint64_t g_b13519_prev_region_chunks = 0u;
 static uint64_t g_b13519_prev_region_instructions = 0u;
@@ -15156,7 +15166,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.39-REVERT-MT (BASE B131)\n");
+            printf("BUILD B135.40-PAGE-PROBE (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15454,26 +15464,106 @@ int main(void)
                         &g34_d2
                     );
 
+                    /*
+                     * B135.40: sample both candidate 320x240 framebuffer pages.
+                     * One sample every 4 pixels is enough to detect a missing
+                     * foreground/card layer without adding meaningful cost.
+                     */
+                    uint32_t p0_now = 0u;
+                    uint32_t p320_now = 0u;
+                    uint32_t p0_bot = 0u;
+                    uint32_t p320_bot = 0u;
+
+                    for (unsigned py = 0u; py < 240u; py += 4u)
+                    {
+                        const uint16_t *row0 =
+                            vram + py * 1024u;
+
+                        const uint16_t *row320 =
+                            row0 + 320u;
+
+                        for (unsigned px = 0u; px < 320u; px += 4u)
+                        {
+                            if ((row0[px] & 0x7FFFu) != 0u)
+                            {
+                                ++p0_now;
+
+                                if (py >= 144u)
+                                {
+                                    ++p0_bot;
+                                }
+                            }
+
+                            if ((row320[px] & 0x7FFFu) != 0u)
+                            {
+                                ++p320_now;
+
+                                if (py >= 144u)
+                                {
+                                    ++p320_bot;
+                                }
+                            }
+                        }
+                    }
+
+                    uint32_t d_rect =
+                        gpu_debug.b124_rect_hits
+                        -
+                        g_b13540_prev_rect;
+
+                    uint32_t d_quad =
+                        gpu_debug.b125_texquad_hits
+                        -
+                        g_b13540_prev_quad;
+
+                    uint32_t d_2c =
+                        gpu_debug.b126_seen_2c
+                        -
+                        g_b13540_prev_2c;
+
+                    uint32_t d_3a =
+                        gpu_debug.b126_seen_3a
+                        -
+                        g_b13540_prev_3a;
+
                     printf(
-                        "G34 S/R us:%llu/%llu n:%lu\n",
-                        (unsigned long long)g34_setup_us,
-                        (unsigned long long)g34_raster_us,
-                        (unsigned long)g34_samples
+                        "PAGE d:%u/%u nz:%lu/%lu bot:%lu/%lu\n",
+                        fm_gpu_display_x(),
+                        fm_gpu_display_y(),
+                        (unsigned long)p0_now,
+                        (unsigned long)p320_now,
+                        (unsigned long)p0_bot,
+                        (unsigned long)p320_bot
                     );
 
                     printf(
-                        "G34 fast:%lu/%lu px:%llu\n",
-                        (unsigned long)g34_fast_hits,
-                        (unsigned long)g34_calls,
-                        (unsigned long long)g34_fast_pixels
+                        "2D120 rect/q/2C/3A:%lu/%lu/%lu/%lu\n",
+                        (unsigned long)d_rect,
+                        (unsigned long)d_quad,
+                        (unsigned long)d_2c,
+                        (unsigned long)d_3a
                     );
 
                     printf(
-                        "G34 depth 4/8/15:%lu/%lu/%lu\n",
-                        (unsigned long)g34_d0,
-                        (unsigned long)g34_d1,
-                        (unsigned long)g34_d2
+                        "MERGE d2:%d m/p:%lu/%lu b/o:%lu/%lu\n",
+                        g_direct2df_active,
+                        (unsigned long)g_b103_merge_count,
+                        (unsigned long)g_b103_plain_count,
+                        (unsigned long)g_b103_last_base_x,
+                        (unsigned long)g_b103_last_overlay_x
                     );
+
+                    g_b13540_prev_rect =
+                        gpu_debug.b124_rect_hits;
+
+                    g_b13540_prev_quad =
+                        gpu_debug.b125_texquad_hits;
+
+                    g_b13540_prev_2c =
+                        gpu_debug.b126_seen_2c;
+
+                    g_b13540_prev_3a =
+                        gpu_debug.b126_seen_3a;
                 }
             }
 
