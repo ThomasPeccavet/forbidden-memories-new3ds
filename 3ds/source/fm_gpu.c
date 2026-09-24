@@ -130,6 +130,14 @@ static uint32_t g_b125_fallbacks = 0u;
  * Force flat textured quads (2Ch..2Fh) through the generic renderer.
  */
 static uint32_t g_b13545_generic_texquads = 0u;
+
+/*
+ * B135.46 - fidelity test for the other likely card primitive:
+ * Gouraud-textured quads (3Ch..3Fh).  The duel board is 3D-correct while
+ * the hand cards are absent; card planes are a natural user of 3Ch quads.
+ */
+static uint32_t g_b13546_generic_3c = 0u;
+
 static uint64_t g_b125_pixels = 0u;
 
 /*
@@ -3784,17 +3792,38 @@ static void execute_command(void)
 
             if (quad)
             {
-                /*
-                 * B135.45:
-                 *
-                 * Dialogue and duel both show large amounts of 2Ch textured
-                 * quads while their foreground/card layer is missing.  The
-                 * generic PSXRecomp triangle path is slower but older and
-                 * fidelity-oriented.  Bypass only the B125 fast quad path to
-                 * test whether its affine scan conversion is the culprit.
-                 */
+                int x3 =
+                    (coord_x(g_cmd[7]) + g_offset_x);
+
+                int y3 =
+                    (coord_y(g_cmd[7]) + g_offset_y);
+
+                int u3 =
+                    tex_u(g_cmd[8]);
+
+                int v3 =
+                    tex_v(g_cmd[8]);
+
                 ++g_b126_try_t;
-                ++g_b13545_generic_texquads;
+
+                if (
+                    b125_try_textured_quad(
+                        opcode,
+                        x0,y0,u0,v0,
+                        x1,y1,u1,v1,
+                        x2,y2,u2,v2,
+                        x3,y3,u3,v3,
+                        clut_x(clut),
+                        clut_y(clut),
+                        g_texpage,
+                        g_cmd[0],
+                        raw
+                    )
+                )
+                {
+                    g_has_frame = 1;
+                    return;
+                }
             }
 
             sw_draw_textured_triangle(
@@ -4134,26 +4163,12 @@ static void execute_command(void)
                     (opcode & 0xFCu) == 0x3Cu
                 )
                 {
-                    ++g_b13511_shaded_texquad_hits;
-
-                    b13511_shaded_textured_triangle(
-                        x0,y0,u0,v0,c0,
-                        x1,y1,u1,v1,c1,
-                        x2,y2,u2,v2,c2,
-                        clut_x(clut),clut_y(clut),g_texpage,raw,
-                        (opcode & 0x02u) != 0
-                    );
-
-                    b13511_shaded_textured_triangle(
-                        x1,y1,u1,v1,c1,
-                        x2,y2,u2,v2,c2,
-                        x3_fast,y3_fast,u3_fast,v3_fast,c3_fast,
-                        clut_x(clut),clut_y(clut),g_texpage,raw,
-                        (opcode & 0x02u) != 0
-                    );
-
-                    g_has_frame = 1;
-                    return;
+                    /*
+                     * B135.46: do not return through the B135.11 native
+                     * split-triangle path.  Count it, then fall through to
+                     * sw_draw_shaded_textured_triangle() below.
+                     */
+                    ++g_b13546_generic_3c;
                 }
             }
 
@@ -5053,6 +5068,9 @@ void fm_gpu_init(
         0u;
 
     g_b13545_generic_texquads =
+        0u;
+
+    g_b13546_generic_3c =
         0u;
 
     g_b125_pixels =
@@ -6604,6 +6622,12 @@ void fm_gpu_debug_stats(
 uint32_t fm_gpu_b13545_generic_texquads(void)
 {
     return g_b13545_generic_texquads;
+}
+
+
+uint32_t fm_gpu_b13546_generic_3c(void)
+{
+    return g_b13546_generic_3c;
 }
 
 
