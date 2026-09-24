@@ -17448,7 +17448,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.64-MISSING-LAYER1-BRIDGE (BASE B131)\n");
+            printf("BUILD B135.65-GENERATED-ENTRY-PROBE (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -17877,8 +17877,30 @@ int main(void)
                             );
 
                             /*
-                             * B135.64 - source-sort matrix + recovery bridge.
+                             * B135.65 - compare main-loop HLE counters with
+                             * PSXRecomp's own generated dispatch-entry
+                             * checkpoints.  If generated 85D98 keeps rising
+                             * while SORT G is frozen, nested native calls are
+                             * bypassing the main.c HLE.
                              */
+                            uint32_t e12c50 = 0u;
+                            uint32_t e12f70 = 0u;
+                            uint32_t e41674 = 0u;
+                            uint32_t e12d60 = 0u;
+                            uint32_t e85d98 = 0u;
+                            uint32_t e85d08 = 0u;
+                            uint32_t elast = 0u;
+
+                            fm_runtime_b13565_entries(
+                                &e12c50,
+                                &e12f70,
+                                &e41674,
+                                &e12d60,
+                                &e85d98,
+                                &e85d08,
+                                &elast
+                            );
+
                             printf(
                                 "CARD c/d:%lu/%lu P849:%lu DMA:%lu\n",
                                 (unsigned long)g_b13553_hit_16c20,
@@ -17887,52 +17909,47 @@ int main(void)
                                 (unsigned long)b130_dma.b13554_hand_total_hits
                             );
 
-                            for (unsigned bi = 0u; bi < 2u; ++bi)
-                            {
-                                printf(
-                                    "B%u gen:%lu L1/2/3:%lu/%lu/%lu last:%lu\n",
-                                    bi,
-                                    (unsigned long)g_b13563[bi].gen,
-                                    (unsigned long)g_b13564_first_calls[bi],
-                                    (unsigned long)g_b13564_second_calls[bi],
-                                    (unsigned long)g_b13564_third_calls[bi],
-                                    (unsigned long)g_b13564_last_first_gen[bi]
-                                );
-
-                                printf(
-                                    "   BR a/sh/ok/f:%lu/%lu/%lu/%lu ready:%lu\n",
-                                    (unsigned long)g_b13564_bridge_attempt[bi],
-                                    (unsigned long)g_b13564_bridge_shape[bi],
-                                    (unsigned long)g_b13564_bridge_ok[bi],
-                                    (unsigned long)g_b13564_bridge_fail[bi],
-                                    (unsigned long)g_b13563[bi].ready
-                                );
-                            }
-
                             printf(
-                                "LAST hs/dst/p:%05lX/%05lX/%05lX code:%ld\n",
-                                (unsigned long)(
-                                    g_b13564_last_hand_src & 0xFFFFFu
-                                ),
-                                (unsigned long)(
-                                    g_b13564_last_dst & 0xFFFFFu
-                                ),
-                                (unsigned long)(
-                                    g_b13564_last_shape_packet & 0xFFFFFu
-                                ),
-                                (long)g_b13564_last_code
+                                "GEN E 12C50/F70/41674:%lu/%lu/%lu\n",
+                                (unsigned long)e12c50,
+                                (unsigned long)e12f70,
+                                (unsigned long)e41674
                             );
 
                             printf(
-                                "SORT G ok/f:%lu/%lu C ok/f:%lu/%lu\n",
+                                "GEN E 12D60/85D98/85D08:%lu/%lu/%lu\n",
+                                (unsigned long)e12d60,
+                                (unsigned long)e85d98,
+                                (unsigned long)e85d08
+                            );
+
+                            printf(
+                                "HLE L1/2/3 B0:%lu/%lu/%lu B1:%lu/%lu/%lu\n",
+                                (unsigned long)g_b13564_first_calls[0],
+                                (unsigned long)g_b13564_second_calls[0],
+                                (unsigned long)g_b13564_third_calls[0],
+                                (unsigned long)g_b13564_first_calls[1],
+                                (unsigned long)g_b13564_second_calls[1],
+                                (unsigned long)g_b13564_third_calls[1]
+                            );
+
+                            printf(
+                                "SORT G ok/f:%lu/%lu lastE:%06lX\n",
                                 (unsigned long)g_sort_native_ok,
                                 (unsigned long)g_sort_native_fail,
-                                (unsigned long)g_b119_csort_ok,
-                                (unsigned long)g_b119_csort_fallbacks
+                                (unsigned long)(elast & 0x1FFFFFu)
                             );
 
                             printf(
-                                "BASE:%06lX idx:%lu B135.64 layer1 bridge\n",
+                                "BR a/ok B0:%lu/%lu B1:%lu/%lu\n",
+                                (unsigned long)g_b13564_bridge_attempt[0],
+                                (unsigned long)g_b13564_bridge_ok[0],
+                                (unsigned long)g_b13564_bridge_attempt[1],
+                                (unsigned long)g_b13564_bridge_ok[1]
+                            );
+
+                            printf(
+                                "BASE:%06lX idx:%lu B135.65 gen-entry\n",
                                 (unsigned long)(
                                     cpu->read_word(0x8009C414u)
                                     & 0x1FFFFFu
