@@ -1,0 +1,93 @@
+caller	site	kind	expression	source_export
+80012f70	80012fa4	ghidra_unresolved	L15: (*(code *)*puVar1)(); | L21: (*DAT_8009c450)();	resident+su_variant_0
+80012f70	80012fcc	ghidra_unresolved	L15: (*(code *)*puVar1)(); | L21: (*DAT_8009c450)();	resident+su_variant_0
+80013b44	80013cb0	ghidra_unresolved	L108: (**(code **)(puVar4 + 0x20))(puVar4,iVar9); | L166: (**(code **)(puVar4 + 0x20))(puVar4,iVar9);	resident+su_variant_0
+80013b44	80013f68	ghidra_unresolved	L108: (**(code **)(puVar4 + 0x20))(puVar4,iVar9); | L166: (**(code **)(puVar4 + 0x20))(puVar4,iVar9);	resident+su_variant_0
+80014478	80014704	ghidra_unresolved	L108: (*DAT_8009c488)(); | L138: (*DAT_8009c49c)(); | L41: (*DAT_800eb1d8)(&DAT_800eb1b8,iVar1);	resident+su_variant_0
+80014478	80014768	ghidra_unresolved	L108: (*DAT_8009c488)(); | L138: (*DAT_8009c49c)(); | L41: (*DAT_800eb1d8)(&DAT_800eb1b8,iVar1);	resident+su_variant_0
+80014478	800148cc	ghidra_unresolved	L108: (*DAT_8009c488)(); | L138: (*DAT_8009c49c)(); | L41: (*DAT_800eb1d8)(&DAT_800eb1b8,iVar1);	resident+su_variant_0
+80014a4c	80014b44	ghidra_unresolved	L49: (*DAT_8009c470)();	resident+su_variant_0
+80014d38	80014d9c	ghidra_unresolved	L18: (*DAT_8009c4a8)();	resident+su_variant_0
+80014e08	80014e60	ghidra_unresolved	L14: (*DAT_8009c4a8)();	resident+su_variant_0
+80015058	800150a8	ghidra_unresolved	L15: (**(code **)(param_1 + 0x20))(param_1,iVar1);	resident+su_variant_0
+800242bc	80024414	ghidra_unresolved	L18: (*(code *)(&PTR_FUN_80091db0)[DAT_8009c564 & 0xf])();	resident+su_variant_0
+80026bbc	80026c10	ghidra_unresolved	L13: (*(code *)(&PTR_LAB_80091e74)[iVar1])();	resident+su_variant_0
+800289a4	800289fc	ghidra_unresolved	L17: (*(code *)(&PTR_FUN_80091f54)[DAT_8009c5d0])();	resident+su_variant_0
+8002df60	8002dfbc	ghidra_unresolved	L15: (*(code *)(&PTR_seed_8002cfdc_80091f7c)[DAT_8009c60a & 0x1f])();	resident+su_variant_0
+80030228	80030274	ghidra_unresolved	L11: (*(code *)(&PTR_LAB_800920c4)[*(byte *)(param_1 + 1)])(param_1);	resident+su_variant_0
+80031388	800313e0	ghidra_unresolved	L20: (*(code *)ppuVar3[DAT_8009c673 & 0x1f])();	resident+su_variant_0
+800340e8	80034174	ghidra_unresolved	L26: (*(code *)(&PTR_FUN_80092234)[*(ushort *)(DAT_8009c684 + 0x633e) & 0x3f])();	resident+su_variant_0
+80038b4c	80038b90	ghidra_unresolved	L14: (*(code *)(&PTR_FUN_800922b8)[bVar1])();	resident+su_variant_0
+80038e10	80038e6c	ghidra_unresolved	L16: (*DAT_8009c6bc)(param_1);	resident+su_variant_0
+800393b8	80039540	ghidra_unresolved	L17: (*(code *)(&PTR_FUN_80092068)[(byte)DAT_8009c610])(); | L43: (**(code **)(&DAT_80091f6c + ((int)((uint)DAT_8009c6da << 0x10) >> 0xe)))(param_1); | L72: (*(code *)(&PTR_FUN_80092270)[*(byte *)((int)param_1 + 0x51) & 0x1f])(param_1);	resident+su_variant_0
+800393b8	80039588	ghidra_unresolved	L17: (*(code *)(&PTR_FUN_80092068)[(byte)DAT_8009c610])(); | L43: (**(code **)(&DAT_80091f6c + ((int)((uint)DAT_8009c6da << 0x10) >> 0xe)))(param_1); | L72: (*(code *)(&PTR_FUN_80092270)[*(byte *)((int)param_1 + 0x51) & 0x1f])(param_1);	resident+su_variant_0
+800393b8	80039688	ghidra_unresolved	L17: (*(code *)(&PTR_FUN_80092068)[(byte)DAT_8009c610])(); | L43: (**(code **)(&DAT_80091f6c + ((int)((uint)DAT_8009c6da << 0x10) >> 0xe)))(param_1); | L72: (*(code *)(&PTR_FUN_80092270)[*(byte *)((int)param_1 + 0x51) & 0x1f])(param_1);	resident+su_variant_0
+8003a0cc	8003a12c	ghidra_unresolved	L22: (*(code *)(&PTR_FUN_8009236c)[pbVar8[2] & 0x1f])(iVar9,param_1);	resident+su_variant_0
+8003b89c	8003b920	ghidra_unresolved	L19: (*(code *)(&PTR_LAB_80092394)[*pbVar1 & 0x1f])(puVar2);	resident+su_variant_0
+8003dde0	8003e06c	ghidra_unresolved	L96: (*(code *)(&PTR_LAB_800923b4)[DAT_8009c751 & 0xf])(&DAT_800f0cd0,piVar9);	resident+su_variant_0
+8003f768	8003f9e4	ghidra_unresolved	L78: (*(code *)(&PTR_LAB_800923c8)[DAT_8009c770])();	resident+su_variant_0
+800408bc	80040938	ghidra_unresolved	L32: (**(code **)(&DAT_800f1234 + iVar9))(&DAT_800f1210 + iVar9);	resident+su_variant_0
+80040b48	80040b9c	ghidra_unresolved	L17: (**(code **)(&DAT_800f1234 + iVar3))(puVar4);	resident+su_variant_0
+80040f2c	80040f80	ghidra_unresolved	L15: (**(code **)(&DAT_800f1234 + iVar3))(&DAT_800f1210 + iVar3);	resident+su_variant_0
+80040fe0	80041024	ghidra_unresolved	L14: (**(code **)(&DAT_800f1234 + iVar2))();	resident+su_variant_0
+80041048	8004109c	ghidra_unresolved	L15: (**(code **)(&DAT_800f1234 + iVar3))(&DAT_800f1210 + iVar3); | L19: (**(code **)(&DAT_800f125c + iVar3))	resident+su_variant_0
+80041048	800410e0	ghidra_unresolved	L15: (**(code **)(&DAT_800f1234 + iVar3))(&DAT_800f1210 + iVar3); | L19: (**(code **)(&DAT_800f125c + iVar3))	resident+su_variant_0
+8004110c	80041190	ghidra_unresolved	L23: (**(code **)(&DAT_800f1234 + iVar3))(&DAT_800f1210 + iVar3);	resident+su_variant_0
+8004139c	80041420	ghidra_unresolved	L23: (**(code **)(&DAT_800f1234 + iVar3))(&DAT_800f1210 + iVar3);	resident+su_variant_0
+80041fbc	80042018	ghidra_unresolved	L21: iVar3 = (*(code *)(&PTR_LAB_80092418)[bVar1 ^ 0xff])(param_1);	resident+su_variant_0
+800422c0	80042414	ghidra_unresolved	L42: (*pcVar1)(param_1,iVar2);	resident+su_variant_0
+80042c90	80042cb0	ghidra_unresolved	L7: (**(code **)(param_1 + 0x24))();	resident+su_variant_0
+8004bbc4	8004bca8	ghidra_unresolved	L25: (**(code **)(DAT_8009c7d8 + 0x50c))();	resident+su_variant_0
+8005d644	8005d6d8	ghidra_unresolved		resident+su_variant_0
+8005dca4	8005e2d8	ghidra_unresolved	L263: iVar12 = (*pcVar11)(param_1);	resident+su_variant_0
+8005ee7c	8005f038	ghidra_unresolved	L76: (*pcVar2)(param_3);	resident+su_variant_0
+80070c7c	80070cd4	ghidra_unresolved	L12: (**(code **)(&DAT_80092b00 + iVar1 * 4))();	resident+su_variant_0
+800741a4	80074278	ghidra_unresolved	L21: (*DAT_800f7048)(param_1,param_2,param_3);	resident+su_variant_0
+80074938	80074950	ghidra_unresolved	L6: (**(code **)(PTR_PTR_80093ea8 + 4))();	resident+su_variant_0
+80074968	80074984	ghidra_unresolved	L6: (**(code **)(PTR_PTR_80093ea8 + 0x14))(4,param_1);	resident+su_variant_0
+8007499c	800749b4	ghidra_unresolved	L6: (**(code **)(PTR_PTR_80093ea8 + 0x14))();	resident+su_variant_0
+80074b44	80074c18	ghidra_unresolved	L17: uVar2 = (uint)(*DAT_80093eb0 & DAT_80092e50 & *DAT_80093eac); | L25: (*(code *)*puVar5)(); | L31: uVar2 = (uint)(*DAT_80093eb0 & DAT_80092e50 & *DAT_80093eac); | L34: if ((*DAT_80093eac & *DAT_80093eb0) == 0) {	resident+su_variant_0
+80075040	80075080	ghidra_unresolved	L14: (*(code *)*puVar1)();	resident+su_variant_0
+80075154	800751f4	ghidra_unresolved	L19: (*(code *)*puVar4)(); | L28: if (((*DAT_80093ef8 & 0xff000000) == 0x80000000) || ((*DAT_80093ef8 & 0x8000) != 0)) {	resident+su_variant_0
+80075998	80075a28	ghidra_unresolved	L25: (*DAT_80093ff0)();	resident+su_variant_0
+800788e8	80078954	ghidra_unresolved	L14: (*DAT_800f7118)();	resident+su_variant_0
+80078c38	80079164	ghidra_unresolved	L101: if (*DAT_800f70e4 != 0) { | L16: if ((DAT_800f7104 == 0) || ((*DAT_800948d8 & 0x1000000) == 0)) { | L21: if (*DAT_800f7120 == 0) { | L65: if ((*DAT_800f7120 == 0x160) && (((ushort)DAT_800f7120[1] >> 10 & 0x1f) == DAT_800f70c0) | L80: (*DAT_800f711c)(); | L93: (*DAT_800f711c)();	resident+su_variant_0
+80078c38	80079208	ghidra_unresolved	L101: if (*DAT_800f70e4 != 0) { | L16: if ((DAT_800f7104 == 0) || ((*DAT_800948d8 & 0x1000000) == 0)) { | L21: if (*DAT_800f7120 == 0) { | L65: if ((*DAT_800f7120 == 0x160) && (((ushort)DAT_800f7120[1] >> 10 & 0x1f) == DAT_800f70c0) | L80: (*DAT_800f711c)(); | L93: (*DAT_800f711c)();	resident+su_variant_0
+80079c8c	80079e2c	ghidra_unresolved	L41: (*DAT_80094914)(DAT_80094bed,&DAT_800f7138); | L44: (*DAT_80094910)(DAT_80094bec,&DAT_800f7130);	resident+su_variant_0
+80079c8c	80079e5c	ghidra_unresolved	L41: (*DAT_80094914)(DAT_80094bed,&DAT_800f7138); | L44: (*DAT_80094910)(DAT_80094bec,&DAT_800f7130);	resident+su_variant_0
+80079f0c	8007a0ac	ghidra_unresolved	L41: (*DAT_80094914)(DAT_80094bed,&DAT_800f7138); | L44: (*DAT_80094910)(DAT_80094bec,&DAT_800f7130);	resident+su_variant_0
+80079f0c	8007a0dc	ghidra_unresolved	L41: (*DAT_80094914)(DAT_80094bed,&DAT_800f7138); | L44: (*DAT_80094910)(DAT_80094bec,&DAT_800f7130);	resident+su_variant_0
+8007a1d4	8007a508	ghidra_unresolved	L81: (*DAT_80094914)(DAT_80094bed,&DAT_800f7138); | L84: (*DAT_80094910)(DAT_80094bec,&DAT_800f7130);	resident+su_variant_0
+8007a1d4	8007a538	ghidra_unresolved	L81: (*DAT_80094914)(DAT_80094bed,&DAT_800f7138); | L84: (*DAT_80094910)(DAT_80094bec,&DAT_800f7130);	resident+su_variant_0
+8007abcc	8007ac38	ghidra_unresolved	L14: (*DAT_80094914)(DAT_80094bed,&DAT_800f7138); | L17: (*DAT_80094910)(DAT_80094bec,&DAT_800f7130);	resident+su_variant_0
+8007abcc	8007ac68	ghidra_unresolved	L14: (*DAT_80094914)(DAT_80094bed,&DAT_800f7138); | L17: (*DAT_80094910)(DAT_80094bec,&DAT_800f7130);	resident+su_variant_0
+8007b02c	8007b1d8	ghidra_unresolved	L93: (*(code *)*piVar1)(param_1,param_2);	resident+su_variant_0
+8007b28c	8007b3e4	ghidra_unresolved	L50: (*pcVar1)(uVar4,param_2); | L55: (*DAT_800f9718)(param_1,param_2);	resident+su_variant_0
+8007b28c	8007b408	ghidra_unresolved	L50: (*pcVar1)(uVar4,param_2); | L55: (*DAT_800f9718)(param_1,param_2);	resident+su_variant_0
+8007c10c	8007c1c4	ghidra_unresolved	L26: (*DAT_800f971c)(param_1,param_2);	resident+su_variant_0
+8007c1e0	8007c1f4	ghidra_unresolved	L7: (*DAT_800f9720)(param_1);	resident+su_variant_0
+8007c720	8007c980	ghidra_unresolved	L79: (*DAT_800f7308)();	resident+su_variant_0
+8007cb88	8007cd54	ghidra_unresolved	L62: (*DAT_800f730c)(param_1,param_2);	resident+su_variant_0
+8007cd6c	8007cf54	ghidra_unresolved	L110: (*pcVar1)(uVar2,param_2); | L99: (*DAT_800f7310)(5,param_2);	resident+su_variant_0
+8007cd6c	8007cf90	ghidra_unresolved	L110: (*pcVar1)(uVar2,param_2); | L99: (*DAT_800f7310)(5,param_2);	resident+su_variant_0
+8007cff4	8007d0b4	ghidra_unresolved	L23: (*DAT_800f730c)(5);	resident+su_variant_0
+8007d0e0	8007d158	ghidra_unresolved	L12: (*DAT_800f7310)(param_1,param_2);	resident+su_variant_0
+8007d4dc	8007d634	ghidra_unresolved	L37: (*DAT_80094e2c)(param_1,param_2);	resident+su_variant_0
+8007d654	8007d710	ghidra_unresolved	L22: (*DAT_80094e2c)(uVar2,DAT_80094e18);	resident+su_variant_0
+8007e3e4	8007e4b0	ghidra_unresolved	L19: (*DAT_80094e50)(1,param_2,auStack_28); | L30: (*DAT_80094e50)(1,param_2,auStack_28); | L39: (*DAT_80094e50)(4,param_2,auStack_28); | L55: (*DAT_80094e50)(param_1,param_2,auStack_28); | L73: (*DAT_80094e50)(5,param_2,auStack_28);	resident+su_variant_0
+8007e3e4	8007e4ec	ghidra_unresolved	L19: (*DAT_80094e50)(1,param_2,auStack_28); | L30: (*DAT_80094e50)(1,param_2,auStack_28); | L39: (*DAT_80094e50)(4,param_2,auStack_28); | L55: (*DAT_80094e50)(param_1,param_2,auStack_28); | L73: (*DAT_80094e50)(5,param_2,auStack_28);	resident+su_variant_0
+8007e3e4	8007e538	ghidra_unresolved	L19: (*DAT_80094e50)(1,param_2,auStack_28); | L30: (*DAT_80094e50)(1,param_2,auStack_28); | L39: (*DAT_80094e50)(4,param_2,auStack_28); | L55: (*DAT_80094e50)(param_1,param_2,auStack_28); | L73: (*DAT_80094e50)(5,param_2,auStack_28);	resident+su_variant_0
+8007e3e4	8007e5ac	ghidra_unresolved	L19: (*DAT_80094e50)(1,param_2,auStack_28); | L30: (*DAT_80094e50)(1,param_2,auStack_28); | L39: (*DAT_80094e50)(4,param_2,auStack_28); | L55: (*DAT_80094e50)(param_1,param_2,auStack_28); | L73: (*DAT_80094e50)(5,param_2,auStack_28);	resident+su_variant_0
+8007e3e4	8007e694	ghidra_unresolved	L19: (*DAT_80094e50)(1,param_2,auStack_28); | L30: (*DAT_80094e50)(1,param_2,auStack_28); | L39: (*DAT_80094e50)(4,param_2,auStack_28); | L55: (*DAT_80094e50)(param_1,param_2,auStack_28); | L73: (*DAT_80094e50)(5,param_2,auStack_28);	resident+su_variant_0
+8007e6c0	8007e758	ghidra_unresolved	L20: (*DAT_80094e50)(param_1,param_2,0);	resident+su_variant_0
+800819e0	80081ae4	ghidra_unresolved	L18: (((DAT_80095bc0 == DAT_80095bc4 && ((*DAT_80095bac & 0x1000000) == 0)) && | L21: } while ((*DAT_80095ba0 & 0x4000000) == 0);	resident+su_variant_0
+80081c90	80081de0	ghidra_unresolved	L21: (**(code **)(&DAT_800fdb88 + DAT_80095bc4 * 0x60)) | L30: if ((((DAT_80095bc0 == DAT_80095bc4) && ((*DAT_80095bac & 0x1000000) == 0)) && | L33: (*DAT_80095aa4)(); | L9: if ((*DAT_80095bac & 0x1000000) == 0) {	resident+su_variant_0
+80081c90	80081eb8	ghidra_unresolved	L21: (**(code **)(&DAT_800fdb88 + DAT_80095bc4 * 0x60)) | L30: if ((((DAT_80095bc0 == DAT_80095bc4) && ((*DAT_80095bac & 0x1000000) == 0)) && | L33: (*DAT_80095aa4)(); | L9: if ((*DAT_80095bac & 0x1000000) == 0) {	resident+su_variant_0
+8008a0d8	8008a1b8	ghidra_unresolved	L51: iVar3 = (*pcVar2)(param_3);	resident+su_variant_0
+8008cf50	8008cfbc	ghidra_unresolved	L23: (*DAT_800ff714)(uVar1,uVar2);	resident+su_variant_0
+8008d0e4	8008d118	ghidra_unresolved	L9: (iVar1 = (*(code *)(&DAT_800ff770)[DAT_8009b1a8])(DAT_8009b1a8 * 0x10 + -0x7ff008d0),	resident+su_variant_0
+8008e7e0	8008e880	ghidra_unresolved	L23: uVar1 = (*DAT_800ffa90)(); | L33: iVar4 = (*DAT_800ffaa4)(uVar3 & 0xff); | L52: iVar4 = (*DAT_800ffaa4)(uVar1);	resident+su_variant_0
+8008e7e0	8008e8e8	ghidra_unresolved	L23: uVar1 = (*DAT_800ffa90)(); | L33: iVar4 = (*DAT_800ffaa4)(uVar3 & 0xff); | L52: iVar4 = (*DAT_800ffaa4)(uVar1);	resident+su_variant_0
+8008e7e0	8008e9e4	ghidra_unresolved	L23: uVar1 = (*DAT_800ffa90)(); | L33: iVar4 = (*DAT_800ffaa4)(uVar3 & 0xff); | L52: iVar4 = (*DAT_800ffaa4)(uVar1);	resident+su_variant_0
+8008f578	8008f5cc	ghidra_unresolved		resident+su_variant_0
+8008f578	8008f620	ghidra_unresolved		resident+su_variant_0

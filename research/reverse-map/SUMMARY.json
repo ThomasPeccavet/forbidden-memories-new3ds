@@ -1,0 +1,9 @@
+{
+  "functions": 1582,
+  "direct_edges": 4807,
+  "indexed_table_edges": 17,
+  "callback_assignment_edges": 80,
+  "unresolved_call_sites": 92,
+  "global_usage_rows": 6352,
+  "note": "Indirect targets not proven by committed table bytes/runtime traces remain unresolved."
+}

@@ -77,10 +77,13 @@ def run_checks(path: Path) -> list[str]:
     if build_markers and not any(re.match(r"B\d+", x) for x in build_markers):
         errors.append("no Bxx build marker found")
 
-    # Catch accidental merge markers immediately.
-    for marker in ("<<<<<<<", "=======", ">>>>>>>"):
-        if marker in text:
-            errors.append(f"merge-conflict marker present: {marker}")
+    # Match real conflict-marker lines, not the long '=' separators used in
+    # comment headings throughout main.c.
+    conflict_markers = re.findall(
+        r"(?m)^(<<<<<<<(?: .*)?|=======(?:\s*)|>>>>>>>(?: .*)?)$", text
+    )
+    for marker in conflict_markers:
+        errors.append(f"merge-conflict marker present: {marker.strip()}")
 
     return errors
 

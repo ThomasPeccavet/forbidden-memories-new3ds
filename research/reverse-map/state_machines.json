@@ -1,0 +1,123 @@
+{
+  "dialogue_vm": {
+    "control_table": "80091f6c",
+    "current_opcode": "DAT_8009C6DA",
+    "dispatcher": "800393b8",
+    "handler_result": "DAT_8009C6CC",
+    "nested_script_active": "DAT_8009C6D2",
+    "render_state_table": "80092270"
+  },
+  "duel_entry": {
+    "constructor": "80032824",
+    "frame_callback": "80031b58",
+    "handler": "8002d0bc",
+    "main_state": 3,
+    "substate_global": "DAT_8009C60B",
+    "substates": [
+      0,
+      1,
+      2
+    ]
+  },
+  "main_dispatch": {
+    "dispatcher": "8002df60",
+    "flags": {
+      "0x20": "handler-specific alternate path",
+      "0x40": "state initialized/active",
+      "0x80": "per-state pre-service latch"
+    },
+    "index_expression": "state & 0x1f",
+    "state_global": "DAT_8009C60A",
+    "table": "80091f7c",
+    "targets": [
+      {
+        "index": 0,
+        "target": "8002cfdc"
+      },
+      {
+        "index": 1,
+        "target": "8002d354"
+      },
+      {
+        "index": 2,
+        "target": "8002d038"
+      },
+      {
+        "index": 3,
+        "target": "8002d0bc"
+      },
+      {
+        "index": 4,
+        "target": "8002d2b4"
+      },
+      {
+        "index": 5,
+        "target": "8002d4ac"
+      },
+      {
+        "index": 6,
+        "target": "8002d5cc"
+      },
+      {
+        "index": 7,
+        "target": "8002d544"
+      },
+      {
+        "index": 8,
+        "target": "8002d75c"
+      },
+      {
+        "index": 9,
+        "target": "8002d800"
+      },
+      {
+        "index": 10,
+        "target": "8002d858"
+      },
+      {
+        "index": 11,
+        "target": "8002d89c"
+      },
+      {
+        "index": 12,
+        "target": "8002d8f4"
+      },
+      {
+        "index": 13,
+        "target": "8002d988"
+      },
+      {
+        "index": 14,
+        "target": "8002d990"
+      },
+      {
+        "index": 15,
+        "target": "8002dbe0"
+      },
+      {
+        "index": 16,
+        "target": "8002de14"
+      }
+    ]
+  },
+  "render_pipeline": {
+    "draw": "80085d08",
+    "finalizer": "80012d60",
+    "frame_driver": "80012c50",
+    "gate_controller": "8001522c",
+    "gate_setter": "80015c18",
+    "render_callbacks": "80012f70",
+    "sort": "80085d98",
+    "submit_gate": "DAT_8009C4B8",
+    "wait": "80012cb8"
+  },
+  "script_vm": {
+    "dispatcher": "8002fca4",
+    "mask": "0x1f",
+    "opcode_state": "DAT_8009C610",
+    "override_opcode": "DAT_8009C622",
+    "script_id_flags": "DAT_8009C628",
+    "script_pc": "DAT_8009C624",
+    "table": "80092068"
+  }
+}

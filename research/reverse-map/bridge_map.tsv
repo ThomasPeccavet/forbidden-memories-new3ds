@@ -1,0 +1,73 @@
+bridge	pourquoi	original_ps1_remplace_ou_contourne	suppression	correctif_emulateur	classe
+B135	quick-state complet et GPF initial pour franchir la scene Simon	GPF/COP2; le quick-state ne remplace rien	quick-state a garder comme oracle; GPF non	GPF exact dans le coeur GTE commun	fonctionnel
+B135.1	executer GPF dans le fallback R3000A	instruction GPF	non	decoder/executer GPF dans tous les chemins CPU	fonctionnel
+B135.2	franchir la geometrie Simon	RTPT, RTPS, AVSZ, NCLIP	non	semantique GTE complete et identique natif/fallback	fonctionnel
+B135.3	franchir la construction geometrique suivante	MVMVA	non	MVMVA exact, y compris matrices, translation et saturation	fonctionnel
+B135.4	eviter un store de precision contraire a l'upstream	comportement de transfert/precision GTE	non	aligner le hook de precision sur la semantique upstream	fonctionnel
+B135.5	franchir la transition de duel eclairee	NCDS	non	NCDS exact dans le coeur GTE et le fallback	fonctionnel
+B135.6	corriger les lectures/ecritures de registres COP2	transferts canoniques GTE	non	une seule implementation canonique des transferts	fonctionnel
+B135.7	presenter les frames de jeu au VSync	frontiere temporelle VSync	non sans test materiel	modele GPU/VBlank et buffering coherent	fonctionnel
+B135.8	utiliser le bord VSync termine plutot que l'attente active	frontiere temporelle VSync	non sans test materiel	distinguer attente, bord actif et frame terminee	fonctionnel
+B135.9	reduire le cout des ecritures GTE et mesurer le pacing	aucune fonction du jeu; optimisation du coeur	probes oui; optimisation si equivalente	tests de conformite GTE et compteurs hors hot path	mixte
+B135.10	accelerer triangles textures et Gouraud	commandes GP0 triangles	seulement si le generique tient le budget	rasteriseur GPU exact avec fast path verifie	fonctionnel
+B135.11	accelerer les polygones Gouraud textures de la carte	commandes GP0 map	seulement si le generique tient le budget	fast path equivalent pixel a pixel	fonctionnel
+B135.12	hoister le decodage texture hors boucle pixel	lecture texture GP0	oui si performance suffisante	cache/decode texture coherent avec VRAM et CLUT	optimisation
+B135.13	remplacer les divisions 64 bits du raster setup	setup de triangle GPU	oui si performance suffisante	arithmetique de setup deterministe et equivalente	optimisation
+B135.14	chainer les dispatchs residents de la carte Pharaon	continuations residentes du renderer	pas avant test perf/timing	dispatch direct des blocs interieurs avec interruptions preservees	fonctionnel
+B135.15	chainer l'appelant et FUN_8004D260	FUN_8004D260 et son appelant	pas avant test perf/timing	frontiere ARM/CPU reentrante entre fonctions compilees	fonctionnel
+B135.16	identifier les PC cassant le chainage	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.17	chainer les blocs interpretes chauds et rendre 80034D30 au dispatcher	continuations autour de 80034D30	pas avant test perf/timing	couverture compilee des entrees interieures	fonctionnel
+B135.18	accelerer acces instruction/RAM du fallback	acces memoire R3000A interprete	oui si performance suffisante	binding RAM direct sur chemin generique sur	optimisation
+B135.19	chainer les branches chaudes dans l'interpreteur	continuations interpretees de la carte	pas avant test timing	dispatch/interruption bornes entre branches	fonctionnel
+B135.20	semer les continuations chaudes de carte	entrees internes auparavant interpretees	pas avant mesure	analyse/generation automatique correcte des entrees	fonctionnel
+B135.21	reduire le quantum natif pour retrouver 12 ms	timing/scheduling, aucune fonction applicative	non sans test materiel	scheduler cycle/VSync fiable	fonctionnel
+B135.22	chainer callback 8008A0D8/8008A1C0	callbacks residents de rendu carte	pas avant mesure	generation et dispatch direct de ces entrees	fonctionnel
+B135.23	semer 80057B80/80089DA8 et boucle 8005721C	continuations de rendu carte	pas avant mesure	couverture compilee de ces sorties	fonctionnel
+B135.24	borner le quantum de chainage natif	scheduling, aucune fonction remplacee	non sans test timing	preemption/cycles a la frontiere des blocs	fonctionnel
+B135.25	profiler les continuations interpretees couteuses	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.26	semer la continuation dominante 80034D7C	entree interne 80034D7C	pas avant mesure	emission native exacte de cette entree	fonctionnel
+B135.27	diagnostiquer la visibilite des entrees compilees	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.28	heberger l'alias 80034D7C dans 80034D30	continuation interieure 80034D7C	pas avant correction du generateur	support natif des alias/entrees hebergees	fonctionnel
+B135.29	mesurer le cout DMA2 complet	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.30	echantillonner le cout des opcodes GP0	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.31	accelerer rectangles plats semi-transparents	commande GP0 rectangle	seulement sous equivalence	blend/semi-transparence GPU exacte	fonctionnel
+B135.32	profiler par liste DMA2	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.33	specialiser le raster opaque Gouraud texture 34h	commande GP0 34h	seulement sous equivalence	fast path 34h exact	fonctionnel
+B135.34	separer setup/raster 34h pour profiler	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.35	hoister profondeur texture et modulation RGB du GT34	commande GP0 34h	oui si performance suffisante	fetch 4/8/15 bpp et modulation exacts	optimisation
+B135.36	rasteriser incrementiellement puis retirer une LUT regressive	commande GP0 34h	oui si performance suffisante	arithmetique incrementale equivalente	optimisation
+B135.37	restaurer le chemin GT34 le plus rapide	commande GP0 34h	seulement sous equivalence	garder le chemin generique comme oracle	optimisation
+B135.38	paralleliser GT34 sur second coeur	commande GP0 34h	deja retire par B135.39	aucun tant que l'ordre VRAM n'est pas prouve	regression
+B135.39	annuler la regression multicore et restaurer CPU single-core	aucune fonction du jeu	conserver le retrait	ne pas reintroduire sans modele d'ordre VRAM	retrait
+B135.40	sonder couches framebuffer/objets 2D du duel	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.41	actualiser le frontbuffer 2D non direct au VSync	presentation GPU	non sans test materiel	modele de buffer affiche/dessine coherent	fonctionnel
+B135.42	sonder les sources texture dialogue/carte manquantes	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.43	compter rejets clip et ecritures des rectangles textures	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.44	presenter le buffer dessine quand GP1 page flip est stale	GP1(05)/selection framebuffer	non sans correction temporelle	ordonner GP1, VSync et buffer termine	fonctionnel
+B135.45	router les quads textures plats par le generique	commande GP0 2Ch	retire partiellement par B135.46	faire du generique l'oracle de fidelite	experience
+B135.46	restaurer 2C rapide et router 3C par le generique	commandes GP0 2Ch/3Ch	retire partiellement par B135.47	valider chaque fast path contre le generique	experience
+B135.47	restaurer 3C rapide apres test de fidelite	commande GP0 3Ch	seulement sous equivalence	regression pixel automatique	optimisation
+B135.48	preferer le vrai guest GsSortOt	FUN_80085D98	fallback C non	faire executer 80085D98 completement dans tout contexte	fonctionnel
+B135.49	sonder les listes d'objets du duel	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.50	sonder les sept listes, y compris C2	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.51	tracer la chaine callback de la main CC	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.52	dumper les callbacks C4/CC actifs	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.53	tracer le renderer de carte actif	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.54	prouver les paquets main dans DMA2 et leur texture VRAM	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.55	elargir le matcher aux sprites GP0 64-67	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.56	prouver insertion du paquet et fusion OT	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.57	tracer la forme main dans source OT, fusion et DrawOTag	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.58	tracer la duree de vie du paquet avant fusion	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.59	ordonner clear/sort et disparition de la main	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.60	localiser la perte dans le finalizer	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.61	correler la perte dans un cycle framebuffer	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.62	figer le paquet exact a travers finalizer/sort	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.63	correler paquet courant et tri du finalizer suivant	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.64	recuperer le premier tri de couche saute	premier FUN_80085D98(base+0x5124,base+0x5110) dans FUN_80012D60	non	corriger appel imbrique/reentrance; prouver trois tris originaux uniques	fonctionnel critique
+B135.65	compter les entrees generees et le chemin HLE	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.66	intercepter l'appel genere direct/imbrique a GsSortOt	FUN_80085D98	non	frontiere CPU correcte ou corps genere 80085D98 reentrant/exact	fonctionnel critique
+B135.67	tracer la main aux etapes finalizer/DrawOT	aucune; instrumentation	oui apres capture	sans objet	diagnostic
+B135.68	scanner les quatre OT aux etapes render/wait/finalizer	aucune; instrumentation lourde	oui; neutralise dans B135.71	sans objet	diagnostic
+B135.69	tracer source/destination exacte de chaque GsSortOt	aucune; instrumentation lourde	oui; neutralise dans B135.71	sans objet	diagnostic
+B135.70	localiser l'etape exacte de perte dans FUN_80012D60	aucune; instrumentation lourde	oui; neutralise dans B135.71	sans objet	diagnostic
+B135.71	forcer le submit si l'OT contient une main 52x60 et C4B8 vaut zero	effet de FUN_8001522C vers FUN_80015C18 sur DAT_8009C4B8	non, verrou du duel	retablir appel, ordre et persistance de 8001522C/80015C18; verifier 80015C28	fonctionnel critique
