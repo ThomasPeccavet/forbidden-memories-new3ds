@@ -3846,6 +3846,25 @@ static uint32_t g_b13564_last_dst = 0u;
 static uint32_t g_b13564_last_shape_packet = 0u;
 static int32_t g_b13564_last_code = 0;
 
+/*
+ * B135.66 - nested/direct generated GsSortOt HLE.
+ *
+ * B135.65 proved generated 80085D98 entries continue far beyond the
+ * top-level main.c HLE count.  The runtime shim now escapes at the
+ * generated entry checkpoint before the native body runs; main.c then
+ * performs the verified C GsSortOt splice and resumes at the guest RA.
+ */
+static uint32_t g_b13566_traps = 0u;
+static uint32_t g_b13566_ok = 0u;
+static uint32_t g_b13566_fail = 0u;
+static uint32_t g_b13566_hand_traps = 0u;
+static uint32_t g_b13566_hand_src_has = 0u;
+static uint32_t g_b13566_hand_dst_has = 0u;
+static uint32_t g_b13566_last_src = 0u;
+static uint32_t g_b13566_last_dst = 0u;
+static uint32_t g_b13566_last_ra = 0u;
+static int32_t g_b13566_last_code = 0;
+
 static uint32_t g_ra_8111c = 0;
 static uint32_t g_ra_82168 = 0;
 static uint32_t g_ra_8219c = 0;
@@ -16287,6 +16306,115 @@ int main(void)
 
 
                 /*
+                 * ============================================
+                 * B135.66 - nested generated GsSortOt HLE
+                 * ============================================
+                 *
+                 * psx_check_interrupts_dispatch_entry() escaped from a
+                 * direct ARM->ARM compiled call to 80085D98 before its body
+                 * executed.  Service the exact call here, then return to the
+                 * original guest RA as the real function would.
+                 */
+                if (
+                    probe.reason
+                    == FM_STOP_GSSORTOT_HLE
+                )
+                {
+                    uint32_t src_ot = cpu->gpr[4];
+                    uint32_t dst_ot = cpu->gpr[5];
+                    uint32_t result_v0 = dst_ot;
+
+                    ++g_b13566_traps;
+                    g_b13566_last_src = src_ot;
+                    g_b13566_last_dst = dst_ot;
+                    g_b13566_last_ra = cpu->gpr[31];
+
+                    uint32_t sp66 =
+                        src_ot & 0x1FFFFFFFu;
+
+                    int hand66 =
+                        (
+                            sp66 == 0x000E5FD4u
+                            ||
+                            sp66 == 0x000EB134u
+                        );
+
+                    if (hand66)
+                    {
+                        ++g_b13566_hand_traps;
+
+                        uint32_t shape66 = 0u;
+
+                        if (
+                            b13557_chain_has_hand_shape(
+                                cpu,
+                                cpu->read_word(src_ot + 0x10u),
+                                NULL,
+                                &shape66
+                            )
+                        )
+                        {
+                            ++g_b13566_hand_src_has;
+                        }
+                    }
+
+                    fm_repair_ot_sentinel(cpu, src_ot);
+                    fm_repair_ot_sentinel(cpu, dst_ot);
+
+                    int ok66 =
+                        fm_try_c_gssortot(
+                            cpu,
+                            src_ot,
+                            dst_ot,
+                            &result_v0
+                        );
+
+                    if (ok66)
+                    {
+                        ++g_b13566_ok;
+                        g_b13566_last_code = 1;
+
+                        if (hand66)
+                        {
+                            uint32_t dst_shape66 = 0u;
+
+                            if (
+                                b13557_chain_has_hand_shape(
+                                    cpu,
+                                    cpu->read_word(dst_ot + 0x10u),
+                                    NULL,
+                                    &dst_shape66
+                                )
+                            )
+                            {
+                                ++g_b13566_hand_dst_has;
+                            }
+                        }
+
+                        cpu->gpr[2] = result_v0;
+                    }
+                    else
+                    {
+                        ++g_b13566_fail;
+                        g_b13566_last_code =
+                            g_b119_csort_last_code;
+
+                        /*
+                         * Preserve the guest ABI even on a diagnostic
+                         * failure; the top-level HLE uses dst_ot likewise.
+                         */
+                        cpu->gpr[2] = dst_ot;
+                    }
+
+                    cpu->pc = cpu->gpr[31];
+                    cpu->gpr[0] = 0u;
+
+                    static_miss = 0;
+                    continue;
+                }
+
+
+                /*
                  * Normal dispatcher return.
                  */
                 if (
@@ -17448,7 +17576,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.65-GENERATED-ENTRY-PROBE (BASE B131)\n");
+            printf("BUILD B135.66-NESTED-GSSORT-HLE (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -17877,11 +18005,7 @@ int main(void)
                             );
 
                             /*
-                             * B135.65 - compare main-loop HLE counters with
-                             * PSXRecomp's own generated dispatch-entry
-                             * checkpoints.  If generated 85D98 keeps rising
-                             * while SORT G is frozen, nested native calls are
-                             * bypassing the main.c HLE.
+                             * B135.66 - generated entry proof + nested HLE.
                              */
                             uint32_t e12c50 = 0u;
                             uint32_t e12f70 = 0u;
@@ -17910,46 +18034,51 @@ int main(void)
                             );
 
                             printf(
-                                "GEN E 12C50/F70/41674:%lu/%lu/%lu\n",
-                                (unsigned long)e12c50,
-                                (unsigned long)e12f70,
-                                (unsigned long)e41674
-                            );
-
-                            printf(
-                                "GEN E 12D60/85D98/85D08:%lu/%lu/%lu\n",
+                                "GEN 12D60/85D98/85D08:%lu/%lu/%lu\n",
                                 (unsigned long)e12d60,
                                 (unsigned long)e85d98,
                                 (unsigned long)e85d08
                             );
 
                             printf(
-                                "HLE L1/2/3 B0:%lu/%lu/%lu B1:%lu/%lu/%lu\n",
-                                (unsigned long)g_b13564_first_calls[0],
-                                (unsigned long)g_b13564_second_calls[0],
-                                (unsigned long)g_b13564_third_calls[0],
-                                (unsigned long)g_b13564_first_calls[1],
-                                (unsigned long)g_b13564_second_calls[1],
-                                (unsigned long)g_b13564_third_calls[1]
+                                "NEST trap/ok/f:%lu/%lu/%lu code:%ld\n",
+                                (unsigned long)g_b13566_traps,
+                                (unsigned long)g_b13566_ok,
+                                (unsigned long)g_b13566_fail,
+                                (long)g_b13566_last_code
                             );
 
                             printf(
-                                "SORT G ok/f:%lu/%lu lastE:%06lX\n",
+                                "HAND trap/src/dst:%lu/%lu/%lu DMA:%lu\n",
+                                (unsigned long)g_b13566_hand_traps,
+                                (unsigned long)g_b13566_hand_src_has,
+                                (unsigned long)g_b13566_hand_dst_has,
+                                (unsigned long)b130_dma.b13554_hand_total_hits
+                            );
+
+                            printf(
+                                "LAST src/dst/ra:%05lX/%05lX/%05lX\n",
+                                (unsigned long)(
+                                    g_b13566_last_src & 0xFFFFFu
+                                ),
+                                (unsigned long)(
+                                    g_b13566_last_dst & 0xFFFFFu
+                                ),
+                                (unsigned long)(
+                                    g_b13566_last_ra & 0xFFFFFu
+                                )
+                            );
+
+                            printf(
+                                "SORT native ok/f:%lu/%lu C ok/f:%lu/%lu\n",
                                 (unsigned long)g_sort_native_ok,
                                 (unsigned long)g_sort_native_fail,
-                                (unsigned long)(elast & 0x1FFFFFu)
+                                (unsigned long)g_b119_csort_ok,
+                                (unsigned long)g_b119_csort_fallbacks
                             );
 
                             printf(
-                                "BR a/ok B0:%lu/%lu B1:%lu/%lu\n",
-                                (unsigned long)g_b13564_bridge_attempt[0],
-                                (unsigned long)g_b13564_bridge_ok[0],
-                                (unsigned long)g_b13564_bridge_attempt[1],
-                                (unsigned long)g_b13564_bridge_ok[1]
-                            );
-
-                            printf(
-                                "BASE:%06lX idx:%lu B135.65 gen-entry\n",
+                                "BASE:%06lX idx:%lu B135.66 nested sort\n",
                                 (unsigned long)(
                                     cpu->read_word(0x8009C414u)
                                     & 0x1FFFFFu
