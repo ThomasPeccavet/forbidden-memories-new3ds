@@ -4163,12 +4163,26 @@ static void execute_command(void)
                     (opcode & 0xFCu) == 0x3Cu
                 )
                 {
-                    /*
-                     * B135.46: do not return through the B135.11 native
-                     * split-triangle path.  Count it, then fall through to
-                     * sw_draw_shaded_textured_triangle() below.
-                     */
-                    ++g_b13546_generic_3c;
+                    ++g_b13511_shaded_texquad_hits;
+
+                    b13511_shaded_textured_triangle(
+                        x0,y0,u0,v0,c0,
+                        x1,y1,u1,v1,c1,
+                        x2,y2,u2,v2,c2,
+                        clut_x(clut),clut_y(clut),g_texpage,raw,
+                        (opcode & 0x02u) != 0
+                    );
+
+                    b13511_shaded_textured_triangle(
+                        x1,y1,u1,v1,c1,
+                        x2,y2,u2,v2,c2,
+                        x3_fast,y3_fast,u3_fast,v3_fast,c3_fast,
+                        clut_x(clut),clut_y(clut),g_texpage,raw,
+                        (opcode & 0x02u) != 0
+                    );
+
+                    g_has_frame = 1;
+                    return;
                 }
             }
 
