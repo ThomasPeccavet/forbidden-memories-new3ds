@@ -1808,6 +1808,13 @@ static uint32_t g_b1357_vsync_latches = 0u;
 static uint32_t g_b1357_display_latches = 0u;
 
 /*
+ * B135.41 - stable VSync latch for non-DIRECT-2DF 2D/gameplay screens.
+ * Dialogue/duel traces showed GP0 activity and VSync completions while
+ * swap stayed at zero because the presenter only latched on GP1(05) flips.
+ */
+static uint32_t g_b13541_2d_vsync_latches = 0u;
+
+/*
  * B135.8 - one-loop pulse emitted when the VSync HLE actually RETURNS.
  * B135.7 looked at g_vsync_wait_active during presentation, but that flag is
  * cleared inside the HLE before main.c reaches the latch stage. Therefore
@@ -14760,6 +14767,30 @@ int main(void)
                     }
                 }
             }
+            else if (
+                g_b1358_vsync_completed
+                &&
+                b104_gp0 != g_b1357_last_latched_gp0
+            )
+            {
+                /*
+                 * B135.41:
+                 *
+                 * Some dialogue/duel screens finish their foreground/UI
+                 * after the last GP1(05) page flip.  B102/B103 therefore
+                 * latched an incomplete framebuffer and then never refreshed
+                 * it even though GP0 kept changing for dozens of VSyncs.
+                 *
+                 * VSync is the safe boundary already used successfully by
+                 * B135.7 on DIRECT-2DF gameplay.  For the normal 2D path,
+                 * refresh the CURRENT GP1 frontbuffer at that boundary when
+                 * GP0 changed since the previous latch.
+                 */
+                latch_x = current_x;
+                latch_y = current_y;
+                need_latch = 1;
+                ++g_b13541_2d_vsync_latches;
+            }
 
             if (display_changed)
             {
@@ -15166,7 +15197,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.40-PAGE-PROBE (BASE B131)\n");
+            printf("BUILD B135.41-VSYNC-2D (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15545,12 +15576,13 @@ int main(void)
                     );
 
                     printf(
-                        "MERGE d2:%d m/p:%lu/%lu b/o:%lu/%lu\n",
+                        "MERGE d2:%d m/p:%lu/%lu b/o:%lu/%lu v2:%lu\n",
                         g_direct2df_active,
                         (unsigned long)g_b103_merge_count,
                         (unsigned long)g_b103_plain_count,
                         (unsigned long)g_b103_last_base_x,
-                        (unsigned long)g_b103_last_overlay_x
+                        (unsigned long)g_b103_last_overlay_x,
+                        (unsigned long)g_b13541_2d_vsync_latches
                     );
 
                     g_b13540_prev_rect =
