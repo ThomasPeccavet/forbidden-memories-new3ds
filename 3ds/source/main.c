@@ -3728,6 +3728,94 @@ static void b13562_reach(
     }
 }
 
+/*
+ * B135.63 - correlate each newly generated hand anchor with the NEXT
+ * first-layer GsSortOt call from FUN_80012D60 (RA=80012E44).
+ *
+ * Also detect whether the packet allocator reuses the exact packet address
+ * before that sort.  This distinguishes:
+ *   - allocator reuse / packet overwrite
+ *   - OT disconnect with intact packet
+ *   - healthy packet reaching the sort
+ */
+typedef struct B13563Corr
+{
+    uint32_t src_phys;
+
+    uint32_t gen;
+    uint32_t pending;
+    uint32_t ready;
+
+    uint32_t packet;
+    uint32_t bucket;
+    uint32_t hand_count_at_create;
+
+    uint32_t ret_ok;
+
+    uint32_t reuse_before_sort;
+    uint32_t reuse_ra;
+    int32_t reuse_x;
+    int32_t reuse_y;
+    uint32_t reuse_w;
+    uint32_t reuse_h;
+    uint32_t reuse_packet;
+
+    uint32_t corr_sorts;
+    uint32_t corr_good;
+    uint32_t corr_bad;
+    uint32_t sort_without_new;
+
+    uint32_t sort_shape;
+    uint32_t sort_reach_b;
+    uint32_t sort_reach_p;
+
+    uint32_t sort_ph;
+    uint32_t sort_bw;
+    uint32_t sort_tag;
+    uint32_t sort_alloc;
+    uint32_t sort_ra;
+    uint32_t hand_delta;
+} B13563Corr;
+
+static B13563Corr g_b13563[2] =
+{
+    {
+        0x000E5FD4u,
+        0u,0u,0u, 0u,0u,0u,
+        0u,
+        0u,0u,0,0,0u,0u,0u,
+        0u,0u,0u,0u,
+        0u,0u,0u,
+        0u,0u,0u,0u,0u,0u
+    },
+    {
+        0x000EB134u,
+        0u,0u,0u, 0u,0u,0u,
+        0u,
+        0u,0u,0,0,0u,0u,0u,
+        0u,0u,0u,0u,
+        0u,0u,0u,
+        0u,0u,0u,0u,0u,0u
+    }
+};
+
+static B13563Corr *b13563_by_src(
+    uint32_t src
+)
+{
+    uint32_t phys = src & 0x1FFFFFFFu;
+
+    for (unsigned i = 0u; i < 2u; ++i)
+    {
+        if (g_b13563[i].src_phys == phys)
+        {
+            return &g_b13563[i];
+        }
+    }
+
+    return NULL;
+}
+
 static uint32_t g_ra_8111c = 0;
 static uint32_t g_ra_82168 = 0;
 static uint32_t g_ra_8219c = 0;
@@ -4153,6 +4241,49 @@ static void fm_trace_dispatch(
 
             if (cpu)
             {
+                /*
+                 * B135.63: before this call writes anything, DAT_800FF5C4
+                 * is the packet address that is about to be allocated.
+                 * If it equals a still-pending hand packet, that packet is
+                 * being reused before its expected GsSortOt.
+                 */
+                uint32_t alloc_now =
+                    cpu->read_word(0x800FF5C4u);
+
+                for (unsigned ci = 0u; ci < 2u; ++ci)
+                {
+                    B13563Corr *c63 =
+                        &g_b13563[ci];
+
+                    if (
+                        c63->pending
+                        &&
+                        c63->ready
+                        &&
+                        c63->packet != 0u
+                        &&
+                        (
+                            (alloc_now & 0x1FFFFFFFu)
+                            ==
+                            (c63->packet & 0x1FFFFFFFu)
+                        )
+                    )
+                    {
+                        uint32_t d63 = cpu->gpr[4];
+
+                        ++c63->reuse_before_sort;
+                        c63->reuse_ra = cpu->gpr[31];
+                        c63->reuse_x =
+                            (int16_t)cpu->read_half(d63 + 4u);
+                        c63->reuse_y =
+                            (int16_t)cpu->read_half(d63 + 6u);
+                        c63->reuse_w =
+                            cpu->read_half(d63 + 8u);
+                        c63->reuse_h =
+                            cpu->read_half(d63 + 10u);
+                        c63->reuse_packet = alloc_now;
+                    }
+                }
                 uint32_t d = cpu->gpr[4];
                 int32_t x = (int16_t)cpu->read_half(d + 4u);
                 int32_t y = (int16_t)cpu->read_half(d + 6u);
@@ -4235,6 +4366,27 @@ static void fm_trace_dispatch(
                             f62->live_packet = packet;
                             f62->live_bucket = bucket;
                         }
+
+                        B13563Corr *c63 =
+                            b13563_by_src(ot);
+
+                        if (c63)
+                        {
+                            ++c63->gen;
+                            c63->pending = 1u;
+                            c63->ready = 0u;
+                            c63->packet = packet;
+                            c63->bucket = bucket;
+                            c63->hand_count_at_create =
+                                g_b13556_hand_84978;
+                            c63->reuse_before_sort = 0u;
+                            c63->reuse_ra = 0u;
+                            c63->reuse_x = 0;
+                            c63->reuse_y = 0;
+                            c63->reuse_w = 0u;
+                            c63->reuse_h = 0u;
+                            c63->reuse_packet = 0u;
+                        }
                     }
 
                     for (uint32_t si = 0u; si < 2u; ++si)
@@ -4297,6 +4449,51 @@ static void fm_trace_dispatch(
                     }
                 }
             }
+            if (cpu)
+            {
+                for (unsigned ci = 0u; ci < 2u; ++ci)
+                {
+                    B13563Corr *c63 =
+                        &g_b13563[ci];
+
+                    if (
+                        c63->pending
+                        &&
+                        !c63->ready
+                        &&
+                        c63->packet != 0u
+                    )
+                    {
+                        uint32_t h63 =
+                            cpu->read_word(c63->packet);
+
+                        if (
+                            (h63 >> 24) == 5u
+                            &&
+                            (cpu->read_word(c63->packet + 4u) >> 24)
+                                == 0xE1u
+                            &&
+                            (
+                                (
+                                    cpu->read_word(c63->packet + 8u)
+                                    >> 24
+                                )
+                                &
+                                0xFCu
+                            )
+                                == 0x64u
+                            &&
+                            cpu->read_word(c63->packet + 20u)
+                                == 0x003C0034u
+                        )
+                        {
+                            c63->ready = 1u;
+                            ++c63->ret_ok;
+                        }
+                    }
+                }
+            }
+
             b13560_snapshot(cpu, 0u);
             break;
 
@@ -14979,6 +15176,117 @@ int main(void)
                         }
                     }
 
+                    /*
+                     * B135.63: only the FIRST layer sort from FUN_80012D60.
+                     * Callsite 80012E3C returns to 80012E44.
+                     */
+                    if (
+                        (cpu->gpr[31] & 0x1FFFFFFFu)
+                        == 0x00012E44u
+                    )
+                    {
+                        B13563Corr *c63 =
+                            b13563_by_src(src_ot);
+
+                        if (c63)
+                        {
+                            c63->sort_ra = cpu->gpr[31];
+
+                            if (c63->pending)
+                            {
+                                ++c63->corr_sorts;
+
+                                c63->sort_shape = 0u;
+                                c63->sort_reach_b = 0u;
+                                c63->sort_reach_p = 0u;
+                                c63->sort_ph = 0u;
+                                c63->sort_bw = 0u;
+                                c63->sort_tag =
+                                    cpu->read_word(src_ot + 0x10u);
+                                c63->sort_alloc =
+                                    cpu->read_word(0x800FF5C4u);
+
+                                if (c63->packet != 0u)
+                                {
+                                    c63->sort_ph =
+                                        cpu->read_word(c63->packet);
+
+                                    if (
+                                        b13562_packet_shape(
+                                            cpu,
+                                            c63->packet,
+                                            NULL
+                                        )
+                                    )
+                                    {
+                                        c63->sort_shape = 1u;
+                                    }
+                                }
+
+                                if (c63->bucket != 0u)
+                                {
+                                    c63->sort_bw =
+                                        cpu->read_word(c63->bucket);
+
+                                    if (
+                                        b13558_chain_reaches(
+                                            cpu,
+                                            c63->sort_tag,
+                                            c63->bucket,
+                                            NULL,
+                                            NULL,
+                                            NULL
+                                        )
+                                    )
+                                    {
+                                        c63->sort_reach_b = 1u;
+                                    }
+                                }
+
+                                if (
+                                    c63->packet != 0u
+                                    &&
+                                    b13558_chain_reaches(
+                                        cpu,
+                                        c63->sort_tag,
+                                        c63->packet,
+                                        NULL,
+                                        NULL,
+                                        NULL
+                                    )
+                                )
+                                {
+                                    c63->sort_reach_p = 1u;
+                                }
+
+                                c63->hand_delta =
+                                    g_b13556_hand_84978
+                                    -
+                                    c63->hand_count_at_create;
+
+                                if (
+                                    c63->sort_shape
+                                    &&
+                                    c63->sort_reach_p
+                                )
+                                {
+                                    ++c63->corr_good;
+                                }
+                                else
+                                {
+                                    ++c63->corr_bad;
+                                }
+
+                                c63->pending = 0u;
+                                c63->ready = 0u;
+                            }
+                            else
+                            {
+                                ++c63->sort_without_new;
+                            }
+                        }
+                    }
+
                     b13559_log(
                         (uint32_t)'S',
                         src_ot,
@@ -16962,7 +17270,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.62-FROZEN-HAND-FRAME (BASE B131)\n");
+            printf("BUILD B135.63-NEXT-SORT-CORRELATION (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -17391,7 +17699,8 @@ int main(void)
                             );
 
                             /*
-                             * B135.62 - frozen generation per framebuffer.
+                             * B135.63 - latest hand generation -> next
+                             * first-layer GsSortOt correlation.
                              */
                             printf(
                                 "CARD c/d:%lu/%lu P849:%lu DMA:%lu\n",
@@ -17403,56 +17712,59 @@ int main(void)
 
                             for (unsigned bi = 0u; bi < 2u; ++bi)
                             {
-                                B13562FrameLife *f62 =
-                                    &g_b13562[bi];
+                                B13563Corr *c63 =
+                                    &g_b13563[bi];
 
                                 printf(
-                                    "B%u g/f:%lu/%lu F sh/r:%lu %lu/%lu\n",
+                                    "B%u gen/ret/pend:%lu/%lu/%lu sort:%lu g/b:%lu/%lu\n",
                                     bi,
-                                    (unsigned long)f62->live_gen,
-                                    (unsigned long)f62->frame_gen,
-                                    (unsigned long)f62->f_shape,
-                                    (unsigned long)f62->f_reach_b,
-                                    (unsigned long)f62->f_reach_p
+                                    (unsigned long)c63->gen,
+                                    (unsigned long)c63->ret_ok,
+                                    (unsigned long)c63->pending,
+                                    (unsigned long)c63->corr_sorts,
+                                    (unsigned long)c63->corr_good,
+                                    (unsigned long)c63->corr_bad
                                 );
 
                                 printf(
-                                    "   R:%lu sh/r:%lu %lu/%lu S:%lu sh:%lu\n",
-                                    (unsigned long)f62->r_seen,
-                                    (unsigned long)f62->r_shape,
-                                    (unsigned long)f62->r_reach_b,
-                                    (unsigned long)f62->r_reach_p,
-                                    (unsigned long)f62->s_seen,
-                                    (unsigned long)f62->s_shape
+                                    "   sh/r:%lu %lu/%lu dH:%lu noH:%lu\n",
+                                    (unsigned long)c63->sort_shape,
+                                    (unsigned long)c63->sort_reach_b,
+                                    (unsigned long)c63->sort_reach_p,
+                                    (unsigned long)c63->hand_delta,
+                                    (unsigned long)c63->sort_without_new
                                 );
 
                                 printf(
-                                    "   Sr:%lu/%lu p/b:%05lX/%05lX\n",
-                                    (unsigned long)f62->s_reach_b,
-                                    (unsigned long)f62->s_reach_p,
+                                    "   p/b:%05lX/%05lX ph/bw:%08lX/%08lX\n",
                                     (unsigned long)(
-                                        f62->frame_packet & 0xFFFFFu
+                                        c63->packet & 0xFFFFFu
                                     ),
                                     (unsigned long)(
-                                        f62->frame_bucket & 0xFFFFFu
-                                    )
+                                        c63->bucket & 0xFFFFFu
+                                    ),
+                                    (unsigned long)c63->sort_ph,
+                                    (unsigned long)c63->sort_bw
                                 );
 
                                 printf(
-                                    "   ph/bw:%08lX/%08lX src:%05lX dst:%05lX\n",
-                                    (unsigned long)f62->last_ph,
-                                    (unsigned long)f62->last_bw,
+                                    "   reuse:%lu %dx%d@%ld,%ld ra:%05lX a:%05lX\n",
+                                    (unsigned long)c63->reuse_before_sort,
+                                    (int)c63->reuse_w,
+                                    (int)c63->reuse_h,
+                                    (long)c63->reuse_x,
+                                    (long)c63->reuse_y,
                                     (unsigned long)(
-                                        f62->last_src_raw & 0xFFFFFu
+                                        c63->reuse_ra & 0xFFFFFu
                                     ),
                                     (unsigned long)(
-                                        f62->last_dst_raw & 0xFFFFFu
+                                        c63->sort_alloc & 0xFFFFFu
                                     )
                                 );
                             }
 
                             printf(
-                                "BASE:%06lX idx:%lu B135.62 frozen\n",
+                                "BASE:%06lX idx:%lu B135.63 next-sort\n",
                                 (unsigned long)(
                                     cpu->read_word(0x8009C414u)
                                     & 0x1FFFFFu
