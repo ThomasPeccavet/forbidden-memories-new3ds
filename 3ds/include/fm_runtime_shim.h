@@ -43,7 +43,14 @@ typedef enum FMRuntimeStopReason
     /*
      * Restore / exception demandant un retour contrôlé.
      */
-    FM_STOP_RESTORE
+    FM_STOP_RESTORE,
+
+    /*
+     * B135.66: a direct/nested generated call reached GsSortOt.
+     * main.c must service it with the verified C HLE before the generated
+     * implementation can run.
+     */
+    FM_STOP_GSSORTOT_HLE
 
 } FMRuntimeStopReason;
 
