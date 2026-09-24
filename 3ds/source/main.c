@@ -16524,7 +16524,7 @@ int main(void)
                              */
                             B13558HandSlot *dbg_hs =
                                 (
-                                    g_b13558_last_src == 0x800EB134u
+                                    g_b13557_last_src == 0x800EB134u
                                 )
                                     ? &g_b13558_hand[1]
                                     : &g_b13558_hand[0];
