@@ -242,6 +242,17 @@ void fm_runtime_b13569_sort_boundary(
     uint32_t *last_next_entry
 );
 
+void fm_runtime_b13570_death_stages(
+    uint32_t hits[7],
+    uint32_t shape[7],
+    uint32_t ots[7],
+    uint32_t tags[7],
+    uint32_t packets[7],
+    uint32_t *base,
+    uint32_t *gate4b8,
+    uint32_t *gate6a0
+);
+
 
 /*
  * ============================================================
