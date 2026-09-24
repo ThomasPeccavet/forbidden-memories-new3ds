@@ -226,6 +226,7 @@ typedef struct FMGpuDebugStats
 
 uint32_t fm_gpu_b126_build_tag(void);
 uint32_t fm_gpu_b13545_generic_texquads(void);
+uint32_t fm_gpu_b13546_generic_3c(void);
 
 /*
  * B135.43 - textured-rectangle write probe for missing dialogue/cards.
