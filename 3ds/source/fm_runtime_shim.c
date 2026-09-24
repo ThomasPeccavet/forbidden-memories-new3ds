@@ -42,6 +42,87 @@ static uint32_t g_b13565_e_85d98 = 0u;
 static uint32_t g_b13565_e_85d08 = 0u;
 static uint32_t g_b13565_last_entry = 0u;
 
+/*
+ * B135.67 - locate the hand layer across the REAL frame pipeline.
+ *
+ * Unlike the previous tests, this does not keep a stale packet pointer.
+ * At each stage it scans the current OT chain for the invariant hand
+ * primitive shape (E1 + textured rect 64..67 + 52x60).
+ */
+static uint32_t g_b13567_fin_entries = 0u;
+static uint32_t g_b13567_fin_b8 = 0u;
+static uint32_t g_b13567_fin_shape = 0u;
+static uint32_t g_b13567_fin_no_shape = 0u;
+static uint32_t g_b13567_draw_entries = 0u;
+static uint32_t g_b13567_draw_shape = 0u;
+static uint32_t g_b13567_draw_no_shape = 0u;
+static uint32_t g_b13567_last_base = 0u;
+static uint32_t g_b13567_last_src = 0u;
+static uint32_t g_b13567_last_dst = 0u;
+static uint32_t g_b13567_last_shape_packet = 0u;
+static uint32_t g_b13567_last_4b8 = 0u;
+static uint32_t g_b13567_last_6a0 = 0u;
+
+static int b13567_chain_has_hand_shape(
+    CPUState *cpu,
+    uint32_t start_tag,
+    uint32_t *packet_out
+)
+{
+    if (packet_out) *packet_out = 0u;
+
+    if (!cpu || start_tag == 0u)
+    {
+        return 0;
+    }
+
+    uint32_t node = start_tag;
+
+    for (uint32_t step = 0u; step < 8192u; ++step)
+    {
+        uint32_t phys = node & 0x1FFFFFFFu;
+
+        if (phys >= 0x00200000u || (phys & 3u) != 0u)
+        {
+            return 0;
+        }
+
+        uint32_t guest = 0x80000000u | phys;
+        uint32_t header = cpu->read_word(guest);
+        uint32_t count = header >> 24;
+
+        if (count >= 5u)
+        {
+            uint32_t c0 = cpu->read_word(guest + 4u);
+            uint32_t c1 = cpu->read_word(guest + 8u);
+            uint32_t c4 = cpu->read_word(guest + 20u);
+
+            if (
+                (c0 >> 24) == 0xE1u
+                &&
+                ((c1 >> 24) & 0xFCu) == 0x64u
+                &&
+                c4 == 0x003C0034u
+            )
+            {
+                if (packet_out) *packet_out = guest;
+                return 1;
+            }
+        }
+
+        uint32_t next = header & 0x00FFFFFFu;
+
+        if (next & 0x00800000u)
+        {
+            return 0;
+        }
+
+        node = 0x80000000u | next;
+    }
+
+    return 0;
+}
+
 
 /*
  * ============================================================
@@ -1001,20 +1082,82 @@ void psx_check_interrupts_dispatch_entry(
     }
 
     /*
-     * B135.66 - generated resident code can call FUN_80085D98 directly,
-     * bypassing main.c's top-level HLE.  Escape at the generated entry
-     * checkpoint before the original function body mutates the OT.
+     * B135.67 - inspect the current frame OTs at generated function entry.
      */
-    if (
-        phys == 0x00085D98u
-        &&
-        g_probe_armed
-    )
+    if (cpu && phys == 0x00012D60u)
     {
-        fm_probe_stop(
-            FM_STOP_GSSORTOT_HLE,
-            resume_pc
-        );
+        ++g_b13567_fin_entries;
+
+        uint32_t base =
+            cpu->read_word(0x8009C414u);
+
+        uint32_t src =
+            base + 0x5124u;
+
+        uint32_t tag =
+            cpu->read_word(src + 0x10u);
+
+        uint32_t shape_packet = 0u;
+
+        g_b13567_last_base = base;
+        g_b13567_last_src = src;
+        g_b13567_last_4b8 =
+            cpu->read_byte(0x8009C4B8u);
+        g_b13567_last_6a0 =
+            cpu->read_byte(0x8009C6A0u);
+
+        if (g_b13567_last_4b8 != 0u)
+        {
+            ++g_b13567_fin_b8;
+
+            if (
+                b13567_chain_has_hand_shape(
+                    cpu,
+                    tag,
+                    &shape_packet
+                )
+            )
+            {
+                ++g_b13567_fin_shape;
+                g_b13567_last_shape_packet =
+                    shape_packet;
+            }
+            else
+            {
+                ++g_b13567_fin_no_shape;
+            }
+        }
+    }
+    else if (cpu && phys == 0x00085D08u)
+    {
+        ++g_b13567_draw_entries;
+
+        uint32_t dst =
+            cpu->gpr[4];
+
+        uint32_t tag =
+            cpu->read_word(dst + 0x10u);
+
+        uint32_t shape_packet = 0u;
+
+        g_b13567_last_dst = dst;
+
+        if (
+            b13567_chain_has_hand_shape(
+                cpu,
+                tag,
+                &shape_packet
+            )
+        )
+        {
+            ++g_b13567_draw_shape;
+            g_b13567_last_shape_packet =
+                shape_packet;
+        }
+        else
+        {
+            ++g_b13567_draw_no_shape;
+        }
     }
 
     psx_check_interrupts_at(
@@ -1041,6 +1184,38 @@ void fm_runtime_b13565_entries(
     if (e85d98) *e85d98 = g_b13565_e_85d98;
     if (e85d08) *e85d08 = g_b13565_e_85d08;
     if (last_entry) *last_entry = g_b13565_last_entry;
+}
+
+
+void fm_runtime_b13567_pipeline(
+    uint32_t *fin_entries,
+    uint32_t *fin_b8,
+    uint32_t *fin_shape,
+    uint32_t *fin_no_shape,
+    uint32_t *draw_entries,
+    uint32_t *draw_shape,
+    uint32_t *draw_no_shape,
+    uint32_t *last_base,
+    uint32_t *last_src,
+    uint32_t *last_dst,
+    uint32_t *last_shape_packet,
+    uint32_t *last_4b8,
+    uint32_t *last_6a0
+)
+{
+    if (fin_entries) *fin_entries = g_b13567_fin_entries;
+    if (fin_b8) *fin_b8 = g_b13567_fin_b8;
+    if (fin_shape) *fin_shape = g_b13567_fin_shape;
+    if (fin_no_shape) *fin_no_shape = g_b13567_fin_no_shape;
+    if (draw_entries) *draw_entries = g_b13567_draw_entries;
+    if (draw_shape) *draw_shape = g_b13567_draw_shape;
+    if (draw_no_shape) *draw_no_shape = g_b13567_draw_no_shape;
+    if (last_base) *last_base = g_b13567_last_base;
+    if (last_src) *last_src = g_b13567_last_src;
+    if (last_dst) *last_dst = g_b13567_last_dst;
+    if (last_shape_packet) *last_shape_packet = g_b13567_last_shape_packet;
+    if (last_4b8) *last_4b8 = g_b13567_last_4b8;
+    if (last_6a0) *last_6a0 = g_b13567_last_6a0;
 }
 
 
