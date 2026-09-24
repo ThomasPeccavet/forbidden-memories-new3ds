@@ -229,6 +229,19 @@ void fm_runtime_b13568_stages(
     uint32_t ptrs[4]
 );
 
+void fm_runtime_b13569_sort_boundary(
+    uint32_t sort_calls[4],
+    uint32_t src_shape[4],
+    uint32_t dst_shape[4],
+    uint32_t *sort_other,
+    uint32_t *last_src,
+    uint32_t *last_dst,
+    uint32_t *last_slot,
+    uint32_t *last_src_packet,
+    uint32_t *last_dst_packet,
+    uint32_t *last_next_entry
+);
+
 
 /*
  * ============================================================
