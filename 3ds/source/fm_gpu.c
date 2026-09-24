@@ -100,6 +100,23 @@ static uint64_t g_b124_rect_pixels = 0u;
 static uint64_t g_b124_rect_texels = 0u;
 
 /*
+ * B135.43 - determine whether 64h sprites are really writing pixels.
+ */
+static uint64_t g_b13543_rect_nonzero_texels = 0u;
+static uint64_t g_b13543_rect_writes = 0u;
+static uint32_t g_b13543_rect_clip_rejects = 0u;
+static int g_b13543_last_x = 0;
+static int g_b13543_last_y = 0;
+static int g_b13543_last_w = 0;
+static int g_b13543_last_h = 0;
+static int g_b13543_last_off_x = 0;
+static int g_b13543_last_off_y = 0;
+static int g_b13543_last_area_x1 = 0;
+static int g_b13543_last_area_y1 = 0;
+static int g_b13543_last_area_x2 = 0;
+static int g_b13543_last_area_y2 = 0;
+
+/*
  * B125 - fixed-point fast paths for the actual hot quads seen on 3DS:
  *   2Ch/2Eh family : flat textured quad
  *   38h..3Bh       : Gouraud untextured quad (3Ah is the hot semi-trans case)
@@ -894,6 +911,17 @@ static int b124_try_textured_rect(
 
     ++g_b124_rect_hits;
 
+    g_b13543_last_x = x;
+    g_b13543_last_y = y;
+    g_b13543_last_w = w;
+    g_b13543_last_h = h;
+    g_b13543_last_off_x = g_offset_x;
+    g_b13543_last_off_y = g_offset_y;
+    g_b13543_last_area_x1 = g_draw_x1;
+    g_b13543_last_area_y1 = g_draw_y1;
+    g_b13543_last_area_x2 = g_draw_x2;
+    g_b13543_last_area_y2 = g_draw_y2;
+
     if (w <= 0 || h <= 0)
     {
         return 1;
@@ -916,6 +944,7 @@ static int b124_try_textured_rect(
 
     if (x0 >= x1 || y0 >= y1)
     {
+        ++g_b13543_rect_clip_rejects;
         return 1;
     }
 
@@ -996,6 +1025,8 @@ static int b124_try_textured_rect(
                 continue;
             }
 
+            ++g_b13543_rect_nonzero_texels;
+
             if (
                 g_mask_check
                 &&
@@ -1060,6 +1091,8 @@ static int b124_try_textured_rect(
 
             *dst =
                 color;
+
+            ++g_b13543_rect_writes;
         }
     }
 
@@ -5021,6 +5054,10 @@ void fm_gpu_init(
     g_b124_rect_texels =
         0u;
 
+    g_b13543_rect_nonzero_texels = 0u;
+    g_b13543_rect_writes = 0u;
+    g_b13543_rect_clip_rejects = 0u;
+
     g_b125_texquad_hits =
         0u;
 
@@ -6769,6 +6806,38 @@ int fm_gpu_bios_call(
         }
     }
 }
+
+void fm_gpu_b13543_rect_probe(
+    uint64_t *nonzero_texels,
+    uint64_t *writes,
+    uint32_t *clip_rejects,
+    int *last_x,
+    int *last_y,
+    int *last_w,
+    int *last_h,
+    int *last_off_x,
+    int *last_off_y,
+    int *last_area_x1,
+    int *last_area_y1,
+    int *last_area_x2,
+    int *last_area_y2
+)
+{
+    if (nonzero_texels) *nonzero_texels = g_b13543_rect_nonzero_texels;
+    if (writes) *writes = g_b13543_rect_writes;
+    if (clip_rejects) *clip_rejects = g_b13543_rect_clip_rejects;
+    if (last_x) *last_x = g_b13543_last_x;
+    if (last_y) *last_y = g_b13543_last_y;
+    if (last_w) *last_w = g_b13543_last_w;
+    if (last_h) *last_h = g_b13543_last_h;
+    if (last_off_x) *last_off_x = g_b13543_last_off_x;
+    if (last_off_y) *last_off_y = g_b13543_last_off_y;
+    if (last_area_x1) *last_area_x1 = g_b13543_last_area_x1;
+    if (last_area_y1) *last_area_y1 = g_b13543_last_area_y1;
+    if (last_area_x2) *last_area_x2 = g_b13543_last_area_x2;
+    if (last_area_y2) *last_area_y2 = g_b13543_last_area_y2;
+}
+
 
 /* ============================================================
  * B28 debug helpers (declared locally by main.c)
