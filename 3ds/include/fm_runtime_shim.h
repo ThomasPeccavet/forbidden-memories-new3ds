@@ -253,6 +253,18 @@ void fm_runtime_b13570_death_stages(
     uint32_t *gate6a0
 );
 
+void fm_runtime_b13571_gate(
+    uint32_t *hand_d60,
+    uint32_t *gate0,
+    uint32_t *gate1,
+    uint32_t *gate80,
+    uint32_t *gate_other,
+    uint32_t *forced,
+    uint32_t *last_packet,
+    uint32_t *last_before,
+    uint32_t *last_after
+);
+
 
 /*
  * ============================================================
