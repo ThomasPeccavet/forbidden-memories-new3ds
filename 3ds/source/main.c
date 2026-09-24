@@ -3016,6 +3016,88 @@ static int b13556_chain_contains_hand(
     return 0;
 }
 
+/*
+ * B135.57 - recognize the actual 52x60 hand packet by its GP0 payload,
+ * independently of packet address / frame / double-buffer selection.
+ */
+static uint32_t g_b13557_src_calls = 0u;
+static uint32_t g_b13557_src_has = 0u;
+static uint32_t g_b13557_dst_has = 0u;
+static uint32_t g_b13557_draw_calls = 0u;
+static uint32_t g_b13557_draw_has = 0u;
+
+static uint32_t g_b13557_last_src = 0u;
+static uint32_t g_b13557_last_dst = 0u;
+static uint32_t g_b13557_last_draw_tag = 0u;
+static uint32_t g_b13557_last_shape_packet = 0u;
+static uint32_t g_b13557_last_src_steps = 0u;
+static uint32_t g_b13557_last_dst_steps = 0u;
+static uint32_t g_b13557_last_draw_steps = 0u;
+
+static int b13557_chain_has_hand_shape(
+    CPUState *cpu,
+    uint32_t start_tag,
+    uint32_t *steps_out,
+    uint32_t *packet_out
+)
+{
+    if (steps_out) *steps_out = 0u;
+    if (packet_out) *packet_out = 0u;
+
+    if (!cpu || start_tag == 0u)
+    {
+        return 0;
+    }
+
+    uint32_t node = start_tag;
+
+    for (uint32_t step = 0u; step < 8192u; ++step)
+    {
+        uint32_t phys = node & 0x1FFFFFFFu;
+
+        if (steps_out) *steps_out = step + 1u;
+
+        if (phys >= 0x00200000u || (phys & 3u) != 0u)
+        {
+            return 0;
+        }
+
+        uint32_t guest = 0x80000000u | phys;
+        uint32_t header = cpu->read_word(guest);
+        uint32_t count = header >> 24;
+
+        if (count >= 5u)
+        {
+            uint32_t c0 = cpu->read_word(guest + 4u);
+            uint32_t c1 = cpu->read_word(guest + 8u);
+            uint32_t c4 = cpu->read_word(guest + 20u);
+
+            if (
+                (c0 >> 24) == 0xE1u
+                &&
+                ((c1 >> 24) & 0xFCu) == 0x64u
+                &&
+                c4 == 0x003C0034u
+            )
+            {
+                if (packet_out) *packet_out = guest;
+                return 1;
+            }
+        }
+
+        uint32_t next = header & 0x00FFFFFFu;
+
+        if (next & 0x00800000u)
+        {
+            return 0;
+        }
+
+        node = 0x80000000u | next;
+    }
+
+    return 0;
+}
+
 static uint32_t g_ra_8111c = 0;
 static uint32_t g_ra_82168 = 0;
 static uint32_t g_ra_8219c = 0;
@@ -3750,6 +3832,31 @@ static void fm_trace_dispatch(
             if (cpu)
             {
                 g_b78_drawotag_last_a0 = cpu->gpr[4];
+
+                uint32_t draw_tag = cpu->gpr[4];
+                uint32_t tag0 = cpu->read_word(0x800E5FC0u + 0x10u);
+                uint32_t tag1 = cpu->read_word(0x800EB120u + 0x10u);
+
+                if (draw_tag == tag0 || draw_tag == tag1)
+                {
+                    ++g_b13557_draw_calls;
+                    g_b13557_last_draw_tag = draw_tag;
+
+                    uint32_t shape_packet = 0u;
+
+                    if (
+                        b13557_chain_has_hand_shape(
+                            cpu,
+                            draw_tag,
+                            &g_b13557_last_draw_steps,
+                            &shape_packet
+                        )
+                    )
+                    {
+                        ++g_b13557_draw_has;
+                        g_b13557_last_shape_packet = shape_packet;
+                    }
+                }
             }
             break;
 
@@ -13998,6 +14105,43 @@ int main(void)
                     }
 
                     /*
+                     * B135.57 - source layer +0x5124 of the two frame
+                     * workspaces is exactly where the verified duel puts the
+                     * 52x60 hand packets:
+                     *   page 0: 800E5FD4
+                     *   page 1: 800EB134
+                     */
+                    int b13557_hand_src =
+                        (
+                            src_ot == 0x800E5FD4u
+                            ||
+                            src_ot == 0x800EB134u
+                        );
+
+                    if (b13557_hand_src)
+                    {
+                        ++g_b13557_src_calls;
+                        g_b13557_last_src = src_ot;
+                        g_b13557_last_dst = dst_ot;
+
+                        uint32_t src_shape_packet = 0u;
+
+                        if (
+                            b13557_chain_has_hand_shape(
+                                cpu,
+                                cpu->read_word(src_ot + 0x10u),
+                                &g_b13557_last_src_steps,
+                                &src_shape_packet
+                            )
+                        )
+                        {
+                            ++g_b13557_src_has;
+                            g_b13557_last_shape_packet =
+                                src_shape_packet;
+                        }
+                    }
+
+                    /*
                      * B135.48 fidelity test:
                      *
                      * The first-duel reference is known-good on the PC runtime,
@@ -14042,6 +14186,25 @@ int main(void)
                         if (g_b13556_last_dst_has)
                         {
                             ++g_b13556_merge_dst_has;
+                        }
+                    }
+
+                    if (b13557_hand_src)
+                    {
+                        uint32_t dst_shape_packet = 0u;
+
+                        if (
+                            b13557_chain_has_hand_shape(
+                                cpu,
+                                cpu->read_word(dst_ot + 0x10u),
+                                &g_b13557_last_dst_steps,
+                                &dst_shape_packet
+                            )
+                        )
+                        {
+                            ++g_b13557_dst_has;
+                            g_b13557_last_shape_packet =
+                                dst_shape_packet;
                         }
                     }
 
@@ -15658,7 +15821,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.56-HAND-OT-PROOF (BASE B131)\n");
+            printf("BUILD B135.57-HAND-CHAIN-PROOF (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -16087,7 +16250,9 @@ int main(void)
                             );
 
                             /*
-                             * B135.56 - exact hand packet / OT proof.
+                             * B135.57 - compare the generated hand packet
+                             * against the exact source OT, merged destination
+                             * OT and DrawOTag chain.
                              */
                             printf(
                                 "CARD ctor/cb/draw:%lu/%lu/%lu\n",
@@ -16105,7 +16270,7 @@ int main(void)
                             );
 
                             printf(
-                                "HAND p/o/b:%06lX/%06lX/%06lX pr:%lu\n",
+                                "HAND p/o/b:%06lX/%06lX/%06lX pr:%lu xy:%ld,%ld\n",
                                 (unsigned long)(
                                     g_b13556_last_packet & 0x1FFFFFu
                                 ),
@@ -16115,32 +16280,51 @@ int main(void)
                                 (unsigned long)(
                                     g_b13556_last_bucket & 0x1FFFFFu
                                 ),
-                                (unsigned long)g_b13556_last_prio
+                                (unsigned long)g_b13556_last_prio,
+                                (long)g_b13556_last_x,
+                                (long)g_b13556_last_y
                             );
 
                             printf(
-                                "HAND xy:%ld,%ld ra:%06lX DMAshape:%lu\n",
-                                (long)g_b13556_last_x,
-                                (long)g_b13556_last_y,
+                                "OT src c/h:%lu/%lu dsth:%lu %06lX>%06lX\n",
+                                (unsigned long)g_b13557_src_calls,
+                                (unsigned long)g_b13557_src_has,
+                                (unsigned long)g_b13557_dst_has,
                                 (unsigned long)(
-                                    g_b13556_last_ra & 0x1FFFFFu
+                                    g_b13557_last_src & 0x1FFFFFu
                                 ),
+                                (unsigned long)(
+                                    g_b13557_last_dst & 0x1FFFFFu
+                                )
+                            );
+
+                            printf(
+                                "DRAW c/h:%lu/%lu tag:%06lX pkt:%06lX\n",
+                                (unsigned long)g_b13557_draw_calls,
+                                (unsigned long)g_b13557_draw_has,
+                                (unsigned long)(
+                                    g_b13557_last_draw_tag & 0x1FFFFFu
+                                ),
+                                (unsigned long)(
+                                    g_b13557_last_shape_packet & 0x1FFFFFu
+                                )
+                            );
+
+                            printf(
+                                "ST src/dst/draw:%lu/%lu/%lu DMAshape:%lu\n",
+                                (unsigned long)g_b13557_last_src_steps,
+                                (unsigned long)g_b13557_last_dst_steps,
+                                (unsigned long)g_b13557_last_draw_steps,
                                 (unsigned long)b130_dma.b13554_hand_total_hits
                             );
 
                             printf(
-                                "MERGE rel/src/dst:%lu/%lu/%lu last:%lu/%lu st:%lu/%lu\n",
-                                (unsigned long)g_b13556_merge_rel,
-                                (unsigned long)g_b13556_merge_src_has,
-                                (unsigned long)g_b13556_merge_dst_has,
-                                (unsigned long)g_b13556_last_src_has,
-                                (unsigned long)g_b13556_last_dst_has,
-                                (unsigned long)g_b13556_last_src_steps,
-                                (unsigned long)g_b13556_last_dst_steps
-                            );
-
-                            printf(
-                                "B135.56 exact 84978 + OT merge proof\n"
+                                "BASE:%06lX idx:%lu B135.57 chain proof\n",
+                                (unsigned long)(
+                                    cpu->read_word(0x8009C414u)
+                                    & 0x1FFFFFu
+                                ),
+                                (unsigned long)cpu->read_byte(0x8009C332u)
                             );
                         }
 
