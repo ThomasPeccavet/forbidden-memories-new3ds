@@ -147,6 +147,26 @@ static uint32_t g_b13570_last_base = 0u;
 static uint32_t g_b13570_last_4b8 = 0u;
 static uint32_t g_b13570_last_6a0 = 0u;
 
+/*
+ * B135.71 - test the render-submit gate directly.
+ *
+ * 80012D60 only sorts/draws when DAT_8009C4B8 != 0.
+ * B135.70 showed the hand survives through ResetGraph, yet the observed
+ * first sort never contains it.  Correlate hand presence with this gate.
+ * For the experiment, if a hand is present and the gate is exactly zero,
+ * force it to 1 for that finalizer only.
+ */
+static uint32_t g_b13571_hand_d60 = 0u;
+static uint32_t g_b13571_gate0 = 0u;
+static uint32_t g_b13571_gate1 = 0u;
+static uint32_t g_b13571_gate80 = 0u;
+static uint32_t g_b13571_gate_other = 0u;
+static uint32_t g_b13571_forced = 0u;
+static uint32_t g_b13571_last_packet = 0u;
+static uint32_t g_b13571_last_gate_before = 0u;
+static uint32_t g_b13571_last_gate_after = 0u;
+
+
 static void b13570_sample_slot1(
     CPUState *cpu,
     unsigned stage,
@@ -1284,6 +1304,66 @@ void psx_check_interrupts_dispatch_entry(
         if (phys == 0x00012D60u)
         {
             b13570_sample_slot1(cpu, 0u, 0u);
+
+            uint32_t slot1 =
+                cpu->read_word(0x8009C85Cu);
+
+            uint32_t tag1 =
+                slot1 != 0u
+                    ? cpu->read_word(slot1 + 0x10u)
+                    : 0u;
+
+            uint32_t hand_packet = 0u;
+
+            if (
+                tag1 != 0u
+                &&
+                b13567_chain_has_hand_shape(
+                    cpu,
+                    tag1,
+                    &hand_packet
+                )
+            )
+            {
+                ++g_b13571_hand_d60;
+                g_b13571_last_packet = hand_packet;
+
+                uint32_t gate =
+                    cpu->read_byte(0x8009C4B8u);
+
+                g_b13571_last_gate_before = gate;
+
+                if (gate == 0u)
+                {
+                    ++g_b13571_gate0;
+
+                    /*
+                     * Targeted experiment: a hand exists in slot 1, so make
+                     * sure this finalizer actually submits the OT.
+                     */
+                    cpu->write_byte(
+                        0x8009C4B8u,
+                        1u
+                    );
+
+                    ++g_b13571_forced;
+                }
+                else if (gate == 1u)
+                {
+                    ++g_b13571_gate1;
+                }
+                else if (gate == 0x80u)
+                {
+                    ++g_b13571_gate80;
+                }
+                else
+                {
+                    ++g_b13571_gate_other;
+                }
+
+                g_b13571_last_gate_after =
+                    cpu->read_byte(0x8009C4B8u);
+            }
         }
         else if (phys == 0x00085488u)
         {
@@ -1704,6 +1784,30 @@ void fm_runtime_b13570_death_stages(
     if (gate4b8) *gate4b8 = g_b13570_last_4b8;
     if (gate6a0) *gate6a0 = g_b13570_last_6a0;
 }
+
+void fm_runtime_b13571_gate(
+    uint32_t *hand_d60,
+    uint32_t *gate0,
+    uint32_t *gate1,
+    uint32_t *gate80,
+    uint32_t *gate_other,
+    uint32_t *forced,
+    uint32_t *last_packet,
+    uint32_t *last_before,
+    uint32_t *last_after
+)
+{
+    if (hand_d60) *hand_d60 = g_b13571_hand_d60;
+    if (gate0) *gate0 = g_b13571_gate0;
+    if (gate1) *gate1 = g_b13571_gate1;
+    if (gate80) *gate80 = g_b13571_gate80;
+    if (gate_other) *gate_other = g_b13571_gate_other;
+    if (forced) *forced = g_b13571_forced;
+    if (last_packet) *last_packet = g_b13571_last_packet;
+    if (last_before) *last_before = g_b13571_last_gate_before;
+    if (last_after) *last_after = g_b13571_last_gate_after;
+}
+
 
 
 
