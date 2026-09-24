@@ -17576,7 +17576,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.66-NESTED-GSSORT-HLE (BASE B131)\n");
+            printf("BUILD B135.67-HAND-PIPELINE-STAGES (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -18005,24 +18005,38 @@ int main(void)
                             );
 
                             /*
-                             * B135.66 - generated entry proof + nested HLE.
+                             * B135.67 - inspect the hand shape at each real
+                             * stage of the frame pipeline rather than tracking
+                             * a stale packet pointer.
                              */
-                            uint32_t e12c50 = 0u;
-                            uint32_t e12f70 = 0u;
-                            uint32_t e41674 = 0u;
-                            uint32_t e12d60 = 0u;
-                            uint32_t e85d98 = 0u;
-                            uint32_t e85d08 = 0u;
-                            uint32_t elast = 0u;
+                            uint32_t fin_entries = 0u;
+                            uint32_t fin_b8 = 0u;
+                            uint32_t fin_shape = 0u;
+                            uint32_t fin_no_shape = 0u;
+                            uint32_t draw_entries = 0u;
+                            uint32_t draw_shape = 0u;
+                            uint32_t draw_no_shape = 0u;
+                            uint32_t pbase = 0u;
+                            uint32_t psrc = 0u;
+                            uint32_t pdst = 0u;
+                            uint32_t ppkt = 0u;
+                            uint32_t p4b8 = 0u;
+                            uint32_t p6a0 = 0u;
 
-                            fm_runtime_b13565_entries(
-                                &e12c50,
-                                &e12f70,
-                                &e41674,
-                                &e12d60,
-                                &e85d98,
-                                &e85d08,
-                                &elast
+                            fm_runtime_b13567_pipeline(
+                                &fin_entries,
+                                &fin_b8,
+                                &fin_shape,
+                                &fin_no_shape,
+                                &draw_entries,
+                                &draw_shape,
+                                &draw_no_shape,
+                                &pbase,
+                                &psrc,
+                                &pdst,
+                                &ppkt,
+                                &p4b8,
+                                &p6a0
                             );
 
                             printf(
@@ -18034,43 +18048,39 @@ int main(void)
                             );
 
                             printf(
-                                "GEN 12D60/85D98/85D08:%lu/%lu/%lu\n",
-                                (unsigned long)e12d60,
-                                (unsigned long)e85d98,
-                                (unsigned long)e85d08
+                                "FIN ent/b8/sh/miss:%lu/%lu/%lu/%lu\n",
+                                (unsigned long)fin_entries,
+                                (unsigned long)fin_b8,
+                                (unsigned long)fin_shape,
+                                (unsigned long)fin_no_shape
                             );
 
                             printf(
-                                "NEST trap/ok/f:%lu/%lu/%lu code:%ld\n",
-                                (unsigned long)g_b13566_traps,
-                                (unsigned long)g_b13566_ok,
-                                (unsigned long)g_b13566_fail,
-                                (long)g_b13566_last_code
+                                "SORT hand call/src/dst:%lu/%lu/%lu\n",
+                                (unsigned long)g_b13557_src_calls,
+                                (unsigned long)g_b13557_src_has,
+                                (unsigned long)g_b13557_dst_has
                             );
 
                             printf(
-                                "HAND trap/src/dst:%lu/%lu/%lu DMA:%lu\n",
-                                (unsigned long)g_b13566_hand_traps,
-                                (unsigned long)g_b13566_hand_src_has,
-                                (unsigned long)g_b13566_hand_dst_has,
-                                (unsigned long)b130_dma.b13554_hand_total_hits
+                                "DRAW ent/sh/miss:%lu/%lu/%lu\n",
+                                (unsigned long)draw_entries,
+                                (unsigned long)draw_shape,
+                                (unsigned long)draw_no_shape
                             );
 
                             printf(
-                                "LAST src/dst/ra:%05lX/%05lX/%05lX\n",
-                                (unsigned long)(
-                                    g_b13566_last_src & 0xFFFFFu
-                                ),
-                                (unsigned long)(
-                                    g_b13566_last_dst & 0xFFFFFu
-                                ),
-                                (unsigned long)(
-                                    g_b13566_last_ra & 0xFFFFFu
-                                )
+                                "LAST b/s/d/p:%05lX/%05lX/%05lX/%05lX\n",
+                                (unsigned long)(pbase & 0xFFFFFu),
+                                (unsigned long)(psrc & 0xFFFFFu),
+                                (unsigned long)(pdst & 0xFFFFFu),
+                                (unsigned long)(ppkt & 0xFFFFFu)
                             );
 
                             printf(
-                                "SORT native ok/f:%lu/%lu C ok/f:%lu/%lu\n",
+                                "GATE 4B8/6A0:%02lX/%02lX native:%lu/%lu C:%lu/%lu\n",
+                                (unsigned long)(p4b8 & 0xFFu),
+                                (unsigned long)(p6a0 & 0xFFu),
                                 (unsigned long)g_sort_native_ok,
                                 (unsigned long)g_sort_native_fail,
                                 (unsigned long)g_b119_csort_ok,
@@ -18078,7 +18088,7 @@ int main(void)
                             );
 
                             printf(
-                                "BASE:%06lX idx:%lu B135.66 nested sort\n",
+                                "BASE:%06lX idx:%lu B135.67 pipeline\n",
                                 (unsigned long)(
                                     cpu->read_word(0x8009C414u)
                                     & 0x1FFFFFu
