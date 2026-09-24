@@ -3865,6 +3865,16 @@ static uint32_t g_b13566_last_dst = 0u;
 static uint32_t g_b13566_last_ra = 0u;
 static int32_t g_b13566_last_code = 0;
 
+/*
+ * B135.68 - which live OT does the first hand card actually target?
+ * Count only the x=14,y=162 anchor so one increment == one hand build.
+ */
+static uint32_t g_b13568_target_slot[4] = {0u,0u,0u,0u};
+static uint32_t g_b13568_target_other = 0u;
+static uint32_t g_b13568_last_target_ot = 0u;
+static uint32_t g_b13568_last_target_base = 0u;
+static uint32_t g_b13568_last_target_ptr[4] = {0u,0u,0u,0u};
+
 static uint32_t g_ra_8111c = 0;
 static uint32_t g_ra_82168 = 0;
 static uint32_t g_ra_8219c = 0;
@@ -4390,6 +4400,38 @@ static void fm_trace_dispatch(
                      */
                     if (x == 14 && y == 162)
                     {
+                        g_b13568_last_target_ot = ot;
+                        g_b13568_last_target_base =
+                            cpu->read_word(0x8009C414u);
+
+                        int matched68 = 0;
+
+                        for (unsigned ti = 0u; ti < 4u; ++ti)
+                        {
+                            uint32_t tp =
+                                cpu->read_word(
+                                    0x8009C858u + ti * 4u
+                                );
+
+                            g_b13568_last_target_ptr[ti] = tp;
+
+                            if (
+                                (tp & 0x1FFFFFFFu)
+                                ==
+                                (ot & 0x1FFFFFFFu)
+                            )
+                            {
+                                ++g_b13568_target_slot[ti];
+                                matched68 = 1;
+                                break;
+                            }
+                        }
+
+                        if (!matched68)
+                        {
+                            ++g_b13568_target_other;
+                        }
+
                         b13559_log(
                             (uint32_t)'H',
                             ot,
@@ -17576,7 +17618,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.67-HAND-PIPELINE-STAGES (BASE B131)\n");
+            printf("BUILD B135.68-HAND-OT-STAGE-MATRIX (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -18005,38 +18047,33 @@ int main(void)
                             );
 
                             /*
-                             * B135.67 - inspect the hand shape at each real
-                             * stage of the frame pipeline rather than tracking
-                             * a stale packet pointer.
+                             * B135.68 - where does the renderer put the hand,
+                             * and at which exact stage does that OT lose it?
                              */
-                            uint32_t fin_entries = 0u;
-                            uint32_t fin_b8 = 0u;
-                            uint32_t fin_shape = 0u;
-                            uint32_t fin_no_shape = 0u;
-                            uint32_t draw_entries = 0u;
-                            uint32_t draw_shape = 0u;
-                            uint32_t draw_no_shape = 0u;
-                            uint32_t pbase = 0u;
-                            uint32_t psrc = 0u;
-                            uint32_t pdst = 0u;
-                            uint32_t ppkt = 0u;
-                            uint32_t p4b8 = 0u;
-                            uint32_t p6a0 = 0u;
+                            uint32_t pre_e68 = 0u;
+                            uint32_t pre_a68 = 0u;
+                            uint32_t post_e68 = 0u;
+                            uint32_t post_a68 = 0u;
+                            uint32_t fin_e68 = 0u;
+                            uint32_t fin_a68 = 0u;
+                            uint32_t pre_m68 = 0u;
+                            uint32_t post_m68 = 0u;
+                            uint32_t fin_m68 = 0u;
+                            uint32_t base68 = 0u;
+                            uint32_t ptr68[4] = {0u,0u,0u,0u};
 
-                            fm_runtime_b13567_pipeline(
-                                &fin_entries,
-                                &fin_b8,
-                                &fin_shape,
-                                &fin_no_shape,
-                                &draw_entries,
-                                &draw_shape,
-                                &draw_no_shape,
-                                &pbase,
-                                &psrc,
-                                &pdst,
-                                &ppkt,
-                                &p4b8,
-                                &p6a0
+                            fm_runtime_b13568_stages(
+                                &pre_e68,
+                                &pre_a68,
+                                &post_e68,
+                                &post_a68,
+                                &fin_e68,
+                                &fin_a68,
+                                &pre_m68,
+                                &post_m68,
+                                &fin_m68,
+                                &base68,
+                                ptr68
                             );
 
                             printf(
@@ -18048,47 +18085,67 @@ int main(void)
                             );
 
                             printf(
-                                "FIN ent/b8/sh/miss:%lu/%lu/%lu/%lu\n",
-                                (unsigned long)fin_entries,
-                                (unsigned long)fin_b8,
-                                (unsigned long)fin_shape,
-                                (unsigned long)fin_no_shape
+                                "TARGET s0/1/2/3/o:%lu/%lu/%lu/%lu/%lu\n",
+                                (unsigned long)g_b13568_target_slot[0],
+                                (unsigned long)g_b13568_target_slot[1],
+                                (unsigned long)g_b13568_target_slot[2],
+                                (unsigned long)g_b13568_target_slot[3],
+                                (unsigned long)g_b13568_target_other
                             );
 
                             printf(
-                                "SORT hand call/src/dst:%lu/%lu/%lu\n",
-                                (unsigned long)g_b13557_src_calls,
-                                (unsigned long)g_b13557_src_has,
-                                (unsigned long)g_b13557_dst_has
+                                "STAGE pre/post/fin any:%lu/%lu %lu/%lu %lu/%lu\n",
+                                (unsigned long)pre_e68,
+                                (unsigned long)pre_a68,
+                                (unsigned long)post_e68,
+                                (unsigned long)post_a68,
+                                (unsigned long)fin_e68,
+                                (unsigned long)fin_a68
                             );
 
                             printf(
-                                "DRAW ent/sh/miss:%lu/%lu/%lu\n",
-                                (unsigned long)draw_entries,
-                                (unsigned long)draw_shape,
-                                (unsigned long)draw_no_shape
+                                "MASK pre/post/fin:%lX/%lX/%lX\n",
+                                (unsigned long)pre_m68,
+                                (unsigned long)post_m68,
+                                (unsigned long)fin_m68
                             );
 
                             printf(
-                                "LAST b/s/d/p:%05lX/%05lX/%05lX/%05lX\n",
-                                (unsigned long)(pbase & 0xFFFFFu),
-                                (unsigned long)(psrc & 0xFFFFFu),
-                                (unsigned long)(pdst & 0xFFFFFu),
-                                (unsigned long)(ppkt & 0xFFFFFu)
+                                "PTR 0/1:%05lX/%05lX 2/3:%05lX/%05lX\n",
+                                (unsigned long)(ptr68[0] & 0xFFFFFu),
+                                (unsigned long)(ptr68[1] & 0xFFFFFu),
+                                (unsigned long)(ptr68[2] & 0xFFFFFu),
+                                (unsigned long)(ptr68[3] & 0xFFFFFu)
                             );
 
                             printf(
-                                "GATE 4B8/6A0:%02lX/%02lX native:%lu/%lu C:%lu/%lu\n",
-                                (unsigned long)(p4b8 & 0xFFu),
-                                (unsigned long)(p6a0 & 0xFFu),
-                                (unsigned long)g_sort_native_ok,
-                                (unsigned long)g_sort_native_fail,
-                                (unsigned long)g_b119_csort_ok,
-                                (unsigned long)g_b119_csort_fallbacks
+                                "LAST target/base:%05lX/%05lX\n",
+                                (unsigned long)(
+                                    g_b13568_last_target_ot & 0xFFFFFu
+                                ),
+                                (unsigned long)(
+                                    g_b13568_last_target_base & 0xFFFFFu
+                                )
                             );
 
                             printf(
-                                "BASE:%06lX idx:%lu B135.67 pipeline\n",
+                                "TPTR:%05lX/%05lX/%05lX/%05lX\n",
+                                (unsigned long)(
+                                    g_b13568_last_target_ptr[0] & 0xFFFFFu
+                                ),
+                                (unsigned long)(
+                                    g_b13568_last_target_ptr[1] & 0xFFFFFu
+                                ),
+                                (unsigned long)(
+                                    g_b13568_last_target_ptr[2] & 0xFFFFFu
+                                ),
+                                (unsigned long)(
+                                    g_b13568_last_target_ptr[3] & 0xFFFFFu
+                                )
+                            );
+
+                            printf(
+                                "BASE:%06lX idx:%lu B135.68 stage-matrix\n",
                                 (unsigned long)(
                                     cpu->read_word(0x8009C414u)
                                     & 0x1FFFFFu
