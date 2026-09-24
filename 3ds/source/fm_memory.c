@@ -1702,29 +1702,23 @@ static int fm_dma2_linked_list(void)
 
             int x = (int16_t)(c2 & 0xFFFFu);
             int y = (int16_t)(c2 >> 16);
-            int nx = x;
 
-            if (nx >= 320 && nx < 640)
-            {
-                nx -= 320;
-            }
+            (void)x;
+            (void)y;
 
+            /*
+             * B135.55: 80084978 can emit opcodes 64..67 depending on
+             * raw-texture / semi-transparency flags.  B135.54 only accepted
+             * exactly 64 and also assumed zero draw offset, so a valid hand
+             * packet could be missed.  Match the invariant shape instead:
+             * E1 + textured rectangle family 64..67 + 52x60.
+             */
             if (
                 (c0 >> 24) == 0xE1u
                 &&
-                (c1 >> 24) == 0x64u
+                ((c1 >> 24) & 0xFCu) == 0x64u
                 &&
                 c4 == 0x003C0034u
-                &&
-                y == 162
-                &&
-                (
-                    nx == 14
-                    || nx == 74
-                    || nx == 134
-                    || nx == 194
-                    || nx == 254
-                )
             )
             {
                 b13554_is_hand_packet = 1;
