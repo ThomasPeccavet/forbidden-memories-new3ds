@@ -588,6 +588,9 @@ const char *fm_runtime_stop_name(
         case FM_STOP_RESTORE:
             return "RESTORE";
 
+        case FM_STOP_GSSORTOT_HLE:
+            return "GSSORTOT HLE";
+
         default:
             return "NONE";
     }
@@ -995,6 +998,23 @@ void psx_check_interrupts_dispatch_entry(
 
         default:
             break;
+    }
+
+    /*
+     * B135.66 - generated resident code can call FUN_80085D98 directly,
+     * bypassing main.c's top-level HLE.  Escape at the generated entry
+     * checkpoint before the original function body mutates the OT.
+     */
+    if (
+        phys == 0x00085D98u
+        &&
+        g_probe_armed
+    )
+    {
+        fm_probe_stop(
+            FM_STOP_GSSORTOT_HLE,
+            resume_pc
+        );
     }
 
     psx_check_interrupts_at(
