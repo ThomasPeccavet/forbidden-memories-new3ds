@@ -26,6 +26,22 @@ int g_psx_cps_mode = 0;
 
 volatile uint32_t g_psx_last_fn_entry = 0;
 
+/*
+ * B135.65 - generated-code dispatch-entry counters.
+ *
+ * main.c only sees top-level handoffs.  Direct calls between recompiled
+ * resident functions may never return through that dispatcher.  Count the
+ * entry checkpoints emitted by PSXRecomp itself to prove whether the frame
+ * finalizer / GsSortOt still execute during the duel.
+ */
+static uint32_t g_b13565_e_12c50 = 0u;
+static uint32_t g_b13565_e_12f70 = 0u;
+static uint32_t g_b13565_e_41674 = 0u;
+static uint32_t g_b13565_e_12d60 = 0u;
+static uint32_t g_b13565_e_85d98 = 0u;
+static uint32_t g_b13565_e_85d08 = 0u;
+static uint32_t g_b13565_last_entry = 0u;
+
 
 /*
  * ============================================================
@@ -945,10 +961,66 @@ void psx_check_interrupts_dispatch_entry(
     uint32_t resume_pc
 )
 {
+    uint32_t phys =
+        resume_pc & 0x1FFFFFFFu;
+
+    g_b13565_last_entry =
+        resume_pc;
+
+    switch (phys)
+    {
+        case 0x00012C50u:
+            ++g_b13565_e_12c50;
+            break;
+
+        case 0x00012F70u:
+            ++g_b13565_e_12f70;
+            break;
+
+        case 0x00041674u:
+            ++g_b13565_e_41674;
+            break;
+
+        case 0x00012D60u:
+            ++g_b13565_e_12d60;
+            break;
+
+        case 0x00085D98u:
+            ++g_b13565_e_85d98;
+            break;
+
+        case 0x00085D08u:
+            ++g_b13565_e_85d08;
+            break;
+
+        default:
+            break;
+    }
+
     psx_check_interrupts_at(
         cpu,
         resume_pc
     );
+}
+
+
+void fm_runtime_b13565_entries(
+    uint32_t *e12c50,
+    uint32_t *e12f70,
+    uint32_t *e41674,
+    uint32_t *e12d60,
+    uint32_t *e85d98,
+    uint32_t *e85d08,
+    uint32_t *last_entry
+)
+{
+    if (e12c50) *e12c50 = g_b13565_e_12c50;
+    if (e12f70) *e12f70 = g_b13565_e_12f70;
+    if (e41674) *e41674 = g_b13565_e_41674;
+    if (e12d60) *e12d60 = g_b13565_e_12d60;
+    if (e85d98) *e85d98 = g_b13565_e_85d98;
+    if (e85d08) *e85d08 = g_b13565_e_85d08;
+    if (last_entry) *last_entry = g_b13565_last_entry;
 }
 
 
