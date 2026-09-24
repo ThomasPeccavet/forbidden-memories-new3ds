@@ -1815,6 +1815,14 @@ static uint32_t g_b1357_display_latches = 0u;
 static uint32_t g_b13541_2d_vsync_latches = 0u;
 
 /*
+ * B135.44 - when GP1(05) stops flipping but the guest keeps drawing into
+ * the opposite 320-wide framebuffer, present that completed draw buffer
+ * at VSync.  This is presenter-only: guest GPU state is not modified.
+ */
+static uint32_t g_b13544_follow_drawbuf = 0u;
+static uint32_t g_b13544_last_draw_x = 0u;
+
+/*
  * B135.8 - one-loop pulse emitted when the VSync HLE actually RETURNS.
  * B135.7 looked at g_vsync_wait_active during presentation, but that flag is
  * cleared inside the HLE before main.c reaches the latch stage. Therefore
@@ -14774,22 +14782,80 @@ int main(void)
             )
             {
                 /*
-                 * B135.41:
+                 * B135.44:
                  *
-                 * Some dialogue/duel screens finish their foreground/UI
-                 * after the last GP1(05) page flip.  B102/B103 therefore
-                 * latched an incomplete framebuffer and then never refreshed
-                 * it even though GP0 kept changing for dozens of VSyncs.
+                 * B135.43 proved the missing dialogue/cards are really
+                 * rasterized into the OPPOSITE framebuffer:
                  *
-                 * VSync is the safe boundary already used successfully by
-                 * B135.7 on DIRECT-2DF gameplay.  For the normal 2D path,
-                 * refresh the CURRENT GP1 frontbuffer at that boundary when
-                 * GP0 changed since the previous latch.
+                 *   dialogue: draw area 0..319   while GP1 displays x=320
+                 *   duel:     draw area 320..639 while GP1 displays x=0
+                 *
+                 * So the renderer is not losing the sprites.  The stale part
+                 * is the missing GP1(05) page flip.  At a completed VSync,
+                 * infer the active draw page from E3/E4 and present that page
+                 * when it is a canonical 320-wide framebuffer.
+                 *
+                 * Do NOT alter guest GP1 state; this only chooses the host
+                 * source used for the stable composite.
                  */
-                latch_x = current_x;
-                latch_y = current_y;
-                need_latch = 1;
+                FMGpuDebugStats b13544_gpu;
+                memset(
+                    &b13544_gpu,
+                    0,
+                    sizeof(b13544_gpu)
+                );
+
+                fm_gpu_b127_perf_snapshot(
+                    &b13544_gpu
+                );
+
+                unsigned draw_page_x =
+                    current_x;
+
+                if (
+                    b13544_gpu.draw_x1 >= 320
+                    &&
+                    b13544_gpu.draw_x1 <= 639
+                    &&
+                    b13544_gpu.draw_x2 >= 320
+                    &&
+                    b13544_gpu.draw_x2 <= 639
+                )
+                {
+                    draw_page_x =
+                        320u;
+                }
+                else if (
+                    b13544_gpu.draw_x1 >= 0
+                    &&
+                    b13544_gpu.draw_x1 <= 319
+                    &&
+                    b13544_gpu.draw_x2 >= 0
+                    &&
+                    b13544_gpu.draw_x2 <= 319
+                )
+                {
+                    draw_page_x =
+                        0u;
+                }
+
+                latch_x =
+                    draw_page_x;
+
+                latch_y =
+                    current_y;
+
+                need_latch =
+                    1;
+
                 ++g_b13541_2d_vsync_latches;
+
+                if (draw_page_x != current_x)
+                {
+                    ++g_b13544_follow_drawbuf;
+                    g_b13544_last_draw_x =
+                        draw_page_x;
+                }
             }
 
             if (display_changed)
@@ -15197,7 +15263,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.43-RECT-WRITE (BASE B131)\n");
+            printf("BUILD B135.44-FOLLOW-DRAWBUF (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15702,6 +15768,12 @@ int main(void)
                             rt_ay2,
                             fm_gpu_display_x(),
                             fm_gpu_display_y()
+                        );
+
+                        printf(
+                            "FOLLOW n/x:%lu/%lu\n",
+                            (unsigned long)g_b13544_follow_drawbuf,
+                            (unsigned long)g_b13544_last_draw_x
                         );
                     }
 
