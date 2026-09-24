@@ -120,6 +120,80 @@ static uint32_t g_b13569_last_src_packet = 0u;
 static uint32_t g_b13569_last_dst_packet = 0u;
 static uint32_t g_b13569_last_next_entry = 0u;
 
+/*
+ * B135.70 - pinpoint the loss inside FUN_80012D60.
+ *
+ * Stages:
+ *   0 D60   : finalizer entry
+ *   1 85488 : before display-env update
+ *   2 7F8E8 : immediately before ResetGraph(1)
+ *   3 12DE4 : generated checkpoint immediately after ResetGraph(1)
+ *   4 35EB0 : optional post-reset helper entry
+ *   5 12E04 : generated checkpoint after optional 35EB0 path
+ *   6 SORT1 : exact first GsSortOt, source == current slot 1
+ */
+#define B13570_STAGE_COUNT 7u
+static uint32_t g_b13570_hits[B13570_STAGE_COUNT] =
+    {0u,0u,0u,0u,0u,0u,0u};
+static uint32_t g_b13570_shape[B13570_STAGE_COUNT] =
+    {0u,0u,0u,0u,0u,0u,0u};
+static uint32_t g_b13570_last_ot[B13570_STAGE_COUNT] =
+    {0u,0u,0u,0u,0u,0u,0u};
+static uint32_t g_b13570_last_tag[B13570_STAGE_COUNT] =
+    {0u,0u,0u,0u,0u,0u,0u};
+static uint32_t g_b13570_last_packet[B13570_STAGE_COUNT] =
+    {0u,0u,0u,0u,0u,0u,0u};
+static uint32_t g_b13570_last_base = 0u;
+static uint32_t g_b13570_last_4b8 = 0u;
+static uint32_t g_b13570_last_6a0 = 0u;
+
+static void b13570_sample_slot1(
+    CPUState *cpu,
+    unsigned stage,
+    uint32_t ot_override
+)
+{
+    if (!cpu || stage >= B13570_STAGE_COUNT)
+    {
+        return;
+    }
+
+    uint32_t ot =
+        ot_override != 0u
+            ? ot_override
+            : cpu->read_word(0x8009C85Cu);
+
+    uint32_t tag =
+        ot != 0u
+            ? cpu->read_word(ot + 0x10u)
+            : 0u;
+
+    uint32_t packet = 0u;
+
+    ++g_b13570_hits[stage];
+    g_b13570_last_ot[stage] = ot;
+    g_b13570_last_tag[stage] = tag;
+    g_b13570_last_packet[stage] = 0u;
+    g_b13570_last_base = cpu->read_word(0x8009C414u);
+    g_b13570_last_4b8 = cpu->read_byte(0x8009C4B8u);
+    g_b13570_last_6a0 = cpu->read_byte(0x8009C6A0u);
+
+    if (
+        tag != 0u
+        &&
+        b13567_chain_has_hand_shape(
+            cpu,
+            tag,
+            &packet
+        )
+    )
+    {
+        ++g_b13570_shape[stage];
+        g_b13570_last_packet[stage] = packet;
+    }
+}
+
+
 
 static uint32_t b13568_scan_current_ots(
     CPUState *cpu
@@ -1103,6 +1177,25 @@ void psx_check_interrupts_at(
 )
 {
     /*
+     * B135.70 - internal checkpoints inside FUN_80012D60.
+     * Sample before VBlank service can mutate any guest-visible state.
+     */
+    if (cpu)
+    {
+        uint32_t p70 =
+            resume_pc & 0x1FFFFFFFu;
+
+        if (p70 == 0x00012DE4u)
+        {
+            b13570_sample_slot1(cpu, 3u, 0u);
+        }
+        else if (p70 == 0x00012E04u)
+        {
+            b13570_sample_slot1(cpu, 5u, 0u);
+        }
+    }
+
+    /*
      * Service VBlank avant le watchdog. Cela permet aux boucles
      * guest de synchronisation image de voir progresser leurs
      * compteurs logiciels au prochain checkpoint généré.
@@ -1184,10 +1277,51 @@ void psx_check_interrupts_dispatch_entry(
     }
 
     /*
+     * B135.70 - lightweight single-OT samples.
+     */
+    if (cpu)
+    {
+        if (phys == 0x00012D60u)
+        {
+            b13570_sample_slot1(cpu, 0u, 0u);
+        }
+        else if (phys == 0x00085488u)
+        {
+            b13570_sample_slot1(cpu, 1u, 0u);
+        }
+        else if (phys == 0x0007F8E8u)
+        {
+            b13570_sample_slot1(cpu, 2u, 0u);
+        }
+        else if (phys == 0x00035EB0u)
+        {
+            b13570_sample_slot1(cpu, 4u, 0u);
+        }
+        else if (phys == 0x00085D98u)
+        {
+            uint32_t slot1 =
+                cpu->read_word(0x8009C85Cu);
+
+            if (
+                (cpu->gpr[4] & 0x1FFFFFFFu)
+                ==
+                (slot1 & 0x1FFFFFFFu)
+            )
+            {
+                b13570_sample_slot1(
+                    cpu,
+                    6u,
+                    cpu->gpr[4]
+                );
+            }
+        }
+    }
+
+    /*
      * B135.69 - first, resolve the destination of the previous sort before
      * the current generated function mutates anything.
      */
-    if (cpu && g_b13569_pending)
+    if (0 && cpu && g_b13569_pending)
     {
         uint32_t dst_packet = 0u;
         uint32_t dst_tag =
@@ -1227,7 +1361,7 @@ void psx_check_interrupts_dispatch_entry(
     /*
      * B135.69 - inspect the real source OT exactly at GsSortOt entry.
      */
-    if (cpu && phys == 0x00085D98u)
+    if (0 && cpu && phys == 0x00085D98u)
     {
         uint32_t src = cpu->gpr[4];
         uint32_t dst = cpu->gpr[5];
@@ -1306,7 +1440,7 @@ void psx_check_interrupts_dispatch_entry(
             ++g_b13568_pre_any;
         }
     }
-    else if (cpu && phys == 0x00012CB8u)
+    else if (0 && cpu && phys == 0x00012CB8u)
     {
         ++g_b13568_post_entries;
         g_b13568_last_post_mask =
@@ -1317,7 +1451,7 @@ void psx_check_interrupts_dispatch_entry(
             ++g_b13568_post_any;
         }
     }
-    else if (cpu && phys == 0x00012D60u)
+    else if (0 && cpu && phys == 0x00012D60u)
     {
         ++g_b13568_fin_entries;
         g_b13568_last_fin_mask =
@@ -1376,7 +1510,7 @@ void psx_check_interrupts_dispatch_entry(
             }
         }
     }
-    else if (cpu && phys == 0x00085D08u)
+    else if (0 && cpu && phys == 0x00085D08u)
     {
         ++g_b13567_draw_entries;
 
@@ -1545,6 +1679,32 @@ void fm_runtime_b13569_sort_boundary(
     if (last_dst_packet) *last_dst_packet = g_b13569_last_dst_packet;
     if (last_next_entry) *last_next_entry = g_b13569_last_next_entry;
 }
+
+void fm_runtime_b13570_death_stages(
+    uint32_t hits[7],
+    uint32_t shape[7],
+    uint32_t ots[7],
+    uint32_t tags[7],
+    uint32_t packets[7],
+    uint32_t *base,
+    uint32_t *gate4b8,
+    uint32_t *gate6a0
+)
+{
+    for (unsigned i = 0u; i < B13570_STAGE_COUNT; ++i)
+    {
+        if (hits) hits[i] = g_b13570_hits[i];
+        if (shape) shape[i] = g_b13570_shape[i];
+        if (ots) ots[i] = g_b13570_last_ot[i];
+        if (tags) tags[i] = g_b13570_last_tag[i];
+        if (packets) packets[i] = g_b13570_last_packet[i];
+    }
+
+    if (base) *base = g_b13570_last_base;
+    if (gate4b8) *gate4b8 = g_b13570_last_4b8;
+    if (gate6a0) *gate6a0 = g_b13570_last_6a0;
+}
+
 
 
 
