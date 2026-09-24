@@ -95,6 +95,32 @@ static uint32_t g_b13568_last_fin_mask = 0u;
 static uint32_t g_b13568_last_ptr[4] = {0u,0u,0u,0u};
 static uint32_t g_b13568_last_base = 0u;
 
+/*
+ * B135.69 - direct GsSortOt boundary trace.
+ *
+ * B135.68 proved the 52x60 hand exists in slot 1 after rendering and is
+ * still there at 80012D60 entry.  Now inspect every actual 80085D98 call:
+ * which slot is the source, whether the hand is present before the sort,
+ * and whether it is reachable from the destination at the next generated
+ * function entry.
+ */
+static uint32_t g_b13569_sort_calls[4] = {0u,0u,0u,0u};
+static uint32_t g_b13569_src_shape[4] = {0u,0u,0u,0u};
+static uint32_t g_b13569_dst_shape[4] = {0u,0u,0u,0u};
+static uint32_t g_b13569_sort_other = 0u;
+
+static uint32_t g_b13569_pending = 0u;
+static uint32_t g_b13569_pending_slot = 0u;
+static uint32_t g_b13569_pending_dst = 0u;
+
+static uint32_t g_b13569_last_src = 0u;
+static uint32_t g_b13569_last_dst = 0u;
+static uint32_t g_b13569_last_slot = 0xFFFFFFFFu;
+static uint32_t g_b13569_last_src_packet = 0u;
+static uint32_t g_b13569_last_dst_packet = 0u;
+static uint32_t g_b13569_last_next_entry = 0u;
+
+
 static uint32_t b13568_scan_current_ots(
     CPUState *cpu
 )
@@ -1158,9 +1184,118 @@ void psx_check_interrupts_dispatch_entry(
     }
 
     /*
+     * B135.69 - first, resolve the destination of the previous sort before
+     * the current generated function mutates anything.
+     */
+    if (cpu && g_b13569_pending)
+    {
+        uint32_t dst_packet = 0u;
+        uint32_t dst_tag =
+            cpu->read_word(
+                g_b13569_pending_dst + 0x10u
+            );
+
+        if (
+            b13567_chain_has_hand_shape(
+                cpu,
+                dst_tag,
+                &dst_packet
+            )
+        )
+        {
+            if (g_b13569_pending_slot < 4u)
+            {
+                ++g_b13569_dst_shape[
+                    g_b13569_pending_slot
+                ];
+            }
+
+            g_b13569_last_dst_packet =
+                dst_packet;
+        }
+        else
+        {
+            g_b13569_last_dst_packet = 0u;
+        }
+
+        g_b13569_last_next_entry =
+            resume_pc;
+
+        g_b13569_pending = 0u;
+    }
+
+    /*
+     * B135.69 - inspect the real source OT exactly at GsSortOt entry.
+     */
+    if (cpu && phys == 0x00085D98u)
+    {
+        uint32_t src = cpu->gpr[4];
+        uint32_t dst = cpu->gpr[5];
+        int slot = -1;
+
+        for (unsigned i = 0u; i < 4u; ++i)
+        {
+            uint32_t p =
+                cpu->read_word(
+                    0x8009C858u + i * 4u
+                );
+
+            if (
+                (p & 0x1FFFFFFFu)
+                ==
+                (src & 0x1FFFFFFFu)
+            )
+            {
+                slot = (int)i;
+                break;
+            }
+        }
+
+        g_b13569_last_src = src;
+        g_b13569_last_dst = dst;
+        g_b13569_last_slot =
+            slot >= 0
+                ? (uint32_t)slot
+                : 0xFFFFFFFFu;
+        g_b13569_last_src_packet = 0u;
+
+        if (slot >= 0)
+        {
+            ++g_b13569_sort_calls[slot];
+
+            uint32_t src_packet = 0u;
+            uint32_t src_tag =
+                cpu->read_word(src + 0x10u);
+
+            if (
+                b13567_chain_has_hand_shape(
+                    cpu,
+                    src_tag,
+                    &src_packet
+                )
+            )
+            {
+                ++g_b13569_src_shape[slot];
+                g_b13569_last_src_packet =
+                    src_packet;
+
+                g_b13569_pending = 1u;
+                g_b13569_pending_slot =
+                    (uint32_t)slot;
+                g_b13569_pending_dst =
+                    dst;
+            }
+        }
+        else
+        {
+            ++g_b13569_sort_other;
+        }
+    }
+
+    /*
      * B135.68 - exact render -> wait -> finalizer stage masks.
      */
-    if (cpu && phys == 0x00012F70u)
+    if (0 && cpu && phys == 0x00012F70u)
     {
         ++g_b13568_pre_entries;
         g_b13568_last_pre_mask =
@@ -1197,7 +1332,7 @@ void psx_check_interrupts_dispatch_entry(
     /*
      * B135.67 - inspect the current frame OTs at generated function entry.
      */
-    if (cpu && phys == 0x00012D60u)
+    if (0 && cpu && phys == 0x00012D60u)
     {
         ++g_b13567_fin_entries;
 
@@ -1364,6 +1499,53 @@ void fm_runtime_b13568_stages(
         }
     }
 }
+
+void fm_runtime_b13569_sort_boundary(
+    uint32_t sort_calls[4],
+    uint32_t src_shape[4],
+    uint32_t dst_shape[4],
+    uint32_t *sort_other,
+    uint32_t *last_src,
+    uint32_t *last_dst,
+    uint32_t *last_slot,
+    uint32_t *last_src_packet,
+    uint32_t *last_dst_packet,
+    uint32_t *last_next_entry
+)
+{
+    if (sort_calls)
+    {
+        for (unsigned i = 0u; i < 4u; ++i)
+        {
+            sort_calls[i] = g_b13569_sort_calls[i];
+        }
+    }
+
+    if (src_shape)
+    {
+        for (unsigned i = 0u; i < 4u; ++i)
+        {
+            src_shape[i] = g_b13569_src_shape[i];
+        }
+    }
+
+    if (dst_shape)
+    {
+        for (unsigned i = 0u; i < 4u; ++i)
+        {
+            dst_shape[i] = g_b13569_dst_shape[i];
+        }
+    }
+
+    if (sort_other) *sort_other = g_b13569_sort_other;
+    if (last_src) *last_src = g_b13569_last_src;
+    if (last_dst) *last_dst = g_b13569_last_dst;
+    if (last_slot) *last_slot = g_b13569_last_slot;
+    if (last_src_packet) *last_src_packet = g_b13569_last_src_packet;
+    if (last_dst_packet) *last_dst_packet = g_b13569_last_dst_packet;
+    if (last_next_entry) *last_next_entry = g_b13569_last_next_entry;
+}
+
 
 
 
