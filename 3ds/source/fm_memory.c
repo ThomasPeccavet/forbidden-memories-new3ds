@@ -203,6 +203,23 @@ static uint64_t g_dma2_empty_fast_nodes = 0u;
 static uint32_t g_dma2_empty_fast_last = 0u;
 static uint32_t g_dma2_empty_fast_max = 0u;
 
+/*
+ * B135.54 - provenance of the five 52x60 hand sprites.
+ * We recognize the exact GP0 packet shape produced by FUN_80084978:
+ *   E1, 64, XY, UV/CLUT, WH
+ * and only keep packets at the five live hand X positions / Y=162.
+ */
+static uint32_t g_b13554_hand_total_hits = 0u;
+static uint32_t g_b13554_hand_last_list_hits = 0u;
+static uint32_t g_b13554_hand_last_addr = 0u;
+static uint32_t g_b13554_hand_last_node_ordinal = 0u;
+static uint32_t g_b13554_hand_after_payloads = 0u;
+static uint32_t g_b13554_hand_cmd0 = 0u;
+static uint32_t g_b13554_hand_cmd1 = 0u;
+static uint32_t g_b13554_hand_cmd2 = 0u;
+static uint32_t g_b13554_hand_cmd3 = 0u;
+static uint32_t g_b13554_hand_cmd4 = 0u;
+
 static uint32_t g_dma6_transfer_count = 0;
 static uint64_t g_dma6_word_count = 0;
 
@@ -1418,6 +1435,9 @@ static int fm_dma2_linked_list(void)
     uint32_t b121_skip_hi[16];
     uint32_t b121_skip_ranges = 0u;
 
+    uint32_t b13554_hand_list_hits = 0u;
+    int b13554_hand_seen = 0;
+
     uint32_t addr =
         g_dma2_madr
         &
@@ -1668,6 +1688,79 @@ static int fm_dma2_linked_list(void)
                     continue;
                 }
             }
+        }
+
+        int b13554_is_hand_packet = 0;
+
+        if (count >= 5u)
+        {
+            uint32_t c0 = fm_dma_ram_read_word((addr + 4u)  & 0x001FFFFCu);
+            uint32_t c1 = fm_dma_ram_read_word((addr + 8u)  & 0x001FFFFCu);
+            uint32_t c2 = fm_dma_ram_read_word((addr + 12u) & 0x001FFFFCu);
+            uint32_t c3 = fm_dma_ram_read_word((addr + 16u) & 0x001FFFFCu);
+            uint32_t c4 = fm_dma_ram_read_word((addr + 20u) & 0x001FFFFCu);
+
+            int x = (int16_t)(c2 & 0xFFFFu);
+            int y = (int16_t)(c2 >> 16);
+            int nx = x;
+
+            if (nx >= 320 && nx < 640)
+            {
+                nx -= 320;
+            }
+
+            if (
+                (c0 >> 24) == 0xE1u
+                &&
+                (c1 >> 24) == 0x64u
+                &&
+                c4 == 0x003C0034u
+                &&
+                y == 162
+                &&
+                (
+                    nx == 14
+                    || nx == 74
+                    || nx == 134
+                    || nx == 194
+                    || nx == 254
+                )
+            )
+            {
+                b13554_is_hand_packet = 1;
+                b13554_hand_seen = 1;
+                ++b13554_hand_list_hits;
+                ++g_b13554_hand_total_hits;
+
+                g_b13554_hand_last_list_hits =
+                    b13554_hand_list_hits;
+
+                g_b13554_hand_last_addr =
+                    addr;
+
+                g_b13554_hand_last_node_ordinal =
+                    g_dma2_last_nodes;
+
+                g_b13554_hand_after_payloads =
+                    0u;
+
+                g_b13554_hand_cmd0 = c0;
+                g_b13554_hand_cmd1 = c1;
+                g_b13554_hand_cmd2 = c2;
+                g_b13554_hand_cmd3 = c3;
+                g_b13554_hand_cmd4 = c4;
+            }
+        }
+
+        if (
+            count != 0u
+            &&
+            b13554_hand_seen
+            &&
+            !b13554_is_hand_packet
+        )
+        {
+            ++g_b13554_hand_after_payloads;
         }
 
         uint32_t command_addr =
@@ -2870,6 +2963,17 @@ void fm_memory_init(
 
     g_dma2_empty_fast_max =
         0u;
+
+    g_b13554_hand_total_hits = 0u;
+    g_b13554_hand_last_list_hits = 0u;
+    g_b13554_hand_last_addr = 0u;
+    g_b13554_hand_last_node_ordinal = 0u;
+    g_b13554_hand_after_payloads = 0u;
+    g_b13554_hand_cmd0 = 0u;
+    g_b13554_hand_cmd1 = 0u;
+    g_b13554_hand_cmd2 = 0u;
+    g_b13554_hand_cmd3 = 0u;
+    g_b13554_hand_cmd4 = 0u;
 
     g_dma6_transfer_count =
         0;
@@ -4534,6 +4638,36 @@ void fm_memory_dma_debug(
 
     out->dma2_empty_fast_max =
         g_dma2_empty_fast_max;
+
+    out->b13554_hand_total_hits =
+        g_b13554_hand_total_hits;
+
+    out->b13554_hand_last_list_hits =
+        g_b13554_hand_last_list_hits;
+
+    out->b13554_hand_last_addr =
+        g_b13554_hand_last_addr;
+
+    out->b13554_hand_last_node_ordinal =
+        g_b13554_hand_last_node_ordinal;
+
+    out->b13554_hand_after_payloads =
+        g_b13554_hand_after_payloads;
+
+    out->b13554_hand_cmd0 =
+        g_b13554_hand_cmd0;
+
+    out->b13554_hand_cmd1 =
+        g_b13554_hand_cmd1;
+
+    out->b13554_hand_cmd2 =
+        g_b13554_hand_cmd2;
+
+    out->b13554_hand_cmd3 =
+        g_b13554_hand_cmd3;
+
+    out->b13554_hand_cmd4 =
+        g_b13554_hand_cmd4;
 
 
     out->dma6_transfer_count =
