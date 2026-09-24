@@ -17618,7 +17618,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.69-SORT-BOUNDARY (BASE B131)\n");
+            printf("BUILD B135.70-FINALIZER-DEATH-STAGE (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -18047,38 +18047,32 @@ int main(void)
                             );
 
                             /*
-                             * B135.69 - direct GsSortOt boundary.
-                             *
-                             * B135.68 proved:
-                             *   target = slot 1
-                             *   post-render mask contains slot 1
-                             *   finalizer-entry mask still contains slot 1.
-                             *
-                             * Now check the exact source at 80085D98 entry
-                             * and its destination at the next generated entry.
+                             * B135.70 - exact slot-1 hand lifetime through
+                             * FUN_80012D60.
                              */
-                            uint32_t sc69[4] = {0u,0u,0u,0u};
-                            uint32_t ss69[4] = {0u,0u,0u,0u};
-                            uint32_t ds69[4] = {0u,0u,0u,0u};
-                            uint32_t other69 = 0u;
-                            uint32_t lsrc69 = 0u;
-                            uint32_t ldst69 = 0u;
-                            uint32_t lslot69 = 0xFFFFFFFFu;
-                            uint32_t lsp69 = 0u;
-                            uint32_t ldp69 = 0u;
-                            uint32_t lnext69 = 0u;
+                            uint32_t h70[7] =
+                                {0u,0u,0u,0u,0u,0u,0u};
+                            uint32_t sh70[7] =
+                                {0u,0u,0u,0u,0u,0u,0u};
+                            uint32_t ot70[7] =
+                                {0u,0u,0u,0u,0u,0u,0u};
+                            uint32_t tag70[7] =
+                                {0u,0u,0u,0u,0u,0u,0u};
+                            uint32_t pkt70[7] =
+                                {0u,0u,0u,0u,0u,0u,0u};
+                            uint32_t base70 = 0u;
+                            uint32_t gate4b8_70 = 0u;
+                            uint32_t gate6a0_70 = 0u;
 
-                            fm_runtime_b13569_sort_boundary(
-                                sc69,
-                                ss69,
-                                ds69,
-                                &other69,
-                                &lsrc69,
-                                &ldst69,
-                                &lslot69,
-                                &lsp69,
-                                &ldp69,
-                                &lnext69
+                            fm_runtime_b13570_death_stages(
+                                h70,
+                                sh70,
+                                ot70,
+                                tag70,
+                                pkt70,
+                                &base70,
+                                &gate4b8_70,
+                                &gate6a0_70
                             );
 
                             printf(
@@ -18090,48 +18084,67 @@ int main(void)
                             );
 
                             printf(
-                                "SORT calls s0/1/2/3:%lu/%lu/%lu/%lu o:%lu\n",
-                                (unsigned long)sc69[0],
-                                (unsigned long)sc69[1],
-                                (unsigned long)sc69[2],
-                                (unsigned long)sc69[3],
-                                (unsigned long)other69
+                                "S0 D60   h/sh:%lu/%lu ot/t:%05lX/%05lX\n",
+                                (unsigned long)h70[0],
+                                (unsigned long)sh70[0],
+                                (unsigned long)(ot70[0] & 0xFFFFFu),
+                                (unsigned long)(tag70[0] & 0xFFFFFu)
                             );
 
                             printf(
-                                "SRC hand s0/1/2/3:%lu/%lu/%lu/%lu\n",
-                                (unsigned long)ss69[0],
-                                (unsigned long)ss69[1],
-                                (unsigned long)ss69[2],
-                                (unsigned long)ss69[3]
+                                "S1 85488 h/sh:%lu/%lu ot/t:%05lX/%05lX\n",
+                                (unsigned long)h70[1],
+                                (unsigned long)sh70[1],
+                                (unsigned long)(ot70[1] & 0xFFFFFu),
+                                (unsigned long)(tag70[1] & 0xFFFFFu)
                             );
 
                             printf(
-                                "DST hand s0/1/2/3:%lu/%lu/%lu/%lu\n",
-                                (unsigned long)ds69[0],
-                                (unsigned long)ds69[1],
-                                (unsigned long)ds69[2],
-                                (unsigned long)ds69[3]
+                                "S2 7F8E8 h/sh:%lu/%lu ot/t:%05lX/%05lX\n",
+                                (unsigned long)h70[2],
+                                (unsigned long)sh70[2],
+                                (unsigned long)(ot70[2] & 0xFFFFFu),
+                                (unsigned long)(tag70[2] & 0xFFFFFu)
                             );
 
                             printf(
-                                "LAST slot:%ld src/dst:%05lX/%05lX\n",
-                                lslot69 == 0xFFFFFFFFu
-                                    ? -1L
-                                    : (long)lslot69,
-                                (unsigned long)(lsrc69 & 0xFFFFFu),
-                                (unsigned long)(ldst69 & 0xFFFFFu)
+                                "S3 12DE4 h/sh:%lu/%lu p:%05lX\n",
+                                (unsigned long)h70[3],
+                                (unsigned long)sh70[3],
+                                (unsigned long)(pkt70[3] & 0xFFFFFu)
                             );
 
                             printf(
-                                "PKT src/dst:%05lX/%05lX next:%05lX\n",
-                                (unsigned long)(lsp69 & 0xFFFFFu),
-                                (unsigned long)(ldp69 & 0xFFFFFu),
-                                (unsigned long)(lnext69 & 0xFFFFFu)
+                                "S4 35EB0 h/sh:%lu/%lu p:%05lX\n",
+                                (unsigned long)h70[4],
+                                (unsigned long)sh70[4],
+                                (unsigned long)(pkt70[4] & 0xFFFFFu)
                             );
 
                             printf(
-                                "BASE:%06lX idx:%lu B135.69 sort-boundary\n",
+                                "S5 12E04 h/sh:%lu/%lu p:%05lX\n",
+                                (unsigned long)h70[5],
+                                (unsigned long)sh70[5],
+                                (unsigned long)(pkt70[5] & 0xFFFFFu)
+                            );
+
+                            printf(
+                                "S6 SORT1 h/sh:%lu/%lu ot/t:%05lX/%05lX\n",
+                                (unsigned long)h70[6],
+                                (unsigned long)sh70[6],
+                                (unsigned long)(ot70[6] & 0xFFFFFu),
+                                (unsigned long)(tag70[6] & 0xFFFFFu)
+                            );
+
+                            printf(
+                                "GATE 4B8/6A0:%02lX/%02lX base:%05lX\n",
+                                (unsigned long)(gate4b8_70 & 0xFFu),
+                                (unsigned long)(gate6a0_70 & 0xFFu),
+                                (unsigned long)(base70 & 0xFFFFFu)
+                            );
+
+                            printf(
+                                "BASE:%06lX idx:%lu B135.70 death-stage\n",
                                 (unsigned long)(
                                     cpu->read_word(0x8009C414u)
                                     & 0x1FFFFFu
