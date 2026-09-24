@@ -1200,7 +1200,7 @@ void psx_check_interrupts_at(
      * B135.70 - internal checkpoints inside FUN_80012D60.
      * Sample before VBlank service can mutate any guest-visible state.
      */
-    if (cpu)
+    if (0 && cpu)
     {
         uint32_t p70 =
             resume_pc & 0x1FFFFFFFu;
@@ -1303,8 +1303,6 @@ void psx_check_interrupts_dispatch_entry(
     {
         if (phys == 0x00012D60u)
         {
-            b13570_sample_slot1(cpu, 0u, 0u);
-
             uint32_t slot1 =
                 cpu->read_word(0x8009C85Cu);
 
@@ -1365,19 +1363,19 @@ void psx_check_interrupts_dispatch_entry(
                     cpu->read_byte(0x8009C4B8u);
             }
         }
-        else if (phys == 0x00085488u)
+        else if (0 && phys == 0x00085488u)
         {
             b13570_sample_slot1(cpu, 1u, 0u);
         }
-        else if (phys == 0x0007F8E8u)
+        else if (0 && phys == 0x0007F8E8u)
         {
             b13570_sample_slot1(cpu, 2u, 0u);
         }
-        else if (phys == 0x00035EB0u)
+        else if (0 && phys == 0x00035EB0u)
         {
             b13570_sample_slot1(cpu, 4u, 0u);
         }
-        else if (phys == 0x00085D98u)
+        else if (0 && phys == 0x00085D98u)
         {
             uint32_t slot1 =
                 cpu->read_word(0x8009C85Cu);
