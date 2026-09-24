@@ -1850,6 +1850,14 @@ static uint32_t g_b13540_prev_quad = 0u;
 static uint32_t g_b13540_prev_2c = 0u;
 static uint32_t g_b13540_prev_3a = 0u;
 
+/*
+ * B135.47 - prove whether PutDispEnv / GP1(05) is still being issued.
+ */
+static uint32_t g_b13547_prev_e3 = 0u;
+static uint32_t g_b13547_prev_e4 = 0u;
+static uint32_t g_b13547_prev_e5 = 0u;
+static uint32_t g_b13547_prev_05 = 0u;
+
 /* B135.19 - interval counters for the continuous map interpreter. */
 static uint64_t g_b13519_prev_region_chunks = 0u;
 static uint64_t g_b13519_prev_region_instructions = 0u;
@@ -15263,7 +15271,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.46-GENERIC-3C (BASE B131)\n");
+            printf("BUILD B135.47-GP1-PROBE (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15717,6 +15725,41 @@ int main(void)
                         {
                             printf("BIG none\n");
                         }
+                    }
+
+                    {
+                        int env_ox = 0, env_oy = 0;
+                        int env_x1 = 0, env_y1 = 0, env_x2 = 0, env_y2 = 0;
+                        uint32_t env_e3 = 0u, env_e4 = 0u, env_e5 = 0u, env_05 = 0u;
+                        uint32_t last_e3 = 0u, last_e4 = 0u, last_e5 = 0u, last_05 = 0u;
+
+                        fm_gpu_b100_env_get(
+                            &env_ox, &env_oy,
+                            &env_x1, &env_y1,
+                            &env_x2, &env_y2,
+                            &env_e3, &env_e4, &env_e5, &env_05,
+                            &last_e3, &last_e4, &last_e5, &last_05
+                        );
+
+                        printf(
+                            "ENV dE3/4/5/05:%lu/%lu/%lu/%lu last05:%08lX\n",
+                            (unsigned long)(env_e3 - g_b13547_prev_e3),
+                            (unsigned long)(env_e4 - g_b13547_prev_e4),
+                            (unsigned long)(env_e5 - g_b13547_prev_e5),
+                            (unsigned long)(env_05 - g_b13547_prev_05),
+                            (unsigned long)last_05
+                        );
+
+                        printf(
+                            "ENV off:%d,%d area:%d,%d-%d,%d\n",
+                            env_ox, env_oy,
+                            env_x1, env_y1, env_x2, env_y2
+                        );
+
+                        g_b13547_prev_e3 = env_e3;
+                        g_b13547_prev_e4 = env_e4;
+                        g_b13547_prev_e5 = env_e5;
+                        g_b13547_prev_05 = env_05;
                     }
 
                     {
