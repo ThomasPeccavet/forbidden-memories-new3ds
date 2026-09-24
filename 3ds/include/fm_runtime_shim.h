@@ -199,6 +199,22 @@ void fm_runtime_b13565_entries(
     uint32_t *last_entry
 );
 
+void fm_runtime_b13567_pipeline(
+    uint32_t *fin_entries,
+    uint32_t *fin_b8,
+    uint32_t *fin_shape,
+    uint32_t *fin_no_shape,
+    uint32_t *draw_entries,
+    uint32_t *draw_shape,
+    uint32_t *draw_no_shape,
+    uint32_t *last_base,
+    uint32_t *last_src,
+    uint32_t *last_dst,
+    uint32_t *last_shape_packet,
+    uint32_t *last_4b8,
+    uint32_t *last_6a0
+);
+
 
 /*
  * ============================================================
