@@ -9723,6 +9723,119 @@ static int fm_b135_quick_load(
     return 0;
 }
 
+/*
+ * ============================================================
+ * B135.49 - duel display-object list probe
+ * ============================================================
+ *
+ * The GPU paths, GP1 display environment and the exact guest GsSortOt
+ * have now all been validated while the duel hand is still missing.
+ * Move one level upstream: Forbidden Memories keeps up to 0x60 display
+ * objects at 0x800F1210, stride 0x70, and five linked-list heads at
+ * 0x800F11C4..0x800F11CC.  The known renderer routines
+ * 80040B48/40F2C/4110C/4139C/41048 walk those exact lists.
+ *
+ * This helper is read-only and bounded.  It tells us whether the card
+ * objects exist in the guest object system before they ever reach GP0.
+ */
+static void b13549_obj_list_probe(
+    CPUState *cpu,
+    uint32_t head_addr,
+    int *head_out,
+    uint32_t *nodes_out,
+    uint32_t *drawable_out,
+    uint32_t *bad_out,
+    uint32_t *ot_mask_out
+)
+{
+    int head = -1;
+    uint32_t nodes = 0u;
+    uint32_t drawable = 0u;
+    uint32_t bad = 0u;
+    uint32_t ot_mask = 0u;
+
+    if (cpu)
+    {
+        head =
+            (int16_t)cpu->read_half(head_addr);
+
+        int idx = head;
+
+        uint64_t seen_lo = 0u;
+        uint64_t seen_hi = 0u;
+
+        while (idx >= 0 && nodes < 0x60u)
+        {
+            if (idx >= 0x60)
+            {
+                ++bad;
+                break;
+            }
+
+            uint64_t bit =
+                1ull << ((unsigned)idx & 63u);
+
+            uint64_t *seen =
+                idx < 64
+                    ? &seen_lo
+                    : &seen_hi;
+
+            if ((*seen & bit) != 0u)
+            {
+                ++bad;
+                break;
+            }
+
+            *seen |= bit;
+
+            uint32_t obj =
+                0x800F1210u
+                +
+                (uint32_t)idx * 0x70u;
+
+            uint32_t flags_word =
+                cpu->read_word(obj + 0x08u);
+
+            uint8_t flags =
+                (uint8_t)(flags_word & 0xFFu);
+
+            if ((flags & 0xC0u) == 0xC0u)
+            {
+                ++drawable;
+            }
+
+            uint32_t ot_word =
+                cpu->read_word(obj + 0x14u);
+
+            uint8_t ot_index =
+                (uint8_t)((ot_word >> 24) & 0xFFu);
+
+            if (ot_index < 32u)
+            {
+                ot_mask |=
+                    1u << ot_index;
+            }
+
+            ++nodes;
+
+            idx =
+                (int16_t)cpu->read_half(obj + 0x02u);
+        }
+
+        if (nodes >= 0x60u && idx >= 0)
+        {
+            ++bad;
+        }
+    }
+
+    if (head_out) *head_out = head;
+    if (nodes_out) *nodes_out = nodes;
+    if (drawable_out) *drawable_out = drawable;
+    if (bad_out) *bad_out = bad;
+    if (ot_mask_out) *ot_mask_out = ot_mask;
+}
+
+
 int main(void)
 {
     gfxInitDefault();
@@ -15283,7 +15396,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.48-NATIVE-GSSORTOT (BASE B131)\n");
+            printf("BUILD B135.49-DUEL-OBJ-PROBE (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15634,112 +15747,6 @@ int main(void)
                     );
 
                     {
-                        uint32_t br_count = 0u;
-                        uint8_t br_op = 0u;
-                        int br_tex = 0;
-                        int br_raw = 0;
-                        int br_x = 0;
-                        int br_y = 0;
-                        int br_w = 0;
-                        int br_h = 0;
-                        int br_u = 0;
-                        int br_v = 0;
-                        int br_cx = 0;
-                        int br_cy = 0;
-                        uint16_t br_tp = 0u;
-                        uint32_t br_cmd[4] = {0u,0u,0u,0u};
-
-                        if (
-                            fm_gpu_b38_bigrect_get(
-                                &br_count,
-                                &br_op,
-                                &br_tex,
-                                &br_raw,
-                                &br_x,
-                                &br_y,
-                                &br_w,
-                                &br_h,
-                                &br_u,
-                                &br_v,
-                                &br_cx,
-                                &br_cy,
-                                &br_tp,
-                                br_cmd
-                            )
-                        )
-                        {
-                            printf(
-                                "BIG n/op/t/r:%lu/%02X/%d/%d xy:%d,%d wh:%d,%d\n",
-                                (unsigned long)br_count,
-                                (unsigned)br_op,
-                                br_tex,
-                                br_raw,
-                                br_x,
-                                br_y,
-                                br_w,
-                                br_h
-                            );
-
-                            printf(
-                                "BIG uv:%d,%d cl:%d,%d tp:%03X\n",
-                                br_u,
-                                br_v,
-                                br_cx,
-                                br_cy,
-                                (unsigned)br_tp
-                            );
-
-                            uint32_t tw = 0u;
-                            int dep = 0;
-                            int tbx = 0;
-                            int tby = 0;
-                            uint32_t texels = 0u;
-                            uint32_t inz = 0u;
-                            uint32_t cnz = 0u;
-                            uint32_t uniq = 0u;
-                            uint16_t pal[16] = {0u};
-                            uint8_t si[8] = {0u};
-                            uint16_t sc[8] = {0u};
-
-                            if (
-                                fm_gpu_b39_texture_probe_get(
-                                    &tw,
-                                    &dep,
-                                    &tbx,
-                                    &tby,
-                                    &texels,
-                                    &inz,
-                                    &cnz,
-                                    &uniq,
-                                    pal,
-                                    si,
-                                    sc
-                                )
-                            )
-                            {
-                                printf(
-                                    "TEX d/base/tw:%d/%d,%d/%05lX nzI/C:%lu/%lu u:%lu\n",
-                                    dep,
-                                    tbx,
-                                    tby,
-                                    (unsigned long)tw,
-                                    (unsigned long)inz,
-                                    (unsigned long)cnz,
-                                    (unsigned long)uniq
-                                );
-                            }
-                            else
-                            {
-                                printf("TEX probe:none\n");
-                            }
-                        }
-                        else
-                        {
-                            printf("BIG none\n");
-                        }
-                    }
-
-                    {
                         int env_ox = 0, env_oy = 0;
                         int env_x1 = 0, env_y1 = 0, env_x2 = 0, env_y2 = 0;
                         uint32_t env_e3 = 0u, env_e4 = 0u, env_e5 = 0u, env_05 = 0u;
@@ -15778,70 +15785,73 @@ int main(void)
                             (long)g_b119_csort_last_code
                         );
 
+                        {
+                            int oh[5] = {-1,-1,-1,-1,-1};
+                            uint32_t on[5] = {0u,0u,0u,0u,0u};
+                            uint32_t od[5] = {0u,0u,0u,0u,0u};
+                            uint32_t ob[5] = {0u,0u,0u,0u,0u};
+                            uint32_t om[5] = {0u,0u,0u,0u,0u};
+
+                            static const uint32_t heads[5] =
+                            {
+                                0x800F11C4u,
+                                0x800F11C6u,
+                                0x800F11C8u,
+                                0x800F11CAu,
+                                0x800F11CCu
+                            };
+
+                            for (unsigned oi = 0u; oi < 5u; ++oi)
+                            {
+                                b13549_obj_list_probe(
+                                    cpu,
+                                    heads[oi],
+                                    &oh[oi],
+                                    &on[oi],
+                                    &od[oi],
+                                    &ob[oi],
+                                    &om[oi]
+                                );
+                            }
+
+                            printf(
+                                "OBJ H c4/c6/c8/ca/cc:%d/%d/%d/%d/%d\n",
+                                oh[0],oh[1],oh[2],oh[3],oh[4]
+                            );
+
+                            printf(
+                                "OBJ N:%lu/%lu/%lu/%lu/%lu D:%lu/%lu/%lu/%lu/%lu\n",
+                                (unsigned long)on[0],
+                                (unsigned long)on[1],
+                                (unsigned long)on[2],
+                                (unsigned long)on[3],
+                                (unsigned long)on[4],
+                                (unsigned long)od[0],
+                                (unsigned long)od[1],
+                                (unsigned long)od[2],
+                                (unsigned long)od[3],
+                                (unsigned long)od[4]
+                            );
+
+                            printf(
+                                "OBJ B:%lu/%lu/%lu/%lu/%lu M:%02lX/%02lX/%02lX/%02lX/%02lX\n",
+                                (unsigned long)ob[0],
+                                (unsigned long)ob[1],
+                                (unsigned long)ob[2],
+                                (unsigned long)ob[3],
+                                (unsigned long)ob[4],
+                                (unsigned long)(om[0] & 0xFFu),
+                                (unsigned long)(om[1] & 0xFFu),
+                                (unsigned long)(om[2] & 0xFFu),
+                                (unsigned long)(om[3] & 0xFFu),
+                                (unsigned long)(om[4] & 0xFFu)
+                            );
+                        }
+
                         g_b13547_prev_e3 = env_e3;
                         g_b13547_prev_e4 = env_e4;
                         g_b13547_prev_e5 = env_e5;
                         g_b13547_prev_05 = env_05;
-                    }
-
-                    {
-                        uint64_t rt_nz = 0u;
-                        uint64_t rt_wr = 0u;
-                        uint32_t rt_clip = 0u;
-                        int rt_x = 0, rt_y = 0, rt_w = 0, rt_h = 0;
-                        int rt_ox = 0, rt_oy = 0;
-                        int rt_ax1 = 0, rt_ay1 = 0, rt_ax2 = 0, rt_ay2 = 0;
-
-                        fm_gpu_b13543_rect_probe(
-                            &rt_nz,
-                            &rt_wr,
-                            &rt_clip,
-                            &rt_x,
-                            &rt_y,
-                            &rt_w,
-                            &rt_h,
-                            &rt_ox,
-                            &rt_oy,
-                            &rt_ax1,
-                            &rt_ay1,
-                            &rt_ax2,
-                            &rt_ay2
-                        );
-
-                        printf(
-                            "R64 nz/wr/clip:%llu/%llu/%lu\n",
-                            (unsigned long long)rt_nz,
-                            (unsigned long long)rt_wr,
-                            (unsigned long)rt_clip
-                        );
-
-                        printf(
-                            "R64 xywh:%d,%d,%d,%d off:%d,%d\n",
-                            rt_x,
-                            rt_y,
-                            rt_w,
-                            rt_h,
-                            rt_ox,
-                            rt_oy
-                        );
-
-                        printf(
-                            "R64 area:%d,%d-%d,%d dxy:%u,%u\n",
-                            rt_ax1,
-                            rt_ay1,
-                            rt_ax2,
-                            rt_ay2,
-                            fm_gpu_display_x(),
-                            fm_gpu_display_y()
-                        );
-
-                        printf(
-                            "FOLLOW n/x:%lu/%lu Q2C/Q3C:%lu/%lu\n",
-                            (unsigned long)g_b13544_follow_drawbuf,
-                            (unsigned long)g_b13544_last_draw_x,
-                            (unsigned long)fm_gpu_b13545_generic_texquads(),
-                            (unsigned long)fm_gpu_b13546_generic_3c()
-                        );
                     }
 
                     g_b13540_prev_rect =
