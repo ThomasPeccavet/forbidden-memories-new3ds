@@ -1,0 +1,36 @@
+name: devkitARM compile check
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  compile-native-3ds:
+    runs-on: ubuntu-latest
+    container:
+      # Pin the official devkitPro image so compiler changes are deliberate.
+      image: devkitpro/devkitarm:20260610
+      options: --user 1001
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned PSXRecomp runtime
+        uses: actions/checkout@v4
+        with:
+          repository: Unchiga/psxrecomp
+          ref: 1965b2df424da03483a5370340433a862f78f103
+          path: work/upstream-psxrecomp
+
+      - name: Show toolchain versions
+        run: |
+          arm-none-eabi-gcc --version | head -1
+          3dsxtool --version || true
+
+      - name: Compile all native ARM11 units
+        run: make -C 3ds compile-check -j2
+
+      - name: List compiled objects
+        run: find 3ds/build -maxdepth 1 -name '*.o' -type f -print | sort

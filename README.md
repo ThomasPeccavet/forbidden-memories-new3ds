@@ -185,6 +185,17 @@ Sorties :
 3ds/fm-new3ds.3dsx
 ~~~
 
+### Vérification devkitARM automatisée
+
+Le workflow GitHub Actions `devkitARM compile check` compile toutes les unités
+natives ARM11 avec l'image officielle devkitPro épinglée. Il peut aussi être
+lancé manuellement depuis l'onglet **Actions**.
+
+Cette vérification s'arrête volontairement avant l'édition de liens : l'objet
+`fm-generated-combined.o` est produit à partir du disque original et n'est pas
+distribué dans le dépôt. La construction locale ci-dessus reste donc la
+référence pour obtenir le `.elf` et le `.3dsx` jouables.
+
 ## Disque de test
 
 ~~~text

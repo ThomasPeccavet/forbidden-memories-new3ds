@@ -101,9 +101,16 @@ OBJECTS := \
 	$(BUILD)/gpu_vram_dirty.o
 
 
-.PHONY: all clean generated-release
+.PHONY: all clean generated-release compile-check
 
 all: $(TARGET).3dsx
+
+# Compile every native ARM11 translation unit with the real devkitARM/libctru
+# toolchain without requiring the generated PS1 core.  This is intentionally
+# not a link check: fm-generated-combined.o is derived from the user's game
+# image and is therefore never stored in the public repository.
+compile-check: $(OBJECTS)
+	@echo "devkitARM compile check passed ($(words $(OBJECTS)) objects)."
 
 # B111: the huge PSXRecomp object is prelinked and is NOT rebuilt by
 # the normal %.o rule below. A normal 3DS build must therefore refresh
