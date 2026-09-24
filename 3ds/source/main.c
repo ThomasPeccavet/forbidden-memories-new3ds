@@ -3361,6 +3361,191 @@ static void b13560_snapshot(
     }
 }
 
+/*
+ * B135.61 - correlate H -> finalizer -> ResetGraph return -> GsSortOt
+ * for the SAME hand generation and the SAME framebuffer.
+ */
+typedef struct B13561Life
+{
+    uint32_t base;
+    uint32_t src_ot;
+
+    uint32_t hand_gen;
+    uint32_t consumed_gen;
+
+    uint32_t packet;
+    uint32_t bucket;
+
+    uint32_t f_seen;
+    uint32_t f_alive;
+
+    uint32_t r_seen;
+    uint32_t r_alive;
+
+    uint32_t s_seen;
+    uint32_t s_alive;
+    uint32_t s_dead;
+
+    uint32_t last_s_packet_header;
+    uint32_t last_s_bucket_word;
+    uint32_t last_s_reach_bucket;
+    uint32_t last_s_reach_packet;
+} B13561Life;
+
+static B13561Life g_b13561_life[2] =
+{
+    {
+        0x800E0EB0u,
+        0x800E5FD4u,
+        0u,0u,0u,0u,
+        0u,0u,0u,0u,0u,0u,0u,
+        0u,0u,0u,0u
+    },
+    {
+        0x800E6010u,
+        0x800EB134u,
+        0u,0u,0u,0u,
+        0u,0u,0u,0u,0u,0u,0u,
+        0u,0u,0u,0u
+    }
+};
+
+static B13561Life *b13561_by_base(
+    uint32_t base
+)
+{
+    if (base == g_b13561_life[0].base)
+    {
+        return &g_b13561_life[0];
+    }
+
+    if (base == g_b13561_life[1].base)
+    {
+        return &g_b13561_life[1];
+    }
+
+    return NULL;
+}
+
+static B13561Life *b13561_by_src(
+    uint32_t src_ot
+)
+{
+    if (src_ot == g_b13561_life[0].src_ot)
+    {
+        return &g_b13561_life[0];
+    }
+
+    if (src_ot == g_b13561_life[1].src_ot)
+    {
+        return &g_b13561_life[1];
+    }
+
+    return NULL;
+}
+
+static int b13561_packet_alive(
+    CPUState *cpu,
+    B13561Life *lf,
+    uint32_t *header_out,
+    uint32_t *bucket_out
+)
+{
+    if (header_out) *header_out = 0u;
+    if (bucket_out) *bucket_out = 0u;
+
+    if (!cpu || !lf || lf->packet == 0u || lf->bucket == 0u)
+    {
+        return 0;
+    }
+
+    uint32_t h =
+        cpu->read_word(lf->packet);
+
+    uint32_t bw =
+        cpu->read_word(lf->bucket);
+
+    if (header_out) *header_out = h;
+    if (bucket_out) *bucket_out = bw;
+
+    if (
+        (h >> 24) != 5u
+        ||
+        (
+            (bw & 0x00FFFFFFu)
+            !=
+            (lf->packet & 0x00FFFFFFu)
+        )
+    )
+    {
+        return 0;
+    }
+
+    uint32_t c0 =
+        cpu->read_word(lf->packet + 4u);
+
+    uint32_t c1 =
+        cpu->read_word(lf->packet + 8u);
+
+    uint32_t c4 =
+        cpu->read_word(lf->packet + 20u);
+
+    return
+        (
+            (c0 >> 24) == 0xE1u
+            &&
+            ((c1 >> 24) & 0xFCu) == 0x64u
+            &&
+            c4 == 0x003C0034u
+        );
+}
+
+static void b13561_checkpoint_base(
+    CPUState *cpu,
+    int after_reset
+)
+{
+    if (!cpu)
+    {
+        return;
+    }
+
+    B13561Life *lf =
+        b13561_by_base(
+            cpu->read_word(0x8009C414u)
+        );
+
+    if (
+        !lf
+        ||
+        lf->hand_gen == 0u
+        ||
+        lf->hand_gen == lf->consumed_gen
+    )
+    {
+        return;
+    }
+
+    if (after_reset)
+    {
+        ++lf->r_seen;
+
+        if (b13561_packet_alive(cpu, lf, NULL, NULL))
+        {
+            ++lf->r_alive;
+        }
+    }
+    else
+    {
+        ++lf->f_seen;
+
+        if (b13561_packet_alive(cpu, lf, NULL, NULL))
+        {
+            ++lf->f_alive;
+        }
+    }
+}
+
 static uint32_t g_ra_8111c = 0;
 static uint32_t g_ra_82168 = 0;
 static uint32_t g_ra_8219c = 0;
@@ -3608,6 +3793,7 @@ static void fm_trace_dispatch(
     {
         case 0x00012D60u:
             b13560_snapshot(cpu, 1u);
+            b13561_checkpoint_base(cpu, 0);
             if (cpu)
             {
                 b13559_log(
@@ -3620,6 +3806,7 @@ static void fm_trace_dispatch(
 
         case 0x00012DE4u:
             b13560_snapshot(cpu, 2u);
+            b13561_checkpoint_base(cpu, 1);
             break;
 
         case 0x00012E04u:
@@ -3757,6 +3944,16 @@ static void fm_trace_dispatch(
                             ot,
                             packet
                         );
+
+                        B13561Life *lf =
+                            b13561_by_src(ot);
+
+                        if (lf)
+                        {
+                            ++lf->hand_gen;
+                            lf->packet = packet;
+                            lf->bucket = bucket;
+                        }
                     }
 
                     for (uint32_t si = 0u; si < 2u; ++si)
@@ -14467,6 +14664,83 @@ int main(void)
                     )
                     {
                         b13560_snapshot(cpu, 4u);
+
+                        B13561Life *lf =
+                            b13561_by_src(src_ot);
+
+                        if (
+                            lf
+                            &&
+                            lf->hand_gen != 0u
+                            &&
+                            lf->hand_gen != lf->consumed_gen
+                        )
+                        {
+                            ++lf->s_seen;
+
+                            uint32_t ph = 0u;
+                            uint32_t bw = 0u;
+
+                            int alive =
+                                b13561_packet_alive(
+                                    cpu,
+                                    lf,
+                                    &ph,
+                                    &bw
+                                );
+
+                            lf->last_s_packet_header = ph;
+                            lf->last_s_bucket_word = bw;
+                            lf->last_s_reach_bucket = 0u;
+                            lf->last_s_reach_packet = 0u;
+
+                            uint32_t tag =
+                                cpu->read_word(src_ot + 0x10u);
+
+                            if (
+                                lf->bucket != 0u
+                                &&
+                                b13558_chain_reaches(
+                                    cpu,
+                                    tag,
+                                    lf->bucket,
+                                    NULL,
+                                    NULL,
+                                    NULL
+                                )
+                            )
+                            {
+                                lf->last_s_reach_bucket = 1u;
+                            }
+
+                            if (
+                                lf->packet != 0u
+                                &&
+                                b13558_chain_reaches(
+                                    cpu,
+                                    tag,
+                                    lf->packet,
+                                    NULL,
+                                    NULL,
+                                    NULL
+                                )
+                            )
+                            {
+                                lf->last_s_reach_packet = 1u;
+                            }
+
+                            if (alive)
+                            {
+                                ++lf->s_alive;
+                            }
+                            else
+                            {
+                                ++lf->s_dead;
+                            }
+
+                            lf->consumed_gen =
+                                lf->hand_gen;
+                        }
                     }
 
                     ++g_hle_85d98_calls;
@@ -16360,7 +16634,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.60-HAND-DEATH-STAGE (BASE B131)\n");
+            printf("BUILD B135.61-SAME-FRAME-LIFETIME (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -16789,120 +17063,63 @@ int main(void)
                             );
 
                             /*
-                             * B135.60 - show exactly which finalizer stage
-                             * destroys/disconnects the latest hand packet.
+                             * B135.61 - same-generation, same-buffer proof.
                              */
                             printf(
-                                "CARD c/d:%lu/%lu P849:%lu pre:%lu/%lu/%lu\n",
+                                "CARD c/d:%lu/%lu P849:%lu\n",
                                 (unsigned long)g_b13553_hit_16c20,
                                 (unsigned long)g_b13553_hit_166a0,
-                                (unsigned long)g_b13556_hand_84978,
-                                (unsigned long)g_b13558_pre_shape,
-                                (unsigned long)g_b13558_pre_bucket_reach,
-                                (unsigned long)g_b13558_pre_packet_reach
+                                (unsigned long)g_b13556_hand_84978
                             );
 
-                            for (unsigned si = 0u; si < 5u; ++si)
+                            for (unsigned bi = 0u; bi < 2u; ++bi)
                             {
-                                B13560Stage *st =
-                                    &g_b13560_stage[si];
+                                B13561Life *lf =
+                                    &g_b13561_life[bi];
 
                                 printf(
-                                    "S%u h:%lu b:%05lX ph:%08lX bw:%08lX r:%lu/%lu\n",
-                                    si,
-                                    (unsigned long)st->hits,
-                                    (unsigned long)(
-                                        st->base & 0xFFFFFu
-                                    ),
-                                    (unsigned long)st->packet_header,
-                                    (unsigned long)st->bucket_word,
-                                    (unsigned long)st->reach_bucket,
-                                    (unsigned long)st->reach_packet
+                                    "B%u gen/use:%lu/%lu F:%lu/%lu R:%lu/%lu\n",
+                                    bi,
+                                    (unsigned long)lf->hand_gen,
+                                    (unsigned long)lf->consumed_gen,
+                                    (unsigned long)lf->f_seen,
+                                    (unsigned long)lf->f_alive,
+                                    (unsigned long)lf->r_seen,
+                                    (unsigned long)lf->r_alive
                                 );
 
                                 printf(
-                                    "   p:%05lX q:%05lX a:%05lX t:%05lX\n",
-                                    (unsigned long)(
-                                        st->packet & 0xFFFFFu
-                                    ),
-                                    (unsigned long)(
-                                        st->bucket & 0xFFFFFu
-                                    ),
-                                    (unsigned long)(
-                                        st->allocator & 0xFFFFFu
-                                    ),
-                                    (unsigned long)(
-                                        st->tag & 0xFFFFFu
-                                    )
+                                    "   S:%lu ok/dead:%lu/%lu reach:%lu/%lu\n",
+                                    (unsigned long)lf->s_seen,
+                                    (unsigned long)lf->s_alive,
+                                    (unsigned long)lf->s_dead,
+                                    (unsigned long)lf->last_s_reach_bucket,
+                                    (unsigned long)lf->last_s_reach_packet
                                 );
-                            }
 
-                            {
-                                uint32_t available =
-                                    g_b13559_evt_head < B13559_EVT_MAX
-                                        ? g_b13559_evt_head
-                                        : B13559_EVT_MAX;
-
-                                uint32_t show =
-                                    available < 8u
-                                        ? available
-                                        : 8u;
-
-                                for (
-                                    uint32_t row = 0u;
-                                    row < 2u;
-                                    ++row
-                                )
-                                {
-                                    printf("EV ");
-
-                                    for (
-                                        uint32_t col = 0u;
-                                        col < 4u;
-                                        ++col
-                                    )
-                                    {
-                                        uint32_t k = row * 4u + col;
-
-                                        if (k >= show)
-                                        {
-                                            printf("- ");
-                                            continue;
-                                        }
-
-                                        uint32_t from_oldest =
-                                            show - 1u - k;
-
-                                        uint32_t pos =
-                                            (
-                                                g_b13559_evt_head
-                                                - 1u
-                                                - from_oldest
-                                            )
-                                            %
-                                            B13559_EVT_MAX;
-
-                                        B13559Event *e =
-                                            &g_b13559_evt[pos];
-
-                                        printf(
-                                            "%c:%05lX/%05lX ",
-                                            (int)e->type,
-                                            (unsigned long)(
-                                                e->a & 0xFFFFFu
-                                            ),
-                                            (unsigned long)(
-                                                e->b & 0xFFFFFu
-                                            )
-                                        );
-                                    }
-
-                                    printf("\n");
-                                }
+                                printf(
+                                    "   p/b:%05lX/%05lX ph/bw:%08lX/%08lX\n",
+                                    (unsigned long)(
+                                        lf->packet & 0xFFFFFu
+                                    ),
+                                    (unsigned long)(
+                                        lf->bucket & 0xFFFFFu
+                                    ),
+                                    (unsigned long)lf->last_s_packet_header,
+                                    (unsigned long)lf->last_s_bucket_word
+                                );
                             }
 
                             printf(
-                                "BASE:%06lX idx:%lu B135.60 death-stage\n",
+                                "RAW pre sh/br/pr:%lu/%lu/%lu DMA:%lu\n",
+                                (unsigned long)g_b13558_pre_shape,
+                                (unsigned long)g_b13558_pre_bucket_reach,
+                                (unsigned long)g_b13558_pre_packet_reach,
+                                (unsigned long)b130_dma.b13554_hand_total_hits
+                            );
+
+                            printf(
+                                "BASE:%06lX idx:%lu B135.61 same-frame\n",
                                 (unsigned long)(
                                     cpu->read_word(0x8009C414u)
                                     & 0x1FFFFFu
