@@ -17618,7 +17618,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.68-HAND-OT-STAGE-MATRIX (BASE B131)\n");
+            printf("BUILD B135.69-SORT-BOUNDARY (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -18047,33 +18047,38 @@ int main(void)
                             );
 
                             /*
-                             * B135.68 - where does the renderer put the hand,
-                             * and at which exact stage does that OT lose it?
+                             * B135.69 - direct GsSortOt boundary.
+                             *
+                             * B135.68 proved:
+                             *   target = slot 1
+                             *   post-render mask contains slot 1
+                             *   finalizer-entry mask still contains slot 1.
+                             *
+                             * Now check the exact source at 80085D98 entry
+                             * and its destination at the next generated entry.
                              */
-                            uint32_t pre_e68 = 0u;
-                            uint32_t pre_a68 = 0u;
-                            uint32_t post_e68 = 0u;
-                            uint32_t post_a68 = 0u;
-                            uint32_t fin_e68 = 0u;
-                            uint32_t fin_a68 = 0u;
-                            uint32_t pre_m68 = 0u;
-                            uint32_t post_m68 = 0u;
-                            uint32_t fin_m68 = 0u;
-                            uint32_t base68 = 0u;
-                            uint32_t ptr68[4] = {0u,0u,0u,0u};
+                            uint32_t sc69[4] = {0u,0u,0u,0u};
+                            uint32_t ss69[4] = {0u,0u,0u,0u};
+                            uint32_t ds69[4] = {0u,0u,0u,0u};
+                            uint32_t other69 = 0u;
+                            uint32_t lsrc69 = 0u;
+                            uint32_t ldst69 = 0u;
+                            uint32_t lslot69 = 0xFFFFFFFFu;
+                            uint32_t lsp69 = 0u;
+                            uint32_t ldp69 = 0u;
+                            uint32_t lnext69 = 0u;
 
-                            fm_runtime_b13568_stages(
-                                &pre_e68,
-                                &pre_a68,
-                                &post_e68,
-                                &post_a68,
-                                &fin_e68,
-                                &fin_a68,
-                                &pre_m68,
-                                &post_m68,
-                                &fin_m68,
-                                &base68,
-                                ptr68
+                            fm_runtime_b13569_sort_boundary(
+                                sc69,
+                                ss69,
+                                ds69,
+                                &other69,
+                                &lsrc69,
+                                &ldst69,
+                                &lslot69,
+                                &lsp69,
+                                &ldp69,
+                                &lnext69
                             );
 
                             printf(
@@ -18085,67 +18090,48 @@ int main(void)
                             );
 
                             printf(
-                                "TARGET s0/1/2/3/o:%lu/%lu/%lu/%lu/%lu\n",
-                                (unsigned long)g_b13568_target_slot[0],
-                                (unsigned long)g_b13568_target_slot[1],
-                                (unsigned long)g_b13568_target_slot[2],
-                                (unsigned long)g_b13568_target_slot[3],
-                                (unsigned long)g_b13568_target_other
+                                "SORT calls s0/1/2/3:%lu/%lu/%lu/%lu o:%lu\n",
+                                (unsigned long)sc69[0],
+                                (unsigned long)sc69[1],
+                                (unsigned long)sc69[2],
+                                (unsigned long)sc69[3],
+                                (unsigned long)other69
                             );
 
                             printf(
-                                "STAGE pre/post/fin any:%lu/%lu %lu/%lu %lu/%lu\n",
-                                (unsigned long)pre_e68,
-                                (unsigned long)pre_a68,
-                                (unsigned long)post_e68,
-                                (unsigned long)post_a68,
-                                (unsigned long)fin_e68,
-                                (unsigned long)fin_a68
+                                "SRC hand s0/1/2/3:%lu/%lu/%lu/%lu\n",
+                                (unsigned long)ss69[0],
+                                (unsigned long)ss69[1],
+                                (unsigned long)ss69[2],
+                                (unsigned long)ss69[3]
                             );
 
                             printf(
-                                "MASK pre/post/fin:%lX/%lX/%lX\n",
-                                (unsigned long)pre_m68,
-                                (unsigned long)post_m68,
-                                (unsigned long)fin_m68
+                                "DST hand s0/1/2/3:%lu/%lu/%lu/%lu\n",
+                                (unsigned long)ds69[0],
+                                (unsigned long)ds69[1],
+                                (unsigned long)ds69[2],
+                                (unsigned long)ds69[3]
                             );
 
                             printf(
-                                "PTR 0/1:%05lX/%05lX 2/3:%05lX/%05lX\n",
-                                (unsigned long)(ptr68[0] & 0xFFFFFu),
-                                (unsigned long)(ptr68[1] & 0xFFFFFu),
-                                (unsigned long)(ptr68[2] & 0xFFFFFu),
-                                (unsigned long)(ptr68[3] & 0xFFFFFu)
+                                "LAST slot:%ld src/dst:%05lX/%05lX\n",
+                                lslot69 == 0xFFFFFFFFu
+                                    ? -1L
+                                    : (long)lslot69,
+                                (unsigned long)(lsrc69 & 0xFFFFFu),
+                                (unsigned long)(ldst69 & 0xFFFFFu)
                             );
 
                             printf(
-                                "LAST target/base:%05lX/%05lX\n",
-                                (unsigned long)(
-                                    g_b13568_last_target_ot & 0xFFFFFu
-                                ),
-                                (unsigned long)(
-                                    g_b13568_last_target_base & 0xFFFFFu
-                                )
+                                "PKT src/dst:%05lX/%05lX next:%05lX\n",
+                                (unsigned long)(lsp69 & 0xFFFFFu),
+                                (unsigned long)(ldp69 & 0xFFFFFu),
+                                (unsigned long)(lnext69 & 0xFFFFFu)
                             );
 
                             printf(
-                                "TPTR:%05lX/%05lX/%05lX/%05lX\n",
-                                (unsigned long)(
-                                    g_b13568_last_target_ptr[0] & 0xFFFFFu
-                                ),
-                                (unsigned long)(
-                                    g_b13568_last_target_ptr[1] & 0xFFFFFu
-                                ),
-                                (unsigned long)(
-                                    g_b13568_last_target_ptr[2] & 0xFFFFFu
-                                ),
-                                (unsigned long)(
-                                    g_b13568_last_target_ptr[3] & 0xFFFFFu
-                                )
-                            );
-
-                            printf(
-                                "BASE:%06lX idx:%lu B135.68 stage-matrix\n",
+                                "BASE:%06lX idx:%lu B135.69 sort-boundary\n",
                                 (unsigned long)(
                                     cpu->read_word(0x8009C414u)
                                     & 0x1FFFFFu
