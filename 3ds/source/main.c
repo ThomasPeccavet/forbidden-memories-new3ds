@@ -15197,7 +15197,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.42-TEX-PROBE (BASE B131)\n");
+            printf("BUILD B135.43-RECT-WRITE (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15653,14 +15653,57 @@ int main(void)
                         }
                     }
 
-                    printf(
-                        "2D rect/q:%lu/%lu v2:%lu dxy:%u,%u\n",
-                        (unsigned long)gpu_debug.b124_rect_hits,
-                        (unsigned long)gpu_debug.b125_texquad_hits,
-                        (unsigned long)g_b13541_2d_vsync_latches,
-                        fm_gpu_display_x(),
-                        fm_gpu_display_y()
-                    );
+                    {
+                        uint64_t rt_nz = 0u;
+                        uint64_t rt_wr = 0u;
+                        uint32_t rt_clip = 0u;
+                        int rt_x = 0, rt_y = 0, rt_w = 0, rt_h = 0;
+                        int rt_ox = 0, rt_oy = 0;
+                        int rt_ax1 = 0, rt_ay1 = 0, rt_ax2 = 0, rt_ay2 = 0;
+
+                        fm_gpu_b13543_rect_probe(
+                            &rt_nz,
+                            &rt_wr,
+                            &rt_clip,
+                            &rt_x,
+                            &rt_y,
+                            &rt_w,
+                            &rt_h,
+                            &rt_ox,
+                            &rt_oy,
+                            &rt_ax1,
+                            &rt_ay1,
+                            &rt_ax2,
+                            &rt_ay2
+                        );
+
+                        printf(
+                            "R64 nz/wr/clip:%llu/%llu/%lu\n",
+                            (unsigned long long)rt_nz,
+                            (unsigned long long)rt_wr,
+                            (unsigned long)rt_clip
+                        );
+
+                        printf(
+                            "R64 xywh:%d,%d,%d,%d off:%d,%d\n",
+                            rt_x,
+                            rt_y,
+                            rt_w,
+                            rt_h,
+                            rt_ox,
+                            rt_oy
+                        );
+
+                        printf(
+                            "R64 area:%d,%d-%d,%d dxy:%u,%u\n",
+                            rt_ax1,
+                            rt_ay1,
+                            rt_ax2,
+                            rt_ay2,
+                            fm_gpu_display_x(),
+                            fm_gpu_display_y()
+                        );
+                    }
 
                     g_b13540_prev_rect =
                         gpu_debug.b124_rect_hits;
