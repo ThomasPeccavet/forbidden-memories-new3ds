@@ -64,6 +64,17 @@ static uint32_t g_b13567_last_4b8 = 0u;
 static uint32_t g_b13567_last_6a0 = 0u;
 
 /*
+ * Forward declaration: B135.68's OT-stage scanner is defined before the
+ * B135.67 chain scanner implementation below.
+ */
+static int b13567_chain_has_hand_shape(
+    CPUState *cpu,
+    uint32_t start_tag,
+    uint32_t *packet_out
+);
+
+
+/*
  * B135.68 - scan ALL four current GsOTs at three exact pipeline stages:
  *   12F70 entry  = before object rendering
  *   12CB8 entry  = immediately after 12F70 returned
