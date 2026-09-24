@@ -15197,7 +15197,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.41-VSYNC-2D (BASE B131)\n");
+            printf("BUILD B135.42-TEX-PROBE (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15496,93 +15496,170 @@ int main(void)
                     );
 
                     /*
-                     * B135.40: sample both candidate 320x240 framebuffer pages.
-                     * One sample every 4 pixels is enough to detect a missing
-                     * foreground/card layer without adding meaningful cost.
+                     * B135.42 - locate the missing dialogue/card layer.
+                     *
+                     * B135.40/41 proved the presenter is not the root cause:
+                     * at the missing-UI screens both nominal framebuffer pages
+                     * can be empty while the guest still submits textured 2D
+                     * primitives.  Probe all six 320x240 VRAM windows and the
+                     * last large textured rectangle, including its texture
+                     * source/CLUT contents.
                      */
-                    uint32_t p0_now = 0u;
-                    uint32_t p320_now = 0u;
-                    uint32_t p0_bot = 0u;
-                    uint32_t p320_bot = 0u;
+                    uint32_t vr6[6] = {0u,0u,0u,0u,0u,0u};
+                    static const unsigned vr6_x[3] = {0u,320u,640u};
+                    static const unsigned vr6_y[2] = {0u,256u};
 
-                    for (unsigned py = 0u; py < 240u; py += 4u)
+                    for (unsigned yi = 0u; yi < 2u; ++yi)
                     {
-                        const uint16_t *row0 =
-                            vram + py * 1024u;
-
-                        const uint16_t *row320 =
-                            row0 + 320u;
-
-                        for (unsigned px = 0u; px < 320u; px += 4u)
+                        for (unsigned xi = 0u; xi < 3u; ++xi)
                         {
-                            if ((row0[px] & 0x7FFFu) != 0u)
-                            {
-                                ++p0_now;
+                            uint32_t nz = 0u;
 
-                                if (py >= 144u)
+                            for (unsigned py = 0u; py < 240u; py += 4u)
+                            {
+                                const uint16_t *row =
+                                    vram
+                                    +
+                                    (vr6_y[yi] + py) * 1024u
+                                    +
+                                    vr6_x[xi];
+
+                                for (unsigned px = 0u; px < 320u; px += 4u)
                                 {
-                                    ++p0_bot;
+                                    if ((row[px] & 0x7FFFu) != 0u)
+                                    {
+                                        ++nz;
+                                    }
                                 }
                             }
 
-                            if ((row320[px] & 0x7FFFu) != 0u)
-                            {
-                                ++p320_now;
-
-                                if (py >= 144u)
-                                {
-                                    ++p320_bot;
-                                }
-                            }
+                            vr6[yi * 3u + xi] = nz;
                         }
                     }
 
-                    uint32_t d_rect =
-                        gpu_debug.b124_rect_hits
-                        -
-                        g_b13540_prev_rect;
+                    printf(
+                        "VR6 A:%lu/%lu/%lu B:%lu/%lu/%lu\n",
+                        (unsigned long)vr6[0],
+                        (unsigned long)vr6[1],
+                        (unsigned long)vr6[2],
+                        (unsigned long)vr6[3],
+                        (unsigned long)vr6[4],
+                        (unsigned long)vr6[5]
+                    );
 
-                    uint32_t d_quad =
-                        gpu_debug.b125_texquad_hits
-                        -
-                        g_b13540_prev_quad;
+                    {
+                        uint32_t br_count = 0u;
+                        uint8_t br_op = 0u;
+                        int br_tex = 0;
+                        int br_raw = 0;
+                        int br_x = 0;
+                        int br_y = 0;
+                        int br_w = 0;
+                        int br_h = 0;
+                        int br_u = 0;
+                        int br_v = 0;
+                        int br_cx = 0;
+                        int br_cy = 0;
+                        uint16_t br_tp = 0u;
+                        uint32_t br_cmd[4] = {0u,0u,0u,0u};
 
-                    uint32_t d_2c =
-                        gpu_debug.b126_seen_2c
-                        -
-                        g_b13540_prev_2c;
+                        if (
+                            fm_gpu_b38_bigrect_get(
+                                &br_count,
+                                &br_op,
+                                &br_tex,
+                                &br_raw,
+                                &br_x,
+                                &br_y,
+                                &br_w,
+                                &br_h,
+                                &br_u,
+                                &br_v,
+                                &br_cx,
+                                &br_cy,
+                                &br_tp,
+                                br_cmd
+                            )
+                        )
+                        {
+                            printf(
+                                "BIG n/op/t/r:%lu/%02X/%d/%d xy:%d,%d wh:%d,%d\n",
+                                (unsigned long)br_count,
+                                (unsigned)br_op,
+                                br_tex,
+                                br_raw,
+                                br_x,
+                                br_y,
+                                br_w,
+                                br_h
+                            );
 
-                    uint32_t d_3a =
-                        gpu_debug.b126_seen_3a
-                        -
-                        g_b13540_prev_3a;
+                            printf(
+                                "BIG uv:%d,%d cl:%d,%d tp:%03X\n",
+                                br_u,
+                                br_v,
+                                br_cx,
+                                br_cy,
+                                (unsigned)br_tp
+                            );
+
+                            uint32_t tw = 0u;
+                            int dep = 0;
+                            int tbx = 0;
+                            int tby = 0;
+                            uint32_t texels = 0u;
+                            uint32_t inz = 0u;
+                            uint32_t cnz = 0u;
+                            uint32_t uniq = 0u;
+                            uint16_t pal[16] = {0u};
+                            uint8_t si[8] = {0u};
+                            uint16_t sc[8] = {0u};
+
+                            if (
+                                fm_gpu_b39_texture_probe_get(
+                                    &tw,
+                                    &dep,
+                                    &tbx,
+                                    &tby,
+                                    &texels,
+                                    &inz,
+                                    &cnz,
+                                    &uniq,
+                                    pal,
+                                    si,
+                                    sc
+                                )
+                            )
+                            {
+                                printf(
+                                    "TEX d/base/tw:%d/%d,%d/%05lX nzI/C:%lu/%lu u:%lu\n",
+                                    dep,
+                                    tbx,
+                                    tby,
+                                    (unsigned long)tw,
+                                    (unsigned long)inz,
+                                    (unsigned long)cnz,
+                                    (unsigned long)uniq
+                                );
+                            }
+                            else
+                            {
+                                printf("TEX probe:none\n");
+                            }
+                        }
+                        else
+                        {
+                            printf("BIG none\n");
+                        }
+                    }
 
                     printf(
-                        "PAGE d:%u/%u nz:%lu/%lu bot:%lu/%lu\n",
+                        "2D rect/q:%lu/%lu v2:%lu dxy:%u,%u\n",
+                        (unsigned long)gpu_debug.b124_rect_hits,
+                        (unsigned long)gpu_debug.b125_texquad_hits,
+                        (unsigned long)g_b13541_2d_vsync_latches,
                         fm_gpu_display_x(),
-                        fm_gpu_display_y(),
-                        (unsigned long)p0_now,
-                        (unsigned long)p320_now,
-                        (unsigned long)p0_bot,
-                        (unsigned long)p320_bot
-                    );
-
-                    printf(
-                        "2D120 rect/q/2C/3A:%lu/%lu/%lu/%lu\n",
-                        (unsigned long)d_rect,
-                        (unsigned long)d_quad,
-                        (unsigned long)d_2c,
-                        (unsigned long)d_3a
-                    );
-
-                    printf(
-                        "MERGE d2:%d m/p:%lu/%lu b/o:%lu/%lu v2:%lu\n",
-                        g_direct2df_active,
-                        (unsigned long)g_b103_merge_count,
-                        (unsigned long)g_b103_plain_count,
-                        (unsigned long)g_b103_last_base_x,
-                        (unsigned long)g_b103_last_overlay_x,
-                        (unsigned long)g_b13541_2d_vsync_latches
+                        fm_gpu_display_y()
                     );
 
                     g_b13540_prev_rect =
