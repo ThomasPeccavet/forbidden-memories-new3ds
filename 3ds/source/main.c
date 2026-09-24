@@ -15428,7 +15428,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.51-CC-CALLBACK (BASE B131)\n");
+            printf("BUILD B135.52-ACTIVE-CB-DUMP (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15856,80 +15856,92 @@ int main(void)
                                 (unsigned long)on[6]
                             );
 
-                            uint32_t cc_cb_nz = 0u;
-                            uint32_t cc_hand_cb = 0u;
-                            int hand_id0 = -1;
-                            int hand_id1 = -1;
-                            int hand_side0 = -1;
-                            int hand_side1 = -1;
-
-                            int idx = oh[6];
-
-                            for (unsigned k = 0u; k < 0x60u; ++k)
+                            /*
+                             * B135.52 - stop assuming which callback owns the
+                             * missing hand.  Dump the callbacks that are
+                             * ACTUALLY attached to the active C4 and CC
+                             * objects on the current duel screen.
+                             *
+                             * A = object + 0x24 callback
+                             * B = object + 0x4C callback
+                             * Addresses are printed as 21-bit guest physical
+                             * offsets so 800xxxxx / 801xxxxx remain distinct.
+                             */
+                            static const unsigned dump_lists[2] =
                             {
-                                if (idx < 0 || idx >= 0x60)
+                                2u, 6u
+                            };
+
+                            static const char *dump_names[2] =
+                            {
+                                "C4", "CC"
+                            };
+
+                            for (unsigned dl = 0u; dl < 2u; ++dl)
+                            {
+                                int idx = oh[dump_lists[dl]];
+                                unsigned shown = 0u;
+
+                                while (
+                                    idx >= 0
+                                    && idx < 0x60
+                                    && shown < 8u
+                                )
                                 {
-                                    break;
+                                    uint32_t obj =
+                                        0x800F1210u
+                                        +
+                                        (uint32_t)idx * 0x70u;
+
+                                    uint32_t cb24 =
+                                        cpu->read_word(obj + 0x24u);
+
+                                    uint32_t cb4c =
+                                        cpu->read_word(obj + 0x4Cu);
+
+                                    uint32_t flags =
+                                        cpu->read_half(obj + 0x08u);
+
+                                    uint32_t layer =
+                                        cpu->read_byte(obj + 0x17u);
+
+                                    printf(
+                                        "%s id:%02d A:%06lX B:%06lX F:%02lX L:%lu\n",
+                                        dump_names[dl],
+                                        idx,
+                                        (unsigned long)(cb24 & 0x1FFFFFu),
+                                        (unsigned long)(cb4c & 0x1FFFFFu),
+                                        (unsigned long)(flags & 0xFFu),
+                                        (unsigned long)layer
+                                    );
+
+                                    idx =
+                                        (int16_t)cpu->read_half(
+                                            obj + 0x02u
+                                        );
+
+                                    ++shown;
                                 }
 
-                                uint32_t obj =
-                                    0x800F1210u
-                                    +
-                                    (uint32_t)idx * 0x70u;
-
-                                uint32_t cb =
-                                    cpu->read_word(obj + 0x4Cu);
-
-                                if (cb != 0u)
+                                if (shown == 0u)
                                 {
-                                    ++cc_cb_nz;
+                                    printf(
+                                        "%s empty\n",
+                                        dump_names[dl]
+                                    );
                                 }
-
-                                if (cb == 0x80031B58u)
-                                {
-                                    int side =
-                                        (int)cpu->read_byte(obj + 0x67u);
-
-                                    if (cc_hand_cb == 0u)
-                                    {
-                                        hand_id0 = idx;
-                                        hand_side0 = side;
-                                    }
-                                    else if (cc_hand_cb == 1u)
-                                    {
-                                        hand_id1 = idx;
-                                        hand_side1 = side;
-                                    }
-
-                                    ++cc_hand_cb;
-                                }
-
-                                idx =
-                                    (int16_t)cpu->read_half(obj + 0x02u);
                             }
 
                             printf(
-                                "CC cb nz/31B58:%lu/%lu id:%d/%d side:%d/%d\n",
-                                (unsigned long)cc_cb_nz,
-                                (unsigned long)cc_hand_cb,
-                                hand_id0,
-                                hand_id1,
-                                hand_side0,
-                                hand_side1
-                            );
-
-                            printf(
-                                "HIT 32824/41048/31B58:%lu/%lu/%lu\n",
-                                (unsigned long)g_b13551_hit_32824,
+                                "HIT 41048/31B58:%lu/%lu child:%lu/%lu\n",
                                 (unsigned long)g_b13551_hit_41048,
-                                (unsigned long)g_b13551_hit_31b58
+                                (unsigned long)g_b13551_hit_31b58,
+                                (unsigned long)g_b13551_hit_31948,
+                                (unsigned long)g_b13551_hit_319dc
                             );
 
                             printf(
-                                "HIT 31948/319DC:%lu/%lu ENTRY 31B58:%d\n",
-                                (unsigned long)g_b13551_hit_31948,
-                                (unsigned long)g_b13551_hit_319dc,
-                                psx_game_is_function_entry(0x80031B58u)
+                                "B135.52 active callback dump\n"
                             );
                         }
 
