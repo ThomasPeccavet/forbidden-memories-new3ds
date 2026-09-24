@@ -2902,6 +2902,18 @@ static uint32_t g_hit_8111c = 0;
 static uint32_t g_hit_82168 = 0;
 static uint32_t g_hit_8219c = 0;
 
+/*
+ * B135.51 - exact duel hand callback chain.
+ * FUN_80032824 creates two list-6 (CC) objects whose draw callback is
+ * FUN_80031B58, one for each framebuffer.  Track the setup, CC walker
+ * and callback entries to see where that chain stops on 3DS.
+ */
+static uint32_t g_b13551_hit_32824 = 0u;
+static uint32_t g_b13551_hit_41048 = 0u;
+static uint32_t g_b13551_hit_31b58 = 0u;
+static uint32_t g_b13551_hit_31948 = 0u;
+static uint32_t g_b13551_hit_319dc = 0u;
+
 static uint32_t g_ra_8111c = 0;
 static uint32_t g_ra_82168 = 0;
 static uint32_t g_ra_8219c = 0;
@@ -3147,6 +3159,26 @@ static void fm_trace_dispatch(
 
     switch (phys)
     {
+        case 0x00032824u:
+            ++g_b13551_hit_32824;
+            break;
+
+        case 0x00041048u:
+            ++g_b13551_hit_41048;
+            break;
+
+        case 0x00031B58u:
+            ++g_b13551_hit_31b58;
+            break;
+
+        case 0x00031948u:
+            ++g_b13551_hit_31948;
+            break;
+
+        case 0x000319DCu:
+            ++g_b13551_hit_319dc;
+            break;
+
         case 0x00012A44u:
             ++g_hit_startup;
             break;
@@ -15396,7 +15428,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.50-ALL-OBJ-LISTS (BASE B131)\n");
+            printf("BUILD B135.51-CC-CALLBACK (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15794,12 +15826,9 @@ int main(void)
 
                             static const uint32_t heads[7] =
                             {
-                                0x800F11C0u,
-                                0x800F11C2u,
-                                0x800F11C4u,
-                                0x800F11C6u,
-                                0x800F11C8u,
-                                0x800F11CAu,
+                                0x800F11C0u, 0x800F11C2u,
+                                0x800F11C4u, 0x800F11C6u,
+                                0x800F11C8u, 0x800F11CAu,
                                 0x800F11CCu
                             };
 
@@ -15817,17 +15846,7 @@ int main(void)
                             }
 
                             printf(
-                                "OBJ H c0/c2/c4/c6:%d/%d/%d/%d\n",
-                                oh[0],oh[1],oh[2],oh[3]
-                            );
-
-                            printf(
-                                "OBJ H c8/ca/cc:%d/%d/%d\n",
-                                oh[4],oh[5],oh[6]
-                            );
-
-                            printf(
-                                "OBJ N:%lu/%lu/%lu/%lu/%lu/%lu/%lu\n",
+                                "OBJ N c0..cc:%lu/%lu/%lu/%lu/%lu/%lu/%lu\n",
                                 (unsigned long)on[0],
                                 (unsigned long)on[1],
                                 (unsigned long)on[2],
@@ -15837,70 +15856,81 @@ int main(void)
                                 (unsigned long)on[6]
                             );
 
-                            printf(
-                                "OBJ D:%lu/%lu/%lu/%lu/%lu/%lu/%lu\n",
-                                (unsigned long)od[0],
-                                (unsigned long)od[1],
-                                (unsigned long)od[2],
-                                (unsigned long)od[3],
-                                (unsigned long)od[4],
-                                (unsigned long)od[5],
-                                (unsigned long)od[6]
-                            );
+                            uint32_t cc_cb_nz = 0u;
+                            uint32_t cc_hand_cb = 0u;
+                            int hand_id0 = -1;
+                            int hand_id1 = -1;
+                            int hand_side0 = -1;
+                            int hand_side1 = -1;
 
-                            printf(
-                                "OBJ B:%lu/%lu/%lu/%lu/%lu/%lu/%lu\n",
-                                (unsigned long)ob[0],
-                                (unsigned long)ob[1],
-                                (unsigned long)ob[2],
-                                (unsigned long)ob[3],
-                                (unsigned long)ob[4],
-                                (unsigned long)ob[5],
-                                (unsigned long)ob[6]
-                            );
+                            int idx = oh[6];
 
-                            printf(
-                                "OBJ M:%02lX/%02lX/%02lX/%02lX/%02lX/%02lX/%02lX\n",
-                                (unsigned long)(om[0] & 0xFFu),
-                                (unsigned long)(om[1] & 0xFFu),
-                                (unsigned long)(om[2] & 0xFFu),
-                                (unsigned long)(om[3] & 0xFFu),
-                                (unsigned long)(om[4] & 0xFFu),
-                                (unsigned long)(om[5] & 0xFFu),
-                                (unsigned long)(om[6] & 0xFFu)
-                            );
-
-                            /*
-                             * C2 is rendered by FUN_800408BC and emits 2Ch
-                             * textured quads.  Print the first eight object
-                             * indices so a five-card hand is immediately
-                             * visible as a concrete guest object chain.
-                             */
-                            printf("C2 ids:");
-                            int idx = oh[1];
-
-                            for (unsigned k = 0u; k < 8u; ++k)
+                            for (unsigned k = 0u; k < 0x60u; ++k)
                             {
                                 if (idx < 0 || idx >= 0x60)
                                 {
-                                    printf(" -");
                                     break;
                                 }
-
-                                printf(" %d", idx);
 
                                 uint32_t obj =
                                     0x800F1210u
                                     +
                                     (uint32_t)idx * 0x70u;
 
+                                uint32_t cb =
+                                    cpu->read_word(obj + 0x4Cu);
+
+                                if (cb != 0u)
+                                {
+                                    ++cc_cb_nz;
+                                }
+
+                                if (cb == 0x80031B58u)
+                                {
+                                    int side =
+                                        (int)cpu->read_byte(obj + 0x67u);
+
+                                    if (cc_hand_cb == 0u)
+                                    {
+                                        hand_id0 = idx;
+                                        hand_side0 = side;
+                                    }
+                                    else if (cc_hand_cb == 1u)
+                                    {
+                                        hand_id1 = idx;
+                                        hand_side1 = side;
+                                    }
+
+                                    ++cc_hand_cb;
+                                }
+
                                 idx =
-                                    (int16_t)cpu->read_half(
-                                        obj + 0x02u
-                                    );
+                                    (int16_t)cpu->read_half(obj + 0x02u);
                             }
 
-                            printf("\n");
+                            printf(
+                                "CC cb nz/31B58:%lu/%lu id:%d/%d side:%d/%d\n",
+                                (unsigned long)cc_cb_nz,
+                                (unsigned long)cc_hand_cb,
+                                hand_id0,
+                                hand_id1,
+                                hand_side0,
+                                hand_side1
+                            );
+
+                            printf(
+                                "HIT 32824/41048/31B58:%lu/%lu/%lu\n",
+                                (unsigned long)g_b13551_hit_32824,
+                                (unsigned long)g_b13551_hit_41048,
+                                (unsigned long)g_b13551_hit_31b58
+                            );
+
+                            printf(
+                                "HIT 31948/319DC:%lu/%lu ENTRY 31B58:%d\n",
+                                (unsigned long)g_b13551_hit_31948,
+                                (unsigned long)g_b13551_hit_319dc,
+                                psx_game_is_function_entry(0x80031B58u)
+                            );
                         }
 
                         g_b13547_prev_e3 = env_e3;
