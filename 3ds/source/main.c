@@ -9731,8 +9731,8 @@ static int fm_b135_quick_load(
  * The GPU paths, GP1 display environment and the exact guest GsSortOt
  * have now all been validated while the duel hand is still missing.
  * Move one level upstream: Forbidden Memories keeps up to 0x60 display
- * objects at 0x800F1210, stride 0x70, and five linked-list heads at
- * 0x800F11C4..0x800F11CC.  The known renderer routines
+ * objects at 0x800F1210, stride 0x70, and seven linked-list heads at
+ * 0x800F11C0..0x800F11CC.  The known renderer routines
  * 80040B48/40F2C/4110C/4139C/41048 walk those exact lists.
  *
  * This helper is read-only and bounded.  It tells us whether the card
@@ -15396,7 +15396,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.49-DUEL-OBJ-PROBE (BASE B131)\n");
+            printf("BUILD B135.50-ALL-OBJ-LISTS (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -15786,14 +15786,16 @@ int main(void)
                         );
 
                         {
-                            int oh[5] = {-1,-1,-1,-1,-1};
-                            uint32_t on[5] = {0u,0u,0u,0u,0u};
-                            uint32_t od[5] = {0u,0u,0u,0u,0u};
-                            uint32_t ob[5] = {0u,0u,0u,0u,0u};
-                            uint32_t om[5] = {0u,0u,0u,0u,0u};
+                            int oh[7] = {-1,-1,-1,-1,-1,-1,-1};
+                            uint32_t on[7] = {0u,0u,0u,0u,0u,0u,0u};
+                            uint32_t od[7] = {0u,0u,0u,0u,0u,0u,0u};
+                            uint32_t ob[7] = {0u,0u,0u,0u,0u,0u,0u};
+                            uint32_t om[7] = {0u,0u,0u,0u,0u,0u,0u};
 
-                            static const uint32_t heads[5] =
+                            static const uint32_t heads[7] =
                             {
+                                0x800F11C0u,
+                                0x800F11C2u,
                                 0x800F11C4u,
                                 0x800F11C6u,
                                 0x800F11C8u,
@@ -15801,7 +15803,7 @@ int main(void)
                                 0x800F11CCu
                             };
 
-                            for (unsigned oi = 0u; oi < 5u; ++oi)
+                            for (unsigned oi = 0u; oi < 7u; ++oi)
                             {
                                 b13549_obj_list_probe(
                                     cpu,
@@ -15815,37 +15817,90 @@ int main(void)
                             }
 
                             printf(
-                                "OBJ H c4/c6/c8/ca/cc:%d/%d/%d/%d/%d\n",
-                                oh[0],oh[1],oh[2],oh[3],oh[4]
+                                "OBJ H c0/c2/c4/c6:%d/%d/%d/%d\n",
+                                oh[0],oh[1],oh[2],oh[3]
                             );
 
                             printf(
-                                "OBJ N:%lu/%lu/%lu/%lu/%lu D:%lu/%lu/%lu/%lu/%lu\n",
+                                "OBJ H c8/ca/cc:%d/%d/%d\n",
+                                oh[4],oh[5],oh[6]
+                            );
+
+                            printf(
+                                "OBJ N:%lu/%lu/%lu/%lu/%lu/%lu/%lu\n",
                                 (unsigned long)on[0],
                                 (unsigned long)on[1],
                                 (unsigned long)on[2],
                                 (unsigned long)on[3],
                                 (unsigned long)on[4],
+                                (unsigned long)on[5],
+                                (unsigned long)on[6]
+                            );
+
+                            printf(
+                                "OBJ D:%lu/%lu/%lu/%lu/%lu/%lu/%lu\n",
                                 (unsigned long)od[0],
                                 (unsigned long)od[1],
                                 (unsigned long)od[2],
                                 (unsigned long)od[3],
-                                (unsigned long)od[4]
+                                (unsigned long)od[4],
+                                (unsigned long)od[5],
+                                (unsigned long)od[6]
                             );
 
                             printf(
-                                "OBJ B:%lu/%lu/%lu/%lu/%lu M:%02lX/%02lX/%02lX/%02lX/%02lX\n",
+                                "OBJ B:%lu/%lu/%lu/%lu/%lu/%lu/%lu\n",
                                 (unsigned long)ob[0],
                                 (unsigned long)ob[1],
                                 (unsigned long)ob[2],
                                 (unsigned long)ob[3],
                                 (unsigned long)ob[4],
+                                (unsigned long)ob[5],
+                                (unsigned long)ob[6]
+                            );
+
+                            printf(
+                                "OBJ M:%02lX/%02lX/%02lX/%02lX/%02lX/%02lX/%02lX\n",
                                 (unsigned long)(om[0] & 0xFFu),
                                 (unsigned long)(om[1] & 0xFFu),
                                 (unsigned long)(om[2] & 0xFFu),
                                 (unsigned long)(om[3] & 0xFFu),
-                                (unsigned long)(om[4] & 0xFFu)
+                                (unsigned long)(om[4] & 0xFFu),
+                                (unsigned long)(om[5] & 0xFFu),
+                                (unsigned long)(om[6] & 0xFFu)
                             );
+
+                            /*
+                             * C2 is rendered by FUN_800408BC and emits 2Ch
+                             * textured quads.  Print the first eight object
+                             * indices so a five-card hand is immediately
+                             * visible as a concrete guest object chain.
+                             */
+                            printf("C2 ids:");
+                            int idx = oh[1];
+
+                            for (unsigned k = 0u; k < 8u; ++k)
+                            {
+                                if (idx < 0 || idx >= 0x60)
+                                {
+                                    printf(" -");
+                                    break;
+                                }
+
+                                printf(" %d", idx);
+
+                                uint32_t obj =
+                                    0x800F1210u
+                                    +
+                                    (uint32_t)idx * 0x70u;
+
+                                idx =
+                                    (int16_t)cpu->read_half(
+                                        obj + 0x02u
+                                    );
+                            }
+
+                            printf("\n");
                         }
 
                         g_b13547_prev_e3 = env_e3;
