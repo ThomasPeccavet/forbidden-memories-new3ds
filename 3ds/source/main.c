@@ -3816,6 +3816,36 @@ static B13563Corr *b13563_by_src(
     return NULL;
 }
 
+/*
+ * B135.64 - recover a missing first-layer GsSortOt.
+ *
+ * B135.63 showed a stable pattern once the duel hand exists:
+ * hand packets keep being generated, but the expected first sort
+ * (base+0x5124 -> base+0x5110) no longer appears before later layer
+ * sorts continue.  If the first layer really was skipped, its hand
+ * packet OT is cleared on the next buffer recycle and never reaches DMA.
+ *
+ * At the SECOND layer sort (base+0x5138), detect whether the current
+ * hand generation has already had ANY first-layer sort.  If not, and
+ * the hand shape is still reachable in the first-layer OT, splice that
+ * source into the destination with the already-verified C GsSortOt
+ * before continuing with the normal second-layer merge.
+ */
+static uint32_t g_b13564_first_calls[2] = {0u,0u};
+static uint32_t g_b13564_second_calls[2] = {0u,0u};
+static uint32_t g_b13564_third_calls[2] = {0u,0u};
+static uint32_t g_b13564_last_first_gen[2] = {0u,0u};
+
+static uint32_t g_b13564_bridge_attempt[2] = {0u,0u};
+static uint32_t g_b13564_bridge_shape[2] = {0u,0u};
+static uint32_t g_b13564_bridge_ok[2] = {0u,0u};
+static uint32_t g_b13564_bridge_fail[2] = {0u,0u};
+
+static uint32_t g_b13564_last_hand_src = 0u;
+static uint32_t g_b13564_last_dst = 0u;
+static uint32_t g_b13564_last_shape_packet = 0u;
+static int32_t g_b13564_last_code = 0;
+
 static uint32_t g_ra_8111c = 0;
 static uint32_t g_ra_82168 = 0;
 static uint32_t g_ra_8219c = 0;
@@ -15129,6 +15159,154 @@ int main(void)
                     uint32_t dst_ot = cpu->gpr[5];
                     uint32_t native_result = dst_ot;
 
+                    /*
+                     * B135.64 - classify the three layer sources by physical
+                     * address, independent of KSEG alias / caller RA.
+                     */
+                    {
+                        uint32_t sp64 = src_ot & 0x1FFFFFFFu;
+                        int bi64 = -1;
+                        int layer64 = 0;
+
+                        if (sp64 == 0x000E5FD4u)
+                        {
+                            bi64 = 0; layer64 = 1;
+                        }
+                        else if (sp64 == 0x000E5FE8u)
+                        {
+                            bi64 = 0; layer64 = 2;
+                        }
+                        else if (sp64 == 0x000E5FFCu)
+                        {
+                            bi64 = 0; layer64 = 3;
+                        }
+                        else if (sp64 == 0x000EB134u)
+                        {
+                            bi64 = 1; layer64 = 1;
+                        }
+                        else if (sp64 == 0x000EB148u)
+                        {
+                            bi64 = 1; layer64 = 2;
+                        }
+                        else if (sp64 == 0x000EB15Cu)
+                        {
+                            bi64 = 1; layer64 = 3;
+                        }
+
+                        if (bi64 >= 0)
+                        {
+                            B13563Corr *c64 =
+                                &g_b13563[(unsigned)bi64];
+
+                            if (layer64 == 1)
+                            {
+                                ++g_b13564_first_calls[bi64];
+
+                                /*
+                                 * Any real first-layer call counts, regardless
+                                 * of the RA seen by the dispatcher.
+                                 */
+                                g_b13564_last_first_gen[bi64] =
+                                    c64->gen;
+                            }
+                            else if (layer64 == 2)
+                            {
+                                ++g_b13564_second_calls[bi64];
+
+                                if (
+                                    c64->gen != 0u
+                                    &&
+                                    c64->ready
+                                    &&
+                                    g_b13564_last_first_gen[bi64]
+                                        != c64->gen
+                                )
+                                {
+                                    ++g_b13564_bridge_attempt[bi64];
+
+                                    uint32_t hand_src =
+                                        bi64 == 0
+                                            ? 0x800E5FD4u
+                                            : 0x800EB134u;
+
+                                    uint32_t shape_packet = 0u;
+                                    uint32_t hand_tag =
+                                        cpu->read_word(
+                                            hand_src + 0x10u
+                                        );
+
+                                    g_b13564_last_hand_src =
+                                        hand_src;
+                                    g_b13564_last_dst =
+                                        dst_ot;
+                                    g_b13564_last_shape_packet =
+                                        0u;
+
+                                    if (
+                                        b13557_chain_has_hand_shape(
+                                            cpu,
+                                            hand_tag,
+                                            NULL,
+                                            &shape_packet
+                                        )
+                                    )
+                                    {
+                                        ++g_b13564_bridge_shape[bi64];
+                                        g_b13564_last_shape_packet =
+                                            shape_packet;
+
+                                        /*
+                                         * Same narrow sentinel repair already
+                                         * used by the normal HLE path.
+                                         */
+                                        fm_repair_ot_sentinel(
+                                            cpu,
+                                            hand_src
+                                        );
+
+                                        fm_repair_ot_sentinel(
+                                            cpu,
+                                            dst_ot
+                                        );
+
+                                        uint32_t bridge_result =
+                                            dst_ot;
+
+                                        int bridge_ok =
+                                            fm_try_c_gssortot(
+                                                cpu,
+                                                hand_src,
+                                                dst_ot,
+                                                &bridge_result
+                                            );
+
+                                        if (bridge_ok)
+                                        {
+                                            ++g_b13564_bridge_ok[bi64];
+                                            g_b13564_last_first_gen[bi64] =
+                                                c64->gen;
+                                            g_b13564_last_code = 1;
+                                        }
+                                        else
+                                        {
+                                            ++g_b13564_bridge_fail[bi64];
+                                            g_b13564_last_code =
+                                                g_b119_csort_last_code;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        g_b13564_last_code = -100;
+                                    }
+                                }
+                            }
+                            else if (layer64 == 3)
+                            {
+                                ++g_b13564_third_calls[bi64];
+                            }
+                        }
+                    }
+
                     {
                         B13562FrameLife *f62 =
                             b13562_by_src(src_ot);
@@ -17270,7 +17448,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.63-NEXT-SORT-CORRELATION (BASE B131)\n");
+            printf("BUILD B135.64-MISSING-LAYER1-BRIDGE (BASE B131)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -17699,8 +17877,7 @@ int main(void)
                             );
 
                             /*
-                             * B135.63 - latest hand generation -> next
-                             * first-layer GsSortOt correlation.
+                             * B135.64 - source-sort matrix + recovery bridge.
                              */
                             printf(
                                 "CARD c/d:%lu/%lu P849:%lu DMA:%lu\n",
@@ -17712,59 +17889,50 @@ int main(void)
 
                             for (unsigned bi = 0u; bi < 2u; ++bi)
                             {
-                                B13563Corr *c63 =
-                                    &g_b13563[bi];
-
                                 printf(
-                                    "B%u gen/ret/pend:%lu/%lu/%lu sort:%lu g/b:%lu/%lu\n",
+                                    "B%u gen:%lu L1/2/3:%lu/%lu/%lu last:%lu\n",
                                     bi,
-                                    (unsigned long)c63->gen,
-                                    (unsigned long)c63->ret_ok,
-                                    (unsigned long)c63->pending,
-                                    (unsigned long)c63->corr_sorts,
-                                    (unsigned long)c63->corr_good,
-                                    (unsigned long)c63->corr_bad
+                                    (unsigned long)g_b13563[bi].gen,
+                                    (unsigned long)g_b13564_first_calls[bi],
+                                    (unsigned long)g_b13564_second_calls[bi],
+                                    (unsigned long)g_b13564_third_calls[bi],
+                                    (unsigned long)g_b13564_last_first_gen[bi]
                                 );
 
                                 printf(
-                                    "   sh/r:%lu %lu/%lu dH:%lu noH:%lu\n",
-                                    (unsigned long)c63->sort_shape,
-                                    (unsigned long)c63->sort_reach_b,
-                                    (unsigned long)c63->sort_reach_p,
-                                    (unsigned long)c63->hand_delta,
-                                    (unsigned long)c63->sort_without_new
-                                );
-
-                                printf(
-                                    "   p/b:%05lX/%05lX ph/bw:%08lX/%08lX\n",
-                                    (unsigned long)(
-                                        c63->packet & 0xFFFFFu
-                                    ),
-                                    (unsigned long)(
-                                        c63->bucket & 0xFFFFFu
-                                    ),
-                                    (unsigned long)c63->sort_ph,
-                                    (unsigned long)c63->sort_bw
-                                );
-
-                                printf(
-                                    "   reuse:%lu %dx%d@%ld,%ld ra:%05lX a:%05lX\n",
-                                    (unsigned long)c63->reuse_before_sort,
-                                    (int)c63->reuse_w,
-                                    (int)c63->reuse_h,
-                                    (long)c63->reuse_x,
-                                    (long)c63->reuse_y,
-                                    (unsigned long)(
-                                        c63->reuse_ra & 0xFFFFFu
-                                    ),
-                                    (unsigned long)(
-                                        c63->sort_alloc & 0xFFFFFu
-                                    )
+                                    "   BR a/sh/ok/f:%lu/%lu/%lu/%lu ready:%lu\n",
+                                    (unsigned long)g_b13564_bridge_attempt[bi],
+                                    (unsigned long)g_b13564_bridge_shape[bi],
+                                    (unsigned long)g_b13564_bridge_ok[bi],
+                                    (unsigned long)g_b13564_bridge_fail[bi],
+                                    (unsigned long)g_b13563[bi].ready
                                 );
                             }
 
                             printf(
-                                "BASE:%06lX idx:%lu B135.63 next-sort\n",
+                                "LAST hs/dst/p:%05lX/%05lX/%05lX code:%ld\n",
+                                (unsigned long)(
+                                    g_b13564_last_hand_src & 0xFFFFFu
+                                ),
+                                (unsigned long)(
+                                    g_b13564_last_dst & 0xFFFFFu
+                                ),
+                                (unsigned long)(
+                                    g_b13564_last_shape_packet & 0xFFFFFu
+                                ),
+                                (long)g_b13564_last_code
+                            );
+
+                            printf(
+                                "SORT G ok/f:%lu/%lu C ok/f:%lu/%lu\n",
+                                (unsigned long)g_sort_native_ok,
+                                (unsigned long)g_sort_native_fail,
+                                (unsigned long)g_b119_csort_ok,
+                                (unsigned long)g_b119_csort_fallbacks
+                            );
+
+                            printf(
+                                "BASE:%06lX idx:%lu B135.64 layer1 bridge\n",
                                 (unsigned long)(
                                     cpu->read_word(0x8009C414u)
                                     & 0x1FFFFFu
