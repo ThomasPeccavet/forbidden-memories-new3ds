@@ -9,7 +9,8 @@ MAIN = (ROOT / "3ds/source/main.c").read_text(encoding="utf-8")
 
 class B13576PostDuelPresenterTests(unittest.TestCase):
     def _b13576_block(self) -> str:
-        start = MAIN.index("B135.76:")
+        marker = "B135.44 used fm_gpu_b127_perf_snapshot() here"
+        start = MAIN.index(marker)
         end = MAIN.index("if (display_changed)", start)
         return MAIN[start:end]
 
