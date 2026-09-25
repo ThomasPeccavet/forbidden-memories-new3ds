@@ -77,10 +77,16 @@ def run_checks(path: Path) -> list[str]:
     if build_markers and not any(re.match(r"B\d+", x) for x in build_markers):
         errors.append("no Bxx build marker found")
 
-    # Catch accidental merge markers immediately.
-    for marker in ("<<<<<<<", "=======", ">>>>>>>"):
-        if marker in text:
-            errors.append(f"merge-conflict marker present: {marker}")
+    # Catch actual Git conflict markers, not decorative comment rulers
+    # such as " * ========" used throughout the bring-up source.
+    conflict = re.search(
+        r"(?m)^[ \\t]*(<<<<<<<|=======|>>>>>>>)",
+        text,
+    )
+    if conflict:
+        errors.append(
+            f"merge-conflict marker present: {conflict.group(1)}"
+        )
 
     return errors
 
