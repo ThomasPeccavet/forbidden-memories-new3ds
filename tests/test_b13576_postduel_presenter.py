@@ -17,9 +17,9 @@ class B13576PostDuelPresenterTests(unittest.TestCase):
     def test_stale_gp1_path_reads_real_draw_environment(self) -> None:
         block = self._b13576_block()
         self.assertIn("fm_gpu_b100_env_get(", block)
-        self.assertNotRegex(
+        self.assertNotIn(
+            "\n                fm_gpu_b127_perf_snapshot(",
             block,
-            r"(?m)^\\s*fm_gpu_b127_perf_snapshot\\s*\\(",
         )
 
     def test_stale_gp1_path_tracks_both_x_and_y_pages(self) -> None:
