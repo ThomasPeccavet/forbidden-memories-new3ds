@@ -1827,6 +1827,13 @@ static uint32_t g_b13544_follow_drawbuf = 0u;
 static uint32_t g_b13544_last_draw_x = 0u;
 
 /*
+ * B135.76 - B135.44 only tracked the X page and, worse, queried
+ * fm_gpu_b127_perf_snapshot() for draw-area fields that function never fills.
+ * Keep the last real draw page selected from E3/E4 for compact diagnostics.
+ */
+static uint32_t g_b13576_last_draw_y = 0u;
+
+/*
  * B135.8 - one-loop pulse emitted when the VSync HLE actually RETURNS.
  * B135.7 looked at g_vsync_wait_active during presentation, but that flag is
  * cleared inside the HLE before main.c reaches the latch stage. Therefore
@@ -16935,9 +16942,17 @@ int main(void)
                 uint32_t p0_hash = 2166136261u;
                 uint32_t p320_hash = 2166136261u;
 
+                /*
+                 * B135.76: sample the CURRENT GP1 Y page.  B98 historically
+                 * sampled y=0 unconditionally, so a valid framebuffer at
+                 * y=256 looked empty after some post-duel transitions.
+                 */
+                unsigned sample_y = current_y;
+
                 for (unsigned py = 0u; py < 240u; py += 4u)
                 {
-                    const uint16_t *row0 = vram + py * 1024u;
+                    unsigned sy = (sample_y + py) & 511u;
+                    const uint16_t *row0 = vram + sy * 1024u;
                     const uint16_t *row320 = row0 + 320u;
 
                     for (unsigned px = 0u; px < 320u; px += 4u)
@@ -17122,7 +17137,12 @@ int main(void)
                                 ? 0u
                                 : 320u;
 
-                        latch_y = 0u;
+                        /*
+                         * B135.76: preserve the current GP1 Y page.  Forcing
+                         * y=0 here could present texture/atlas VRAM instead of
+                         * the completed framebuffer when display_y == 256.
+                         */
+                        latch_y = current_y;
                         need_latch = 1;
                         ++g_b102_fallback_latches;
                     }
@@ -17161,64 +17181,105 @@ int main(void)
                  * Do NOT alter guest GP1 state; this only chooses the host
                  * source used for the stable composite.
                  */
-                FMGpuDebugStats b13544_gpu;
-                memset(
-                    &b13544_gpu,
-                    0,
-                    sizeof(b13544_gpu)
+                /*
+                 * B135.76:
+                 *
+                 * B135.44 used fm_gpu_b127_perf_snapshot() here, but that
+                 * lightweight performance getter does NOT populate draw_x1,
+                 * draw_y1, draw_x2 or draw_y2.  Since the temporary structure
+                 * was memset to zero, the old code effectively selected X=0
+                 * on every stale-GP1 VSync.
+                 *
+                 * Read the real E3/E4 draw area instead.  This getter is also
+                 * lightweight (register state only; no VRAM scan).
+                 */
+                int draw_x1 = 0;
+                int draw_y1 = 0;
+                int draw_x2 = 0;
+                int draw_y2 = 0;
+
+                fm_gpu_b100_env_get(
+                    NULL, NULL,
+                    &draw_x1, &draw_y1,
+                    &draw_x2, &draw_y2,
+                    NULL, NULL, NULL, NULL,
+                    NULL, NULL, NULL, NULL
                 );
 
-                fm_gpu_b127_perf_snapshot(
-                    &b13544_gpu
-                );
-
-                unsigned draw_page_x =
-                    current_x;
+                unsigned draw_page_x = current_x;
+                unsigned draw_page_y = current_y;
 
                 if (
-                    b13544_gpu.draw_x1 >= 320
+                    draw_x1 >= 320
                     &&
-                    b13544_gpu.draw_x1 <= 639
+                    draw_x1 <= 639
                     &&
-                    b13544_gpu.draw_x2 >= 320
+                    draw_x2 >= 320
                     &&
-                    b13544_gpu.draw_x2 <= 639
+                    draw_x2 <= 639
                 )
                 {
-                    draw_page_x =
-                        320u;
+                    draw_page_x = 320u;
                 }
                 else if (
-                    b13544_gpu.draw_x1 >= 0
+                    draw_x1 >= 0
                     &&
-                    b13544_gpu.draw_x1 <= 319
+                    draw_x1 <= 319
                     &&
-                    b13544_gpu.draw_x2 >= 0
+                    draw_x2 >= 0
                     &&
-                    b13544_gpu.draw_x2 <= 319
+                    draw_x2 <= 319
                 )
                 {
-                    draw_page_x =
-                        0u;
+                    draw_page_x = 0u;
                 }
 
-                latch_x =
-                    draw_page_x;
+                /*
+                 * The game can also use the lower half of VRAM as a complete
+                 * 320x240 framebuffer.  Follow that draw page exactly like X.
+                 */
+                if (
+                    draw_y1 >= 256
+                    &&
+                    draw_y1 <= 511
+                    &&
+                    draw_y2 >= 256
+                    &&
+                    draw_y2 <= 511
+                )
+                {
+                    draw_page_y = 256u;
+                }
+                else if (
+                    draw_y1 >= 0
+                    &&
+                    draw_y1 <= 255
+                    &&
+                    draw_y2 >= 0
+                    &&
+                    draw_y2 <= 255
+                )
+                {
+                    draw_page_y = 0u;
+                }
 
-                latch_y =
-                    current_y;
-
-                need_latch =
-                    1;
+                latch_x = draw_page_x;
+                latch_y = draw_page_y;
+                need_latch = 1;
 
                 ++g_b13541_2d_vsync_latches;
 
-                if (draw_page_x != current_x)
+                if (
+                    draw_page_x != current_x
+                    ||
+                    draw_page_y != current_y
+                )
                 {
                     ++g_b13544_follow_drawbuf;
-                    g_b13544_last_draw_x =
-                        draw_page_x;
                 }
+
+                g_b13544_last_draw_x = draw_page_x;
+                g_b13576_last_draw_y = draw_page_y;
             }
 
             if (display_changed)
@@ -17627,9 +17688,9 @@ int main(void)
             fm_memory_dma_debug(&b130_dma);
 
 #if FM_PERF_PROFILE
-            printf("BUILD B135.75-INTERP-PROFILE (SAFE B135.71)\n");
+            printf("BUILD B135.76-POSTDUEL-PROFILE (SAFE B135.71)\n");
 #else
-            printf("BUILD B135.75-INTERP-CLEAN (SAFE B135.71)\n");
+            printf("BUILD B135.76-POSTDUEL-CLEAN (SAFE B135.71)\n");
 #endif
 
             printf(
@@ -17675,6 +17736,16 @@ int main(void)
                 (unsigned long long)gpu_debug.gp0_words,
                 (unsigned long)g_b86_present_count,
                 (unsigned long)g_b74_hit_menu_draw_cb
+            );
+
+            printf(
+                "PRES gp1:%u,%u latch:%u,%u draw:%lu,%lu\n",
+                fm_gpu_display_x(),
+                fm_gpu_display_y(),
+                g_b84_latch_x,
+                g_b84_latch_y,
+                (unsigned long)g_b13544_last_draw_x,
+                (unsigned long)g_b13576_last_draw_y
             );
 
             {
