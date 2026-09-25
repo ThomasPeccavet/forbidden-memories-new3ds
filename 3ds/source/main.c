@@ -2986,6 +2986,27 @@ static uint32_t g_b13551_hit_31948 = 0u;
 static uint32_t g_b13551_hit_319dc = 0u;
 
 /*
+ * B135.79 - compact dialogue/display-object pipeline probe.
+ * These are entry counters only; no VRAM scan and no per-pixel work.
+ */
+static uint32_t g_b13579_hit_408bc = 0u;
+static uint32_t g_b13579_hit_40f2c = 0u;
+static uint32_t g_b13579_hit_4110c = 0u;
+static uint32_t g_b13579_hit_4139c = 0u;
+
+static uint32_t g_b13579_prev_40b48 = 0u;
+static uint32_t g_b13579_prev_408bc = 0u;
+static uint32_t g_b13579_prev_40f2c = 0u;
+static uint32_t g_b13579_prev_4110c = 0u;
+static uint32_t g_b13579_prev_4139c = 0u;
+static uint32_t g_b13579_prev_41048 = 0u;
+
+static uint32_t g_b13579_prev_rect = 0u;
+static uint32_t g_b13579_prev_quad = 0u;
+static uint32_t g_b13579_prev_2c = 0u;
+static uint32_t g_b13579_prev_3a = 0u;
+
+/*
  * B135.53 - the active CC objects on the duel screen all point to
  * FUN_80016C20.  FUN_80017E94 is its constructor and FUN_800166A0
  * is the actual miniature-card renderer called by 80016C20.
@@ -4673,6 +4694,22 @@ static void fm_trace_dispatch(
 
         case 0x00032824u:
             ++g_b13551_hit_32824;
+            break;
+
+        case 0x000408BCu:
+            ++g_b13579_hit_408bc;
+            break;
+
+        case 0x00040F2Cu:
+            ++g_b13579_hit_40f2c;
+            break;
+
+        case 0x0004110Cu:
+            ++g_b13579_hit_4110c;
+            break;
+
+        case 0x0004139Cu:
+            ++g_b13579_hit_4139c;
             break;
 
         case 0x00041048u:
@@ -17762,9 +17799,9 @@ int main(void)
             fm_memory_dma_debug(&b130_dma);
 
 #if FM_PERF_PROFILE
-            printf("BUILD B135.78-CONSERVATIVE-PROFILE (SAFE B135.71)\n");
+            printf("BUILD B135.79-DIALOG-PIPE-PROFILE (SAFE B135.71)\n");
 #else
-            printf("BUILD B135.78-CONSERVATIVE-CLEAN (SAFE B135.71)\n");
+            printf("BUILD B135.79-DIALOG-PIPE-CLEAN (SAFE B135.71)\n");
 #endif
 
             printf(
@@ -17824,6 +17861,107 @@ int main(void)
                 (unsigned long)g_b13578_last_current_nz,
                 (unsigned long)g_b13578_last_draw_nz
             );
+
+            /*
+             * B135.79 - dialogue pipeline.
+             * Sample guest display-object lists only on this compact debug
+             * refresh.  The helper is bounded to 0x60 nodes/list.
+             */
+            {
+                static const uint32_t heads79[7] =
+                {
+                    0x800F11C0u, 0x800F11C2u,
+                    0x800F11C4u, 0x800F11C6u,
+                    0x800F11C8u, 0x800F11CAu,
+                    0x800F11CCu
+                };
+
+                uint32_t nodes79[7] = {0u,0u,0u,0u,0u,0u,0u};
+                uint32_t draw79[7] = {0u,0u,0u,0u,0u,0u,0u};
+                uint32_t total_nodes79 = 0u;
+                uint32_t total_draw79 = 0u;
+
+                for (unsigned i79 = 0u; i79 < 7u; ++i79)
+                {
+                    b13549_obj_list_probe(
+                        cpu,
+                        heads79[i79],
+                        NULL,
+                        &nodes79[i79],
+                        &draw79[i79],
+                        NULL,
+                        NULL
+                    );
+
+                    total_nodes79 += nodes79[i79];
+                    total_draw79 += draw79[i79];
+                }
+
+                printf(
+                    "OBJ79 n:%lu/%lu/%lu/%lu/%lu/%lu/%lu d:%lu/%lu\n",
+                    (unsigned long)nodes79[0],
+                    (unsigned long)nodes79[1],
+                    (unsigned long)nodes79[2],
+                    (unsigned long)nodes79[3],
+                    (unsigned long)nodes79[4],
+                    (unsigned long)nodes79[5],
+                    (unsigned long)nodes79[6],
+                    (unsigned long)total_nodes79,
+                    (unsigned long)total_draw79
+                );
+
+                uint32_t d40b48 =
+                    g_b72_hit_40b48 - g_b13579_prev_40b48;
+                uint32_t d408bc =
+                    g_b13579_hit_408bc - g_b13579_prev_408bc;
+                uint32_t d40f2c =
+                    g_b13579_hit_40f2c - g_b13579_prev_40f2c;
+                uint32_t d4110c =
+                    g_b13579_hit_4110c - g_b13579_prev_4110c;
+                uint32_t d4139c =
+                    g_b13579_hit_4139c - g_b13579_prev_4139c;
+                uint32_t d41048 =
+                    g_b13551_hit_41048 - g_b13579_prev_41048;
+
+                printf(
+                    "WALK79 b48/8bc/f2c/10c/39c/048:%lu/%lu/%lu/%lu/%lu/%lu\n",
+                    (unsigned long)d40b48,
+                    (unsigned long)d408bc,
+                    (unsigned long)d40f2c,
+                    (unsigned long)d4110c,
+                    (unsigned long)d4139c,
+                    (unsigned long)d41048
+                );
+
+                uint32_t drect79 =
+                    gpu_debug.b124_rect_hits - g_b13579_prev_rect;
+                uint32_t dquad79 =
+                    gpu_debug.b125_texquad_hits - g_b13579_prev_quad;
+                uint32_t d2c79 =
+                    gpu_debug.b126_seen_2c - g_b13579_prev_2c;
+                uint32_t d3a79 =
+                    gpu_debug.b126_seen_3a - g_b13579_prev_3a;
+
+                printf(
+                    "GP2D79 rect/q/2c/3a:%lu/%lu/%lu/%lu\n",
+                    (unsigned long)drect79,
+                    (unsigned long)dquad79,
+                    (unsigned long)d2c79,
+                    (unsigned long)d3a79
+                );
+
+                g_b13579_prev_40b48 = g_b72_hit_40b48;
+                g_b13579_prev_408bc = g_b13579_hit_408bc;
+                g_b13579_prev_40f2c = g_b13579_hit_40f2c;
+                g_b13579_prev_4110c = g_b13579_hit_4110c;
+                g_b13579_prev_4139c = g_b13579_hit_4139c;
+                g_b13579_prev_41048 = g_b13551_hit_41048;
+
+                g_b13579_prev_rect = gpu_debug.b124_rect_hits;
+                g_b13579_prev_quad = gpu_debug.b125_texquad_hits;
+                g_b13579_prev_2c = gpu_debug.b126_seen_2c;
+                g_b13579_prev_3a = gpu_debug.b126_seen_3a;
+            }
 
             {
                 uint32_t d_swap =
