@@ -50,7 +50,14 @@ typedef enum FMRuntimeStopReason
      * main.c must service it with the verified C HLE before the generated
      * implementation can run.
      */
-    FM_STOP_GSSORTOT_HLE
+    FM_STOP_GSSORTOT_HLE,
+
+    /*
+     * B135.73: a direct/nested generated call reached one of the two
+     * resident CPU->VRAM image upload wrappers.  main.c services the upload
+     * with the verified GP0(A0h) path before the incomplete DMA body runs.
+     */
+    FM_STOP_LOADIMAGE_HLE
 
 } FMRuntimeStopReason;
 
@@ -317,6 +324,30 @@ typedef struct FMB13572GateTrace
 
 void fm_runtime_b13572_gate_trace(
     FMB13572GateTrace *trace
+);
+
+/*
+ * B135.73 - card-art cache lookup observed at FUN_80024A9C.
+ *
+ * The resident renderer stores card metadata and illustration pixels in
+ * separate tables.  This trace records the exact cache/resource mapping
+ * without changing guest memory.
+ */
+typedef struct FMB13573CardTrace
+{
+    uint32_t lookup_calls;
+    uint32_t raw_slot;
+    uint32_t raw_resource;
+    uint32_t resolved_slot;
+    uint32_t resolved_resource;
+    uint32_t card_id;
+    uint32_t image_index;
+    uint32_t source;
+    uint32_t source_first;
+} FMB13573CardTrace;
+
+void fm_runtime_b13573_card_trace(
+    FMB13573CardTrace *trace
 );
 
 

@@ -175,6 +175,7 @@ static uint32_t g_b13571_last_gate_after = 0u;
  * hooks see direct ARM-to-ARM calls that main.c's top-level dispatcher misses.
  */
 static FMB13572GateTrace g_b13572_gate_trace;
+static FMB13573CardTrace g_b13573_card_trace;
 
 
 static void b13572_trace_generated_entry(
@@ -336,6 +337,58 @@ static void b13572_trace_post_call(
         default:
             break;
     }
+}
+
+
+static void b13573_trace_card_lookup(
+    CPUState *cpu
+)
+{
+    if (!cpu)
+    {
+        return;
+    }
+
+    uint32_t raw_slot = cpu->gpr[4];
+    uint32_t raw_resource = cpu->gpr[5];
+    uint32_t slot = raw_slot;
+    uint32_t resource = raw_resource;
+
+    if ((slot & 0x80u) != 0u)
+    {
+        slot = (slot & 0x7Fu) + 0x0Fu;
+    }
+
+    if (raw_slot > 0x0Eu && resource < 0x28u)
+    {
+        resource += 0x28u;
+    }
+
+    if ((resource & 0x80u) != 0u)
+    {
+        resource = (resource & 0x7Fu) + 0x28u;
+    }
+
+    uint32_t entry =
+        0x801A7E20u
+        + resource * 12u;
+
+    uint32_t image_index =
+        cpu->read_byte(entry + 3u);
+
+    uint32_t source =
+        0x8018C2D8u
+        + image_index * 0x580u;
+
+    ++g_b13573_card_trace.lookup_calls;
+    g_b13573_card_trace.raw_slot = raw_slot;
+    g_b13573_card_trace.raw_resource = raw_resource;
+    g_b13573_card_trace.resolved_slot = slot;
+    g_b13573_card_trace.resolved_resource = resource;
+    g_b13573_card_trace.card_id = cpu->read_half(entry);
+    g_b13573_card_trace.image_index = image_index;
+    g_b13573_card_trace.source = source;
+    g_b13573_card_trace.source_first = cpu->read_word(source);
 }
 
 
@@ -1040,6 +1093,9 @@ const char *fm_runtime_stop_name(
         case FM_STOP_GSSORTOT_HLE:
             return "GSSORTOT HLE";
 
+        case FM_STOP_LOADIMAGE_HLE:
+            return "LOADIMAGE HLE";
+
         default:
             return "NONE";
     }
@@ -1447,6 +1503,33 @@ void psx_check_interrupts_dispatch_entry(
         cpu,
         phys
     );
+
+    if (phys == 0x00024A9Cu)
+    {
+        b13573_trace_card_lookup(cpu);
+    }
+
+    /*
+     * B135.73 - both wrappers are synchronous from the caller's point of
+     * view.  Escape before their generated DMA bodies run so main.c can
+     * perform the exact CPU->VRAM copy through the working GP0(A0h) path.
+     */
+    if (
+        cpu
+        &&
+        (
+            phys == 0x0007FF10u
+            || phys == 0x00082380u
+        )
+    )
+    {
+        fm_probe_stop(
+            FM_STOP_LOADIMAGE_HLE,
+            resume_pc
+        );
+
+        return;
+    }
 
     g_b13565_last_entry =
         resume_pc;
@@ -1992,6 +2075,17 @@ void fm_runtime_b13572_gate_trace(
     if (trace)
     {
         *trace = g_b13572_gate_trace;
+    }
+}
+
+
+void fm_runtime_b13573_card_trace(
+    FMB13573CardTrace *trace
+)
+{
+    if (trace)
+    {
+        *trace = g_b13573_card_trace;
     }
 }
 

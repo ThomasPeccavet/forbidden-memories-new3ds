@@ -75,7 +75,7 @@ class B13572TraceTests(unittest.TestCase):
 
     def test_build_label_identifies_safe_trace(self) -> None:
         self.assertIn(
-            "BUILD B135.72-TRACE-4B8 (SAFE B135.71)",
+            "BUILD B135.73-CARD-LI (SAFE B135.71)",
             self.main,
         )
         self.assertIn("T72 MAP:%03lX expected:7FF", self.main)

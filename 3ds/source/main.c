@@ -8969,6 +8969,18 @@ static uint32_t g_loadimg_hle_src = 0u;
 static uint32_t g_loadimg_hle_pixels = 0u;
 static uint32_t g_loadimg_hle_first = 0u;
 
+/*
+ * B135.73 - route both resident image-upload entry points through the same
+ * verified GP0(A0h) implementation.  8007FF10 is the path used by the
+ * miniature-card cache; 80082380 is LoadImage2 used elsewhere by the game.
+ */
+static uint32_t g_b13573_li_7ff10 = 0u;
+static uint32_t g_b13573_li_82380 = 0u;
+static uint32_t g_b13573_li_nested = 0u;
+static uint32_t g_b13573_li_fail = 0u;
+static uint32_t g_b13573_li_last_entry = 0u;
+static uint32_t g_b13573_li_last_ra = 0u;
+
 
 /*
  * ============================================================
@@ -14560,19 +14572,35 @@ int main(void)
 
                 /*
                  * ============================================
-                 * B25 - GPU LoadImage HLE
+                 * B25/B135.73 - GPU LoadImage HLE
                  *
-                 * FUN_80082380(RECT *rect, uint16_t *pixels)
+                 * FUN_8007FF10 / FUN_80082380
+                 *     (RECT *rect, uint16_t *pixels)
                  *
-                 * C'est le point commun utilise par le streaming du jeu
-                 * pour envoyer palettes, textures et blocs d'image vers
-                 * la VRAM PS1. On effectue le meme transfert via GP0 A0h
-                 * puis on retourne immediatement comme la routine native
-                 * apres DMA termine.
+                 * 8007FF10 is the synchronous path used by the card-art
+                 * cache.  80082380 is LoadImage2.  Both ultimately perform
+                 * the same CPU->VRAM upload; service them through the exact
+                 * GP0 A0h implementation instead of the incomplete DMA2
+                 * bring-up path.
                  * ============================================
                  */
-                if (phys == 0x00082380u)
+                if (
+                    phys == 0x0007FF10u
+                    || phys == 0x00082380u
+                )
                 {
+                    g_b13573_li_last_entry = phys;
+                    g_b13573_li_last_ra = cpu->gpr[31];
+
+                    if (phys == 0x0007FF10u)
+                    {
+                        ++g_b13573_li_7ff10;
+                    }
+                    else
+                    {
+                        ++g_b13573_li_82380;
+                    }
+
                     if (fm_hle_gpu_load_image(cpu))
                     {
                         cpu->gpr[2] = 0u;
@@ -14581,6 +14609,15 @@ int main(void)
                         static_miss = 0;
                         continue;
                     }
+
+                    ++g_b13573_li_fail;
+
+                    /* Invalid guest arguments cannot safely enter DMA2. */
+                    cpu->gpr[2] = 0xFFFFFFFFu;
+                    cpu->pc = cpu->gpr[31];
+                    cpu->gpr[0] = 0u;
+                    static_miss = 0;
+                    continue;
                 }
 
 
@@ -16349,6 +16386,54 @@ int main(void)
 
                 /*
                  * ============================================
+                 * B135.73 - nested generated LoadImage HLE
+                 * ============================================
+                 *
+                 * Direct ARM->ARM calls do not revisit the top-level HLE
+                 * switch.  The runtime entry hook escapes before the guest
+                 * DMA body, preserving a0/a1 and ra for this exact upload.
+                 */
+                if (
+                    probe.reason
+                    == FM_STOP_LOADIMAGE_HLE
+                )
+                {
+                    uint32_t entry73 =
+                        probe.detail & 0x1FFFFFFFu;
+
+                    ++g_b13573_li_nested;
+                    g_b13573_li_last_entry = entry73;
+                    g_b13573_li_last_ra = cpu->gpr[31];
+
+                    if (entry73 == 0x0007FF10u)
+                    {
+                        ++g_b13573_li_7ff10;
+                    }
+                    else
+                    {
+                        ++g_b13573_li_82380;
+                    }
+
+                    if (fm_hle_gpu_load_image(cpu))
+                    {
+                        cpu->gpr[2] = 0u;
+                    }
+                    else
+                    {
+                        ++g_b13573_li_fail;
+                        cpu->gpr[2] = 0xFFFFFFFFu;
+                    }
+
+                    cpu->pc = cpu->gpr[31];
+                    cpu->gpr[0] = 0u;
+
+                    static_miss = 0;
+                    continue;
+                }
+
+
+                /*
+                 * ============================================
                  * B135.66 - nested generated GsSortOt HLE
                  * ============================================
                  *
@@ -17618,7 +17703,7 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.72-TRACE-4B8 (SAFE B135.71)\n");
+            printf("BUILD B135.73-CARD-LI (SAFE B135.71)\n");
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -18059,6 +18144,7 @@ int main(void)
                             uint32_t ga71 = 0u;
 
                             FMB13572GateTrace trace72 = {0};
+                            FMB13573CardTrace trace73 = {0};
 
                             static uint32_t trace72_entry_mask = 0u;
                             static int trace72_entry_mask_ready = 0;
@@ -18105,6 +18191,10 @@ int main(void)
                                 &trace72
                             );
 
+                            fm_runtime_b13573_card_trace(
+                                &trace73
+                            );
+
                             fm_runtime_b13571_gate(
                                 &h71,
                                 &g0_71,
@@ -18118,11 +18208,28 @@ int main(void)
                             );
 
                             printf(
-                                "CARD c/d:%lu/%lu P849:%lu DMA:%lu\n",
-                                (unsigned long)g_b13553_hit_16c20,
-                                (unsigned long)g_b13553_hit_166a0,
-                                (unsigned long)g_b13556_hand_84978,
-                                (unsigned long)b130_dma.b13554_hand_total_hits
+                                "T73 LI 7F/823/N/F:%lu/%lu/%lu/%lu\n",
+                                (unsigned long)g_b13573_li_7ff10,
+                                (unsigned long)g_b13573_li_82380,
+                                (unsigned long)g_b13573_li_nested,
+                                (unsigned long)g_b13573_li_fail
+                            );
+
+                            printf(
+                                "T73 C n:%lu s/r:%lu/%lu id/i:%lu/%lu\n",
+                                (unsigned long)trace73.lookup_calls,
+                                (unsigned long)trace73.resolved_slot,
+                                (unsigned long)trace73.resolved_resource,
+                                (unsigned long)trace73.card_id,
+                                (unsigned long)trace73.image_index
+                            );
+
+                            printf(
+                                "T73 V src:%05lX p:%08lX e/ra:%05lX/%05lX\n",
+                                (unsigned long)(trace73.source & 0xFFFFFu),
+                                (unsigned long)trace73.source_first,
+                                (unsigned long)(g_b13573_li_last_entry & 0xFFFFFu),
+                                (unsigned long)(g_b13573_li_last_ra & 0xFFFFFu)
                             );
 
                             printf(
