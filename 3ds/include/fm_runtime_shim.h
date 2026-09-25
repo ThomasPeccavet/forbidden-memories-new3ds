@@ -199,6 +199,24 @@ void fm_runtime_b13565_entries(
     uint32_t *last_entry
 );
 
+/* B135.81: read-only snapshot at generated function entry, including nested calls. */
+typedef struct FMDialogueEntryTrace
+{
+    uint32_t walker_calls;
+    uint32_t renderer_calls;
+    uint32_t walker_with_c2;
+    uint32_t walker_last_ra;
+    uint32_t renderer_last_ra;
+    uint32_t first_c2_ptr;
+    uint32_t last_c2_ptr;
+    uint32_t last_c2_head;
+    uint32_t last_object_flags;
+    uint32_t last_object_callback;
+    uint32_t last_overlay_word;
+} FMDialogueEntryTrace;
+
+void fm_runtime_dialogue_entry_trace(FMDialogueEntryTrace *out);
+
 void fm_runtime_b13567_pipeline(
     uint32_t *fin_entries,
     uint32_t *fin_b8,

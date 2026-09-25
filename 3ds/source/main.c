@@ -17812,9 +17812,9 @@ int main(void)
             fm_memory_dma_debug(&b130_dma);
 
 #if FM_PERF_PROFILE
-            printf("BUILD B135.80-C2-INDIRECT-PROFILE (SAFE B135.71)\n");
+            printf("BUILD B135.81-C2-ENTRY-PROFILE (SAFE B135.71)\n");
 #else
-            printf("BUILD B135.80-C2-INDIRECT-CLEAN (SAFE B135.71)\n");
+            printf("BUILD B135.81-C2-ENTRY-CLEAN (SAFE B135.71)\n");
 #endif
 
             printf(
@@ -19470,6 +19470,53 @@ int main(void)
             );
 
             }
+
+            /* Keep the decisive snapshot on the visible first rows even if
+             * older debug lines scroll the console during the same refresh. */
+#if FM_PERF_PROFILE
+            {
+                FMDialogueEntryTrace trace81 = {0};
+                uint32_t nodes81 = 0u;
+                fm_runtime_dialogue_entry_trace(&trace81);
+                if (cpu)
+                    b13549_obj_list_probe(cpu, 0x800F11C2u,
+                                            NULL, &nodes81, NULL, NULL, NULL);
+                printf("\x1b[H\x1b[2K B135.81 C2 / OVERLAY DIAG\n");
+                printf("\x1b[2K PC:%08lX RA:%08lX C2:%lu\n",
+                       (unsigned long)(cpu ? cpu->pc : 0u),
+                       (unsigned long)(cpu ? cpu->gpr[31] : 0u),
+                       (unsigned long)nodes81);
+                printf("\x1b[2K head at walker:%ld\n",
+                       (long)(int32_t)trace81.last_c2_head);
+                printf("\x1b[2K C2 now:%08lX first:%08lX\n",
+                       (unsigned long)(cpu ? cpu->read_word(0x800923E0u) : 0u),
+                       (unsigned long)trace81.first_c2_ptr);
+                printf("\x1b[2K C2 at walker:%08lX\n",
+                       (unsigned long)trace81.last_c2_ptr);
+                printf("\x1b[2K compiled W/R:%d/%d outer:%lu/%lu\n",
+                       psx_game_is_function_entry(0x80041674u),
+                       psx_game_is_function_entry(0x800408BCu),
+                       (unsigned long)g_b13580_hit_41674,
+                       (unsigned long)g_b13579_hit_408bc);
+                printf("\x1b[2K nested W/R/C2:%lu/%lu/%lu\n",
+                       (unsigned long)trace81.walker_calls,
+                       (unsigned long)trace81.renderer_calls,
+                       (unsigned long)trace81.walker_with_c2);
+                printf("\x1b[2K Wra/Rra:%08lX/%08lX\n",
+                       (unsigned long)trace81.walker_last_ra,
+                       (unsigned long)trace81.renderer_last_ra);
+                printf("\x1b[2K callback:%08lX flags:%02lX\n",
+                       (unsigned long)trace81.last_object_callback,
+                       (unsigned long)trace81.last_object_flags);
+                printf("\x1b[2K OV atW/now:%08lX/%08lX\n",
+                       (unsigned long)trace81.last_overlay_word,
+                       (unsigned long)(cpu ? cpu->read_word(0x80180000u) : 0u));
+                printf("\x1b[2K GP0:%llu rect/quad:%lu/%lu\n",
+                       (unsigned long long)gpu_debug.gp0_words,
+                       (unsigned long)gpu_debug.b124_rect_hits,
+                       (unsigned long)gpu_debug.b125_texquad_hits);
+            }
+#endif
 
             /*
              * Reset des compteurs de mesure de rendu sans

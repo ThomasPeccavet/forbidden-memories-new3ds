@@ -45,6 +45,7 @@ static uint32_t g_b13565_e_12d60 = 0u;
 static uint32_t g_b13565_e_85d98 = 0u;
 static uint32_t g_b13565_e_85d08 = 0u;
 static uint32_t g_b13565_last_entry = 0u;
+static FMDialogueEntryTrace g_dialogue_entry_trace;
 
 /*
  * B135.67 - locate the hand layer across the REAL frame pipeline.
@@ -1283,6 +1284,34 @@ void psx_check_interrupts_dispatch_entry(
 
         case 0x00041674u:
             ++g_b13565_e_41674;
+            ++g_dialogue_entry_trace.walker_calls;
+            if (cpu)
+            {
+                uint32_t ptr = cpu->read_word(0x800923E0u);
+                int32_t head = (int16_t)cpu->read_half(0x800F11C2u);
+                if (g_dialogue_entry_trace.walker_calls == 1u)
+                    g_dialogue_entry_trace.first_c2_ptr = ptr;
+                g_dialogue_entry_trace.last_c2_ptr = ptr;
+                g_dialogue_entry_trace.last_c2_head = (uint32_t)head;
+                g_dialogue_entry_trace.walker_last_ra = cpu->gpr[31];
+                g_dialogue_entry_trace.last_overlay_word =
+                    cpu->read_word(0x80180000u);
+                if (head >= 0 && head < 0x60)
+                {
+                    uint32_t obj = (uint32_t)head * 0x70u;
+                    ++g_dialogue_entry_trace.walker_with_c2;
+                    g_dialogue_entry_trace.last_object_flags =
+                        cpu->read_byte(0x800F1218u + obj);
+                    g_dialogue_entry_trace.last_object_callback =
+                        cpu->read_word(0x800F1234u + obj);
+                }
+            }
+            break;
+
+        case 0x000408BCu:
+            ++g_dialogue_entry_trace.renderer_calls;
+            if (cpu)
+                g_dialogue_entry_trace.renderer_last_ra = cpu->gpr[31];
             break;
 
         case 0x00012D60u:
@@ -1650,6 +1679,11 @@ void fm_runtime_b13565_entries(
     if (e85d98) *e85d98 = g_b13565_e_85d98;
     if (e85d08) *e85d08 = g_b13565_e_85d08;
     if (last_entry) *last_entry = g_b13565_last_entry;
+}
+
+void fm_runtime_dialogue_entry_trace(FMDialogueEntryTrace *out)
+{
+    if (out) *out = g_dialogue_entry_trace;
 }
 
 
