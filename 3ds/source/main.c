@@ -1827,6 +1827,12 @@ static uint32_t g_b13544_follow_drawbuf = 0u;
 static uint32_t g_b13544_last_draw_x = 0u;
 
 /*
+ * B135.77 - count non-DIRECT 2D latches where the real E3/E4 draw page
+ * overrides the older B102/B103 density heuristic.
+ */
+static uint32_t g_b13577_drawpage_priority = 0u;
+
+/*
  * B135.76 - B135.44 only tracked the X page and, worse, queried
  * fm_gpu_b127_perf_snapshot() for draw-area fields that function never fills.
  * Keep the last real draw page selected from E3/E4 for compact diagnostics.
@@ -16989,6 +16995,91 @@ int main(void)
             int b104_decode24 = 0;
 
             /*
+             * B135.77:
+             *
+             * Resolve the real 2D draw page ONCE before choosing a presenter
+             * path. B135.76 only consulted E3/E4 in the stale-GP1 VSync path;
+             * when GP1 changed, B102/B103 ran first and could still choose a
+             * dense texture/atlas page instead of the framebuffer being drawn.
+             */
+            int b13577_draw_x1 = 0;
+            int b13577_draw_y1 = 0;
+            int b13577_draw_x2 = 0;
+            int b13577_draw_y2 = 0;
+
+            unsigned b13577_draw_page_x = current_x;
+            unsigned b13577_draw_page_y = current_y;
+            int b13577_draw_page_valid_x = 0;
+            int b13577_draw_page_valid_y = 0;
+
+            fm_gpu_b100_env_get(
+                NULL, NULL,
+                &b13577_draw_x1, &b13577_draw_y1,
+                &b13577_draw_x2, &b13577_draw_y2,
+                NULL, NULL, NULL, NULL,
+                NULL, NULL, NULL, NULL
+            );
+
+            if (
+                b13577_draw_x1 >= 320
+                &&
+                b13577_draw_x1 <= 639
+                &&
+                b13577_draw_x2 >= 320
+                &&
+                b13577_draw_x2 <= 639
+            )
+            {
+                b13577_draw_page_x = 320u;
+                b13577_draw_page_valid_x = 1;
+            }
+            else if (
+                b13577_draw_x1 >= 0
+                &&
+                b13577_draw_x1 <= 319
+                &&
+                b13577_draw_x2 >= 0
+                &&
+                b13577_draw_x2 <= 319
+            )
+            {
+                b13577_draw_page_x = 0u;
+                b13577_draw_page_valid_x = 1;
+            }
+
+            if (
+                b13577_draw_y1 >= 256
+                &&
+                b13577_draw_y1 <= 511
+                &&
+                b13577_draw_y2 >= 256
+                &&
+                b13577_draw_y2 <= 511
+            )
+            {
+                b13577_draw_page_y = 256u;
+                b13577_draw_page_valid_y = 1;
+            }
+            else if (
+                b13577_draw_y1 >= 0
+                &&
+                b13577_draw_y1 <= 255
+                &&
+                b13577_draw_y2 >= 0
+                &&
+                b13577_draw_y2 <= 255
+            )
+            {
+                b13577_draw_page_y = 0u;
+                b13577_draw_page_valid_y = 1;
+            }
+
+            int b13577_draw_page_valid =
+                b13577_draw_page_valid_x
+                &&
+                b13577_draw_page_valid_y;
+
+            /*
              * B104 : GP1(08) bit4 = affichage 24-bit.
              * Dans ce mode le framebuffer est un flux RGB888 compact
              * de 3 octets/pixel dans la VRAM, pas du BGR555.
@@ -17053,6 +17144,46 @@ int main(void)
                     {
                         ++g_b1357_display_latches;
                     }
+                }
+            }
+            else if (
+                b13577_draw_page_valid
+                &&
+                (
+                    display_changed
+                    ||
+                    (
+                        g_b1358_vsync_completed
+                        &&
+                        b104_gp0 != g_b1357_last_latched_gp0
+                    )
+                )
+            )
+            {
+                /*
+                 * B135.77: the guest's draw environment is a stronger signal
+                 * than "which 320-wide VRAM region contains more nonzero
+                 * pixels". Texture atlases are often denser than the actual
+                 * framebuffer, which is exactly what produced latch=320 while
+                 * GP1=0 and draw=0 in the first-villager dialogue.
+                 */
+                latch_x = b13577_draw_page_x;
+                latch_y = b13577_draw_page_y;
+                need_latch = 1;
+
+                ++g_b13577_drawpage_priority;
+                ++g_b13541_2d_vsync_latches;
+
+                g_b13544_last_draw_x = b13577_draw_page_x;
+                g_b13576_last_draw_y = b13577_draw_page_y;
+
+                if (
+                    latch_x != current_x
+                    ||
+                    latch_y != current_y
+                )
+                {
+                    ++g_b13544_follow_drawbuf;
                 }
             }
             else if (display_changed)
@@ -17182,104 +17313,20 @@ int main(void)
                  * source used for the stable composite.
                  */
                 /*
-                 * B135.76:
+                 * B135.77 fallback:
                  *
-                 * B135.44 used fm_gpu_b127_perf_snapshot() here, but that
-                 * lightweight performance getter does NOT populate draw_x1,
-                 * draw_y1, draw_x2 or draw_y2.  Since the temporary structure
-                 * was memset to zero, the old code effectively selected X=0
-                 * on every stale-GP1 VSync.
-                 *
-                 * Read the real E3/E4 draw area instead.  This getter is also
-                 * lightweight (register state only; no VRAM scan).
+                 * A canonical E3/E4 page was already handled above. If the
+                 * draw area spans a non-canonical region, keep GP1 as the
+                 * conservative source rather than guessing from VRAM density.
                  */
-                int draw_x1 = 0;
-                int draw_y1 = 0;
-                int draw_x2 = 0;
-                int draw_y2 = 0;
-
-                fm_gpu_b100_env_get(
-                    NULL, NULL,
-                    &draw_x1, &draw_y1,
-                    &draw_x2, &draw_y2,
-                    NULL, NULL, NULL, NULL,
-                    NULL, NULL, NULL, NULL
-                );
-
-                unsigned draw_page_x = current_x;
-                unsigned draw_page_y = current_y;
-
-                if (
-                    draw_x1 >= 320
-                    &&
-                    draw_x1 <= 639
-                    &&
-                    draw_x2 >= 320
-                    &&
-                    draw_x2 <= 639
-                )
-                {
-                    draw_page_x = 320u;
-                }
-                else if (
-                    draw_x1 >= 0
-                    &&
-                    draw_x1 <= 319
-                    &&
-                    draw_x2 >= 0
-                    &&
-                    draw_x2 <= 319
-                )
-                {
-                    draw_page_x = 0u;
-                }
-
-                /*
-                 * The game can also use the lower half of VRAM as a complete
-                 * 320x240 framebuffer.  Follow that draw page exactly like X.
-                 */
-                if (
-                    draw_y1 >= 256
-                    &&
-                    draw_y1 <= 511
-                    &&
-                    draw_y2 >= 256
-                    &&
-                    draw_y2 <= 511
-                )
-                {
-                    draw_page_y = 256u;
-                }
-                else if (
-                    draw_y1 >= 0
-                    &&
-                    draw_y1 <= 255
-                    &&
-                    draw_y2 >= 0
-                    &&
-                    draw_y2 <= 255
-                )
-                {
-                    draw_page_y = 0u;
-                }
-
-                latch_x = draw_page_x;
-                latch_y = draw_page_y;
+                latch_x = current_x;
+                latch_y = current_y;
                 need_latch = 1;
 
                 ++g_b13541_2d_vsync_latches;
 
-                if (
-                    draw_page_x != current_x
-                    ||
-                    draw_page_y != current_y
-                )
-                {
-                    ++g_b13544_follow_drawbuf;
-                }
-
-                g_b13544_last_draw_x = draw_page_x;
-                g_b13576_last_draw_y = draw_page_y;
+                g_b13544_last_draw_x = current_x;
+                g_b13576_last_draw_y = current_y;
             }
 
             if (display_changed)
@@ -17688,9 +17735,9 @@ int main(void)
             fm_memory_dma_debug(&b130_dma);
 
 #if FM_PERF_PROFILE
-            printf("BUILD B135.76-POSTDUEL-PROFILE (SAFE B135.71)\n");
+            printf("BUILD B135.77-DRAWPAGE-PROFILE (SAFE B135.71)\n");
 #else
-            printf("BUILD B135.76-POSTDUEL-CLEAN (SAFE B135.71)\n");
+            printf("BUILD B135.77-DRAWPAGE-CLEAN (SAFE B135.71)\n");
 #endif
 
             printf(
@@ -17739,13 +17786,14 @@ int main(void)
             );
 
             printf(
-                "PRES gp1:%u,%u latch:%u,%u draw:%lu,%lu\n",
+                "PRES gp1:%u,%u latch:%u,%u draw:%lu,%lu pri:%lu\n",
                 fm_gpu_display_x(),
                 fm_gpu_display_y(),
                 g_b84_latch_x,
                 g_b84_latch_y,
                 (unsigned long)g_b13544_last_draw_x,
-                (unsigned long)g_b13576_last_draw_y
+                (unsigned long)g_b13576_last_draw_y,
+                (unsigned long)g_b13577_drawpage_priority
             );
 
             {
