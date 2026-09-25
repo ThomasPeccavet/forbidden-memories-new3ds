@@ -1834,6 +1834,66 @@ static uint32_t g_b13544_last_draw_x = 0u;
 static uint32_t g_b13576_last_draw_y = 0u;
 
 /*
+ * B135.78 - conservative stale-GP1 arbitration.
+ * GP1 remains authoritative on real display changes. Only a stale display
+ * may temporarily follow the opposite draw page, and only when sampled VRAM
+ * proves that page changed while the displayed page stayed unchanged.
+ */
+static uint32_t g_b13578_page_hash[4] = {0u,0u,0u,0u};
+static uint32_t g_b13578_follow_draw = 0u;
+static uint32_t g_b13578_keep_gp1 = 0u;
+static uint32_t g_b13578_last_pick = 0u; /* 0=GP1, 1=draw */
+static uint32_t g_b13578_last_current_nz = 0u;
+static uint32_t g_b13578_last_draw_nz = 0u;
+
+static unsigned b13578_page_index(unsigned x, unsigned y)
+{
+    return (y >= 256u ? 2u : 0u) + (x >= 320u ? 1u : 0u);
+}
+
+static void b13578_sample_page(
+    const uint16_t *vram,
+    unsigned x,
+    unsigned y,
+    uint32_t *hash_out,
+    uint32_t *nz_out
+)
+{
+    uint32_t hash = 2166136261u;
+    uint32_t nz = 0u;
+
+    /*
+     * 1/8 x 1/8 sample: only 1200 texels for a 320x240 page.
+     * This runs only at a completed stale-GP1 VSync.
+     */
+    for (unsigned py = 0u; py < 240u; py += 8u)
+    {
+        const uint16_t *row =
+            vram
+            +
+            ((y + py) & 511u) * 1024u
+            +
+            x;
+
+        for (unsigned px = 0u; px < 320u; px += 8u)
+        {
+            uint16_t value = row[px];
+
+            if ((value & 0x7FFFu) != 0u)
+            {
+                ++nz;
+            }
+
+            hash ^= (uint32_t)value;
+            hash *= 16777619u;
+        }
+    }
+
+    if (hash_out) *hash_out = hash;
+    if (nz_out) *nz_out = nz;
+}
+
+/*
  * B135.8 - one-loop pulse emitted when the VSync HLE actually RETURNS.
  * B135.7 looked at g_vsync_wait_active during presentation, but that flag is
  * cleared inside the HLE before main.c reaches the latch stage. Therefore
@@ -17057,105 +17117,42 @@ int main(void)
             }
             else if (display_changed)
             {
-                uint32_t current_nz =
-                    current_x == 320u
-                        ? p320_nz
-                        : p0_nz;
+                /*
+                 * B135.78:
+                 * A real GP1(05) display change is authoritative. Do not let
+                 * B102/B103 replace it with a denser texture/atlas page.
+                 */
+                latch_x = current_x;
+                latch_y = current_y;
+                need_latch = 1;
+                b103_merge = 0;
 
-                uint32_t other_nz =
-                    current_x == 320u
-                        ? p0_nz
-                        : p320_nz;
+                ++g_b102_front_latches;
+                ++g_b103_plain_count;
+                ++g_b13578_keep_gp1;
+                g_b13578_last_pick = 0u;
 
                 /*
-                 * B103 :
-                 * si une page est beaucoup plus dense que l'autre,
-                 * le jeu se retrouve actuellement separe en deux
-                 * "couches" dans notre VRAM :
-                 *
-                 *   dense  = decor / fond
-                 *   sparse = UI / texte / curseur
-                 *
-                 * On reconstruit temporairement l'image complete.
-                 *
-                 * Le seuil 3/4 evite le merge quand les deux pages
-                 * sont de vrais framebuffers complets.
+                 * Seed the sampled hash for the newly displayed page so the
+                 * next stale-VSync decision compares against a real baseline.
                  */
-                if (
-                    p0_nz >= 512u
-                    &&
-                    p320_nz >= 64u
-                    &&
-                    (
-                        p0_nz * 4u < p320_nz * 3u
-                        ||
-                        p320_nz * 4u < p0_nz * 3u
-                    )
-                )
                 {
-                    if (p0_nz > p320_nz)
-                    {
-                        b103_base_x = 0u;
-                        b103_overlay_x = 320u;
-                        g_b103_last_base_nz = p0_nz;
-                        g_b103_last_overlay_nz = p320_nz;
-                    }
-                    else
-                    {
-                        b103_base_x = 320u;
-                        b103_overlay_x = 0u;
-                        g_b103_last_base_nz = p320_nz;
-                        g_b103_last_overlay_nz = p0_nz;
-                    }
+                    uint32_t h = 0u;
+                    uint32_t nz = 0u;
+                    unsigned idx =
+                        b13578_page_index(current_x, current_y);
 
-                    b103_merge = 1;
-                    latch_x = b103_base_x;
-                    latch_y = current_y;
-                    need_latch = 1;
+                    b13578_sample_page(
+                        vram,
+                        current_x,
+                        current_y,
+                        &h,
+                        &nz
+                    );
 
-                    g_b103_last_base_x = b103_base_x;
-                    g_b103_last_overlay_x = b103_overlay_x;
-                    ++g_b103_merge_count;
-                }
-                else
-                {
-                    /*
-                     * Vrai double-buffer classique : presenter GP1.
-                     */
-                    latch_x = current_x;
-                    latch_y = current_y;
-
-                    if (current_nz > 64u)
-                    {
-                        need_latch = 1;
-                        ++g_b102_front_latches;
-                    }
-                    else if (other_nz >= 512u)
-                    {
-                        latch_x =
-                            current_x == 320u
-                                ? 0u
-                                : 320u;
-
-                        /*
-                         * B135.76: preserve the current GP1 Y page.  Forcing
-                         * y=0 here could present texture/atlas VRAM instead of
-                         * the completed framebuffer when display_y == 256.
-                         */
-                        latch_y = current_y;
-                        need_latch = 1;
-                        ++g_b102_fallback_latches;
-                    }
-                    else if (!g_b84_latch_valid)
-                    {
-                        need_latch = 1;
-                        ++g_b102_front_latches;
-                    }
-
-                    if (need_latch)
-                    {
-                        ++g_b103_plain_count;
-                    }
+                    g_b13578_page_hash[idx] = h;
+                    g_b13578_last_current_nz = nz;
+                    g_b13578_last_draw_nz = nz;
                 }
             }
             else if (
@@ -17263,20 +17260,97 @@ int main(void)
                     draw_page_y = 0u;
                 }
 
-                latch_x = draw_page_x;
-                latch_y = draw_page_y;
-                need_latch = 1;
+                /*
+                 * B135.78:
+                 * The draw page is a candidate backbuffer, not automatically
+                 * the frontbuffer. Compare sampled page hashes across VSyncs.
+                 */
+                uint32_t current_hash = 0u;
+                uint32_t current_nz = 0u;
+                uint32_t draw_hash = 0u;
+                uint32_t draw_nz = 0u;
 
-                ++g_b13541_2d_vsync_latches;
+                unsigned current_idx =
+                    b13578_page_index(current_x, current_y);
+
+                unsigned draw_idx =
+                    b13578_page_index(draw_page_x, draw_page_y);
+
+                b13578_sample_page(
+                    vram,
+                    current_x,
+                    current_y,
+                    &current_hash,
+                    &current_nz
+                );
 
                 if (
-                    draw_page_x != current_x
-                    ||
-                    draw_page_y != current_y
+                    draw_page_x == current_x
+                    &&
+                    draw_page_y == current_y
                 )
                 {
-                    ++g_b13544_follow_drawbuf;
+                    draw_hash = current_hash;
+                    draw_nz = current_nz;
                 }
+                else
+                {
+                    b13578_sample_page(
+                        vram,
+                        draw_page_x,
+                        draw_page_y,
+                        &draw_hash,
+                        &draw_nz
+                    );
+                }
+
+                int current_changed =
+                    g_b13578_page_hash[current_idx] != 0u
+                    &&
+                    current_hash != g_b13578_page_hash[current_idx];
+
+                int draw_changed =
+                    g_b13578_page_hash[draw_idx] != 0u
+                    &&
+                    draw_hash != g_b13578_page_hash[draw_idx];
+
+                int distinct_draw_page =
+                    draw_page_x != current_x
+                    ||
+                    draw_page_y != current_y;
+
+                int follow_draw =
+                    distinct_draw_page
+                    &&
+                    !current_changed
+                    &&
+                    draw_changed
+                    &&
+                    draw_nz >= 32u;
+
+                if (follow_draw)
+                {
+                    latch_x = draw_page_x;
+                    latch_y = draw_page_y;
+                    ++g_b13544_follow_drawbuf;
+                    ++g_b13578_follow_draw;
+                    g_b13578_last_pick = 1u;
+                }
+                else
+                {
+                    latch_x = current_x;
+                    latch_y = current_y;
+                    ++g_b13578_keep_gp1;
+                    g_b13578_last_pick = 0u;
+                }
+
+                need_latch = 1;
+                ++g_b13541_2d_vsync_latches;
+
+                g_b13578_page_hash[current_idx] = current_hash;
+                g_b13578_page_hash[draw_idx] = draw_hash;
+                g_b13578_last_current_nz = current_nz;
+                g_b13578_last_draw_nz = draw_nz;
 
                 g_b13544_last_draw_x = draw_page_x;
                 g_b13576_last_draw_y = draw_page_y;
@@ -17688,9 +17762,9 @@ int main(void)
             fm_memory_dma_debug(&b130_dma);
 
 #if FM_PERF_PROFILE
-            printf("BUILD B135.76-POSTDUEL-PROFILE (SAFE B135.71)\n");
+            printf("BUILD B135.78-CONSERVATIVE-PROFILE (SAFE B135.71)\n");
 #else
-            printf("BUILD B135.76-POSTDUEL-CLEAN (SAFE B135.71)\n");
+            printf("BUILD B135.78-CONSERVATIVE-CLEAN (SAFE B135.71)\n");
 #endif
 
             printf(
@@ -17739,13 +17813,16 @@ int main(void)
             );
 
             printf(
-                "PRES gp1:%u,%u latch:%u,%u draw:%lu,%lu\n",
+                "PRES g:%u,%u l:%u,%u d:%lu,%lu p:%lu nz:%lu/%lu\n",
                 fm_gpu_display_x(),
                 fm_gpu_display_y(),
                 g_b84_latch_x,
                 g_b84_latch_y,
                 (unsigned long)g_b13544_last_draw_x,
-                (unsigned long)g_b13576_last_draw_y
+                (unsigned long)g_b13576_last_draw_y,
+                (unsigned long)g_b13578_last_pick,
+                (unsigned long)g_b13578_last_current_nz,
+                (unsigned long)g_b13578_last_draw_nz
             );
 
             {
