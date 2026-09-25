@@ -1,6 +1,7 @@
 #include "fm_interp.h"
 
 #include <stdint.h>
+#include <string.h>
 
 /*
  * B135.1 - le GPF de la scene Simon peut etre repris par le fallback
@@ -118,12 +119,9 @@ static inline uint16_t interp_read_half(
 
     if (interp_ram_offset(addr, 2u, &o))
     {
-        return
-            (uint16_t)(
-                (uint16_t)g_interp_ram[o + 0u]
-                |
-                ((uint16_t)g_interp_ram[o + 1u] << 8)
-            );
+        uint16_t value;
+        memcpy(&value, g_interp_ram + o, sizeof(value));
+        return value;
     }
 
     return cpu->read_half(addr);
@@ -139,14 +137,9 @@ static inline uint32_t interp_read_word(
 
     if (interp_ram_offset(addr, 4u, &o))
     {
-        return
-            (uint32_t)g_interp_ram[o + 0u]
-            |
-            ((uint32_t)g_interp_ram[o + 1u] << 8)
-            |
-            ((uint32_t)g_interp_ram[o + 2u] << 16)
-            |
-            ((uint32_t)g_interp_ram[o + 3u] << 24);
+        uint32_t value;
+        memcpy(&value, g_interp_ram + o, sizeof(value));
+        return value;
     }
 
     return cpu->read_word(addr);
@@ -181,12 +174,7 @@ static inline void interp_write_half(
 
     if (interp_ram_offset(addr, 2u, &o))
     {
-        g_interp_ram[o + 0u] =
-            (uint8_t)(value & 0xFFu);
-
-        g_interp_ram[o + 1u] =
-            (uint8_t)((value >> 8) & 0xFFu);
-
+        memcpy(g_interp_ram + o, &value, sizeof(value));
         return;
     }
 
@@ -204,18 +192,7 @@ static inline void interp_write_word(
 
     if (interp_ram_offset(addr, 4u, &o))
     {
-        g_interp_ram[o + 0u] =
-            (uint8_t)(value & 0xFFu);
-
-        g_interp_ram[o + 1u] =
-            (uint8_t)((value >> 8) & 0xFFu);
-
-        g_interp_ram[o + 2u] =
-            (uint8_t)((value >> 16) & 0xFFu);
-
-        g_interp_ram[o + 3u] =
-            (uint8_t)((value >> 24) & 0xFFu);
-
+        memcpy(g_interp_ram + o, &value, sizeof(value));
         return;
     }
 
@@ -273,16 +250,17 @@ static inline void set_reg(
 {
     /*
      * $zero n'est jamais modifiable.
+     *
+     * B135.75: do not rewrite gpr[0] here. The interpreter loop and every
+     * control-flow path already restore $zero after the instruction/delay
+     * slot. Avoiding this duplicate store removes one memory write from the
+     * common ALU/load path.
      */
     if (reg != 0)
     {
         cpu->gpr[reg] =
             value;
     }
-
-
-    cpu->gpr[0] =
-        0;
 }
 
 
