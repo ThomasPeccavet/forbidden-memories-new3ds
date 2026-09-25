@@ -1,29 +1,22 @@
 # Handoff pour nouvelle session
 
-Dernière mise à jour : **21 septembre 2026**.
+Dernière mise à jour : **25 septembre 2026**.
 
-## Objectif
+## Projet
 
-Porter **Yu-Gi-Oh! Forbidden Memories PAL France SLES-03948** sur New Nintendo
-3DS avec PSXRecomp, fallback R3000A et runtime libctru.
-
-## Révision projet de référence
-
-~~~text
-912036e9355873d652790a97e160819f031724d9
-UP TO FIRST CINEMATIC AND CHAT
-~~~
+Port de **Yu-Gi-Oh! Forbidden Memories PAL France SLES-03948** vers New Nintendo
+3DS avec PSXRecomp, code ARM11 généré, fallback R3000A et libctru.
 
 ## Révision PSXRecomp
 
-~~~text
+```text
 Unchiga/psxrecomp
 1965b2df424da03483a5370340433a862f78f103
-~~~
+```
 
 ## Données de référence
 
-~~~text
+```text
 BIN taille  : 548427600
 BIN SHA-256 : 9ef0d0ba5e42b838bd8312ecfe4071b09c44bc08ee896f6b76f913a41fe4b835
 EXE SHA-256 : 57ecdfb9a9e1faf8b342fe7c7304c23723810861f3ab2fa3bef9eb27b5146b44
@@ -31,97 +24,102 @@ Load        : 0x80010000
 Entry       : 0x800128CC
 Stack       : 0x801FFFF0
 Disc runtime: sdmc:/3ds/fm-new3ds/disc.bin
-~~~
+```
 
-## État fonctionnel actuel
+## Baseline duel
 
-Le backend sait maintenant :
+La lignée **B135.71** est l'oracle fonctionnel actuel.
 
-- afficher Konami et l'écran titre ;
-- charger/exécuter SU ;
-- afficher le menu principal ;
-- naviguer et valider ;
-- lancer une nouvelle partie ;
-- afficher la saisie du nom ;
-- écrire et valider le nom ;
-- poursuivre jusqu'à la première cinématique / aux premiers dialogues.
+Fonctionnel :
 
-**Ne plus traiter le menu SU invisible comme verrou principal.**
+- menu ;
+- nouvelle partie ;
+- nom ;
+- carte ;
+- entrée en duel ;
+- main ;
+- plusieurs tours ;
+- adversaire ;
+- rendu 3D.
 
-## Problème actif
+Limites :
 
-Le jeu est extrêmement lent dans le chemin actuel : ordre de grandeur observé de
-quelques FPS.
+- ~12–15 FPS ;
+- ~4 FPS pendant certaines attaques ;
+- images de cartes parfois incorrectes ;
+- dialogues 2D hors duel absents.
 
-Déjà intégré :
+## Résultats B135.74 / 75
 
-- B105 : LUT RGB555 et mesures de temps ;
-- B106 : flush/swap top screen seulement ;
-- B107 : profil -O3 / release, y compris shards générés ;
-- B108 : instrumentation VSync ;
-- B110 : profiler de plages guest.
+- B135.74 CLEAN : aucun gain FPS.
+- B135.75 Interpreter Fast Path : aucun gain visible.
 
-Le ralentissement persiste. Il faut identifier le hotspot avant de modifier
-encore le code.
+Ne pas reprendre ces deux pistes sans nouvelle mesure.
 
-## Premier objectif de la prochaine session
+## Enquête dialogue B135.76 → 80
 
-Obtenir un tableau de coût par frame avec :
+B135.76 corrige plusieurs erreurs de presenter. B135.77 a créé une régression en
+confondant draw-page et frontbuffer. B135.78 revient à GP1 autoritaire.
 
-~~~text
-loop_ms
-guest_ms
-vblank_callback_ms
-software_render_ms
-present_ms
-wait_vblank_ms
-interp_instructions
-fallback_calls
-gp0_words
-primitives
-top_guest_range_0
-top_guest_range_1
-top_guest_range_2
-~~~
+Capture B135.78 :
 
-Puis classer le problème : fallback/interpréteur, boucle guest active, VBlank,
-GPU logiciel, copie/present ou autre routine précise.
+```text
+PRES g:0,0 l:0,0 d:0,0 p:0 nz:0/0
+```
 
-## Hypothèse à tester en priorité
+Donc la bonne page est choisie mais aucun dialogue n'y a été rendu.
 
-Chercher une fonction ou boucle qui devrait attendre un événement PS1 mais tourne
-actuellement à plein régime parce qu'un bridge/bypass ne reproduit pas correctement
-le timing.
+B135.79 :
 
-## Cinématique
+```text
+OBJ79 n:0/5/0/0/0/0/0
+WALK79 ... 408bc:0 ...
+GP2D79 rect/q/2c/3a:0/0/0/0
+```
 
-La première cinématique est atteinte mais visuellement incorrecte. Les pistes
-déjà ouvertes concernent draw offset/area, display start/mode, RGB24, MDEC et
-composition framebuffer.
+Ghidra confirme :
 
-Ne pas s'y replonger avant une mesure claire des FPS, sauf si le profiler montre
-directement MDEC/composition comme hotspot.
+- `FUN_800408BC` parcourt `DAT_800F11C2` ;
+- `FUN_80041674` parcourt les 7 heads C0..CC via une table de 7 pointeurs ;
+- la table se trouve à `0x800923DC..0x800923F4` ;
+- C2 correspond à `0x800923E0`.
 
-## Build release
+## Branche à tester
 
-~~~sh
-export DEVKITPRO=/opt/devkitpro
-export DEVKITARM=$DEVKITPRO/devkitARM
-export PATH=$DEVKITARM/bin:$PATH
+```text
+diag/b135.80-c2-indirect
+```
 
-bash rebuild_generated_release.sh
-make -C 3ds clean
-make -C 3ds -j4
-~~~
+B135.80 affiche :
 
-Le script cherche aussi automatiquement le compilateur dans les installations
-devkitPro courantes sous MSYS/Git Bash.
+```text
+TAB80 c0/c2/c4/cc:...
+C2TAB h:... ptr:........ exp:800408BC ent:... r416:...
+```
 
-## Discipline
+Décision :
 
-- ne pas réintroduire d'hypothèses déjà réfutées ;
-- profiler avant d'optimiser ;
-- conserver les bridges actuels tant qu'ils servent au diagnostic ;
-- préférer une modification qui sépare clairement deux hypothèses ;
-- après chaque jalon reproductible : build, capture, commit ;
-- ne jamais committer BIN, BIOS Sony, EXE extrait ou shards C propriétaires.
+- ptr faux → table ;
+- ptr correct + ent=0 → dispatcher statique ;
+- ptr correct + ent=1 + 408bc=0 → indirect/JALR ;
+- 408bc>0 + GPU 0 → interne à 408BC / callbacks / OT.
+
+## Build
+
+```sh
+git fetch origin
+git switch diag/b135.80-c2-indirect
+git pull --ff-only
+
+cd 3ds
+make clean
+make -j4
+```
+
+## Règles de reprise
+
+- ne pas modifier le presenter avant le test B135.80 ;
+- ne pas forcer 408BC à chaque frame sans preuve ;
+- conserver B135.71 comme référence duel ;
+- une hypothèse / une branche ;
+- ne pas committer les données propriétaires.

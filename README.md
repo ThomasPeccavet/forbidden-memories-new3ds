@@ -1,82 +1,88 @@
 # Yu-Gi-Oh! Forbidden Memories — New Nintendo 3DS
 
 Projet expérimental de portage/recompilation de **Yu-Gi-Oh! Forbidden Memories**
-(version française **SLES-03948**) vers **New Nintendo 3DS**.
+PAL France (**SLES-03948**) vers **New Nintendo 3DS**.
 
 > [!IMPORTANT]
-> Le port n'est pas encore jouable de bout en bout, mais le backend 3DS exécute
-> désormais une partie importante du vrai jeu : boot PS1, chargements CD, rendu
-> GPU logiciel, écran titre, menu principal, navigation, nouvelle partie,
-> saisie/validation du nom et progression jusqu'à la première cinématique / aux
-> premiers dialogues.
+> Le projet n'est pas encore jouable de bout en bout. En revanche, le backend 3DS
+> exécute désormais une partie très importante du vrai jeu : boot, écran titre,
+> menu, nouvelle partie, saisie du nom, carte, dialogues, entrée en duel et duel
+> interactif. Le premier duel est jouable plusieurs tours sur la branche B135.71.
 >
-> Le verrou principal au **21 septembre 2026** est désormais la **performance** :
-> le chemin actuel fonctionne mais tourne à seulement quelques FPS dans les tests
-> récents. La cinématique atteinte présente également encore des défauts de rendu.
+> Au **25 septembre 2026**, deux chantiers dominent :
+> **(1) performance du duel** et **(2) chaîne de rendu 2D des dialogues hors duel**.
 
-## État du projet — 21 septembre 2026
+## État du projet — 25 septembre 2026
 
-| Partie | État actuel |
+| Partie | État |
 | --- | --- |
 | Profil PAL France / SLES-03948 | ✅ Vérifié |
-| Extraction / analyse PS-X EXE | ✅ Fonctionnelle |
-| Analyse Ghidra française | ✅ Résident + overlays étudiés |
+| Extraction / analyse PS-X EXE | ✅ |
+| Analyse Ghidra française | ✅ Résident + overlays |
 | Runtime PC | ✅ Jusqu'au premier duel |
-| Build natif New 3DS | ✅ ARM11 avec devkitARM/libctru |
-| Code résident recompilé ARM11 | ✅ Lié dans le binaire 3DS |
-| Dispatch hybride | ✅ ARM recompilé + fallback R3000A |
-| BIOS / IRQ / VBlank | 🟡 Suffisants pour le chemin courant |
-| CD-ROM / lecture secteurs | 🟡 Fonctionnel sur le chemin courant |
-| GP0 / GP1 + rasteriseur logiciel | ✅ Rendu réel confirmé |
-| DMA2 / synchronisation GPU | 🟡 Plusieurs chemins bridgés |
-| GTE | 🟡 Sous-ensemble nécessaire au chemin courant |
-| Pad / navigation | ✅ START + navigation/validation |
-| Overlay SU.mrg | ✅ Chargé et exécuté |
-| Menu principal | ✅ Visible et navigable |
-| Nouvelle partie | ✅ Atteinte |
-| Saisie du nom | ✅ Écriture + validation fonctionnelles |
-| Première cinématique / dialogues | 🟡 Atteints, rendu encore incorrect |
-| Performance | 🔴 Quelques FPS observés, hotspot à isoler |
-| Audio XA / SPU | ❌ Non implémenté |
-| Sauvegarde | ❌ Non implémentée |
-| Test New 3DS physique | ❌ Pas encore validé |
+| Build natif New 3DS | ✅ ARM11 / libctru |
+| Code résident recompilé | ✅ |
+| Fallback R3000A | ✅ |
+| CD / overlays | 🟡 Fonctionnel sur le chemin courant |
+| GP0 / GP1 / rasteriseur logiciel | ✅ |
+| Menu principal | ✅ |
+| Nouvelle partie / nom | ✅ |
+| Carte / navigation | ✅ |
+| Premier duel 3DS | 🟡 Jouable plusieurs tours |
+| Main / adversaire | ✅ Fonctionnels sur B135.71 |
+| Images des cartes | 🟡 Correspondances encore incorrectes dans certains cas |
+| Dialogues avant/après duel | 🔴 Objets créés mais renderer C2 non exécuté |
+| Performance duel | 🔴 ~12–15 FPS, chute vers ~4 FPS en attaque |
+| Audio | ❌ |
+| Sauvegarde memory card | ❌ |
+| New 3DS physique | ❌ Non validé |
 
-## Dernier jalon majeur
+## Référence fonctionnelle 3DS
 
-Le problème historique du menu SU invisible a été franchi. Le backend permet
-maintenant de :
+La branche de référence du duel reste la lignée **B135.71**. Elle a permis :
 
-1. afficher le logo Konami et l'écran titre ;
-2. entrer dans le vrai menu principal ;
-3. naviguer et valider une sélection ;
-4. lancer une nouvelle partie ;
-5. afficher la saisie du nom ;
-6. saisir et valider un nom ;
-7. poursuivre jusqu'à la première cinématique et aux premiers dialogues.
+- nouvelle partie ;
+- saisie et validation du nom ;
+- progression jusqu'à la carte ;
+- sélection d'un adversaire ;
+- entrée en duel ;
+- affichage de la main ;
+- jeu de plusieurs tours ;
+- réponse de l'adversaire ;
+- rendu 3D du duel fonctionnel.
 
-Révision de référence :
+Le correctif B135.71 conserve un filet de sécurité sur le gate
+`DAT_8009C4B8` lorsqu'une main valide est en attente.
 
-~~~text
-912036e9355873d652790a97e160819f031724d9
-UP TO FIRST CINEMATIC AND CHAT
-~~~
+## Ce que les essais B135.74 → B135.80 ont appris
 
-La priorité n'est donc plus de faire apparaître le jeu, mais de rendre ce chemin
-**suffisamment rapide, fidèle et robuste** pour poursuivre le portage.
+### Performance
 
-Voir :
-[État courant](docs/CURRENT_STATUS.md) ·
-[Plan d'action](docs/ACTION_PLAN.md) ·
-[Roadmap](docs/ROADMAP.md) ·
-[Handoff](docs/WORK_HANDOFF.md)
+- **B135.74 PROFILE/CLEAN** : suppression des probes chauds → **aucun gain FPS mesurable**.
+- **B135.75 Interpreter Fast Path** : chunks 256→2048, accès RAM accélérés → **aucun gain visible**.
 
-## Architecture actuelle
+Conclusion actuelle : les probes et ces micro-optimisations d'interpréteur ne
+sont pas le goulet principal du duel.
 
-~~~text
+### Dialogues / rendu 2D
+
+- **B135.76** : correction de plusieurs erreurs de sélection de page VRAM.
+- **B135.77** : priorité trop agressive à la draw-page → régression écran noir.
+- **B135.78** : arbitrage conservateur GP1/draw-page. Sur l'écran noir :
+  `GP1 = latch = draw = 0,0` et la page échantillonnée reste vide.
+- **B135.79** : diagnostic chaîne objets → renderer → GP0.
+  Observation : `OBJ79 n:0/5/0/0/0/0/0` mais `408BC:0` et aucun primitive 2D.
+- **B135.80** : diagnostic en attente de test sur la table de fonctions
+  `0x800923DC..0x800923F4`, spécialement C2 `0x800923E0`.
+
+Le problème dialogue est donc maintenant localisé **en amont du GPU** :
+la liste C2 contient 5 objets, mais son renderer attendu `FUN_800408BC`
+n'est pas exécuté.
+
+## Architecture
+
+```text
 SLES_039.48 / disc.bin
-        |
-        v
-   PS-X EXE + CD
         |
         v
  CPUState / RAM PS1
@@ -100,69 +106,17 @@ SLES_039.48 / disc.bin
                     VRAM
                       |
               écran supérieur
-~~~
+```
 
-Les overlays dynamiques restent exécutables via le fallback R3000A. Cela permet
-d'avancer fonctionnellement sans recompiler immédiatement chaque routine, mais
-ce fallback est désormais aussi un candidat majeur au profiling de performance.
+## Build
 
-## Performance : état actuel
+PSXRecomp épinglé :
 
-Plusieurs optimisations et instruments sont déjà intégrés :
-
-- compilation 3DS en profil release -O3 / NDEBUG ;
-- reconstruction des shards générés avec le même profil release ;
-- LUT RGB555 → BGR888 pour la présentation ;
-- suppression du clear complet du framebuffer à chaque frame ;
-- flush/swap limité à l'écran supérieur ;
-- mesures séparées du temps guest, rendu, VBlank et boucle complète ;
-- instrumentation VSync ;
-- profiler de plages guest / hotspots.
-
-Ces améliorations n'ont pas encore ramené le jeu à une cadence acceptable. La
-prochaine étape doit mesurer précisément où part le temps CPU : fallback R3000A,
-callbacks/VBlank, renderer logiciel, copie VRAM, attente GPU ou routine guest
-exécutée anormalement souvent.
-
-## Avancement PC vérifié
-
-Le runtime PC expérimental a atteint le menu principal français, créé une
-nouvelle partie et atteint le premier duel contre Simon Muran. Une carte a été
-posée et un tour terminé.
-
-<p align="center">
-  <img src="research/first-duel/duel.png" width="48%" alt="Premier duel sur le runtime PC">
-  <img src="research/first-duel/card-set.png" width="48%" alt="Carte posée pendant le premier duel">
-</p>
-
-Le runtime PC reste l'oracle fonctionnel pour comparer transitions, timings,
-overlays et écrans attendus.
-
-## Prototype New 3DS
-
-Le dossier [3ds/](3ds/) contient notamment :
-
-- lecture du BIN français MODE2/2352 depuis SD ;
-- chargement du PS-X EXE à 0x80010000, entrée 0x800128CC ;
-- RAM PS1 2 Mio, scratchpad et alias KSEG ;
-- CPUState PSXRecomp ;
-- dispatcher ARM11 + fallback R3000A ;
-- HLE BIOS / MMIO / IRQ / pad ;
-- lecture CD et file de requêtes asynchrones ;
-- bridge GPU GP0/GP1, DMA et rasteriseur logiciel ;
-- chargement/exécution des overlays ;
-- présentation framebuffer 3DS optimisée ;
-- diagnostics et profiling sur l'écran inférieur.
-
-## Compiler
-
-Prérequis : devkitPro 3ds-dev, Git, Python 3.11+ et PSXRecomp épinglé à :
-
-~~~text
+```text
 1965b2df424da03483a5370340433a862f78f103
-~~~
+```
 
-~~~sh
+```sh
 git clone https://github.com/Unchiga/psxrecomp.git work/upstream-psxrecomp
 git -C work/upstream-psxrecomp checkout 1965b2df424da03483a5370340433a862f78f103
 
@@ -173,47 +127,45 @@ export PATH=$DEVKITARM/bin:$PATH
 bash rebuild_generated_release.sh
 make -C 3ds clean
 make -C 3ds -j4
-~~~
+```
 
-Le script rebuild_generated_release.sh cherche désormais automatiquement
-arm-none-eabi-gcc dans les emplacements devkitPro usuels sous MSYS/Git Bash.
+Depuis B135.74 :
 
-Sorties :
-
-~~~text
-3ds/fm-new3ds.elf
-3ds/fm-new3ds.3dsx
-~~~
+- `make` → CLEAN ;
+- `make profile` → PROFILE ;
+- objets séparés `build-clean/` et `build-profile/`.
 
 ## Disque de test
 
-~~~text
+```text
 sdmc:/3ds/fm-new3ds/disc.bin
-~~~
 
-~~~text
 Version        : PAL France / SLES-03948
 Format         : BIN brut MODE2/2352
 Taille         : 548 427 600 octets
 SHA-256        : 9ef0d0ba5e42b838bd8312ecfe4071b09c44bc08ee896f6b76f913a41fe4b835
 Point d'entrée : 0x800128CC
-~~~
+```
 
 Aucun dump du jeu ni BIOS Sony n'est distribué par ce dépôt.
 
 ## Priorités immédiates
 
-1. profiler le chemin qui fait tomber l'exécution à quelques FPS ;
-2. identifier les fonctions / plages guest les plus coûteuses ou répétées ;
-3. distinguer interpréteur, code recompilé, rendu logiciel, présentation et waits ;
-4. supprimer les bypass/bridges qui provoqueraient du travail répété ou un mauvais timing ;
-5. retrouver une cadence suffisante pour travailler confortablement ;
-6. corriger ensuite le rendu de la première cinématique ;
-7. poursuivre vers les dialogues puis le premier duel sur backend 3DS.
+1. tester B135.80 et trancher **table C2 vs dispatch indirect** ;
+2. rétablir les dialogues 2D sans bridge spécifique à un personnage ;
+3. conserver B135.71 comme oracle du duel ;
+4. reprendre ensuite le profiling du vrai budget CPU/GPU du duel ;
+5. corriger les images de cartes ;
+6. poursuivre la progression et réduire les bridges de bring-up.
 
-Le plan détaillé est dans [docs/ACTION_PLAN.md](docs/ACTION_PLAN.md).
+Voir :
+[État courant](docs/CURRENT_STATUS.md) ·
+[Plan d'action](docs/ACTION_PLAN.md) ·
+[Roadmap](docs/ROADMAP.md) ·
+[Handoff](docs/WORK_HANDOFF.md) ·
+[Journal B135](docs/B135.76_80_RENDER_PIPELINE.md).
 
-## Données du jeu et licences
+## Licences et données
 
 **Aucun disque, BIOS PlayStation propriétaire, exécutable original ou contenu
 propriétaire du jeu n'est distribué dans ce dépôt.**

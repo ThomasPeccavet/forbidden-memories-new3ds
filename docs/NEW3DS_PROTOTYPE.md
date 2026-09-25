@@ -1,116 +1,87 @@
-# Prototype natif New 3DS — état du 19 septembre 2026
+# Prototype natif New 3DS — état du 25 septembre 2026
 
-Le prototype exécute désormais suffisamment de la version française pour
-afficher le logo Konami et l'écran titre, reconnaître START, charger l'overlay
-SU et entrer dans la boucle du menu principal.
+Le prototype ne se limite plus au menu : il peut entrer dans le premier duel et
+jouer plusieurs tours.
 
-## Backend actuel
+## Backend
 
 - libctru / ARM11 ;
 - BIN MODE2/2352 depuis SD ;
 - PS-X EXE à `0x80010000` ;
-- RAM PS1 2 Mio + scratchpad + alias KSEG ;
+- RAM PS1 2 Mio + scratchpad + KSEG ;
 - code résident PSXRecomp ;
 - dispatcher natif ;
 - fallback R3000A ;
-- BIOS/MMIO/IRQ/pad nécessaires au chemin courant ;
-- CD sector reader + requêtes async ;
-- GPU GP0/GP1 + DMA/bridges de synchronization ;
+- BIOS/MMIO/IRQ/pad du chemin courant ;
+- CD async / overlays ;
+- GP0/GP1 ;
+- DMA / bridges de bring-up ;
 - rasteriseur logiciel ;
-- overlays dynamiques exécutables en RAM guest ;
-- diagnostics détaillés écran inférieur.
+- diagnostics écran inférieur.
 
-## Résultat graphique validé
+## Chemin graphique validé
 
-Le backend a affiché de vraies images du jeu dans Azahar :
+Le backend a affiché :
 
 1. Konami ;
-2. écran titre Forbidden Memories.
+2. écran titre ;
+3. menu principal ;
+4. saisie du nom ;
+5. carte ;
+6. main du duel ;
+7. plateau 3D ;
+8. plusieurs tours.
 
-Ce résultat invalide l'ancienne description « aucune image réelle » des notes du
-17 septembre.
+## Duel
 
-## Overlay SU
+B135.71 constitue la baseline fonctionnelle.
 
-Après START :
+Points positifs :
 
-- état résident 8 sélectionné ;
-- `SU.mrg` chargé ;
-- signature overlay observée à `0x80180000` ;
-- init `0x8018001C` exécutée ;
-- update `0x80180390` exécutée en boucle ;
-- `DAT_8009C898 = 0x80180B4C` ;
-- callback draw réellement appelé ;
-- 11 objets du menu présents en RAM.
+- main visible ;
+- sélection/jeu de cartes ;
+- adversaire actif ;
+- animations 3D utilisables.
 
-B75 montre que l'animation d'entrée peut être terminée et que les objets du groupe
-actif se retrouvent à `x=160`, timer `0`, flags visibles. L'écran reste
-néanmoins sur le titre : le prochain travail est donc dans la chaîne
-**objet → renderer → GP0 → VRAM visible**.
+Limites :
 
-## Architecture
+- performance ~12–15 FPS ;
+- ~4 FPS sur certaines attaques ;
+- associations image de carte / contenu encore fausses dans certains cas.
 
-```text
-EXE + CD
-   |
-   v
-CPUState / RAM
-   |
-   +--> code ARM11 recompilé
-   |
-   +--> fallback R3000A
-   |
-   v
-BIOS / MMIO / IRQ / pad
-   |
-   +--> CD / overlays
-   |
-   +--> GPU / DMA --> GP0 --> rasteriseur --> VRAM --> écran
-```
+## Dialogues 2D
 
-## Bridges de bring-up importants
+Le défaut actuel n'est plus classé comme un problème de simple framebuffer.
 
-Le `main.c` courant contient plusieurs bridges instrumentés qui ont permis de
-franchir des attentes spécifiques :
+B135.79 a montré :
 
-- CD stream / requêtes async ;
-- helpers GTE ;
-- completion graphique type `0x20` ;
-- attente DMA2 ;
-- impulsion START 10 frames ;
-- entrée contrôlée vers l'état 8 ;
-- animation d'entrée SU.
+- 5 objets dans C2 ;
+- renderer C2 `800408BC` jamais appelé ;
+- aucune primitive 2D issue de ce chemin.
 
-Ils sont utiles pour localiser les causes, mais constituent encore de la dette de
-bring-up à remplacer progressivement.
+B135.80 instrumente la table de renderers utilisée par `80041674`.
 
-## Build
+## Builds CLEAN / PROFILE
 
-PSXRecomp :
-
-```text
-1965b2df424da03483a5370340433a862f78f103
-```
+Depuis B135.74 :
 
 ```sh
-export PATH=$DEVKITARM/bin:$PATH
-make -C 3ds clean
-make -C 3ds PSXRECOMP_ROOT=../work/upstream-psxrecomp -j4
+cd 3ds
+make clean
+make -j4           # CLEAN
+make profile -j4   # PROFILE
 ```
 
-Disque :
-
-```text
-sdmc:/3ds/fm-new3ds/disc.bin
-```
+Les objets sont séparés dans `build-clean` et `build-profile`.
 
 ## Limites
 
-- menu SU pas encore visible ;
-- pas encore de nouvelle partie sur 3DS ;
-- CD/IRQ/DMA/GTE encore partiellement bridgés ;
-- audio absent ;
-- sauvegarde absente ;
-- pas encore de validation New 3DS physique.
+- dialogue 2D avant/après duel ;
+- performance ;
+- images de cartes ;
+- bridges matériels ;
+- audio ;
+- sauvegarde ;
+- hardware New 3DS non validé.
 
-Voir [CURRENT_STATUS.md](CURRENT_STATUS.md) et [ACTION_PLAN.md](ACTION_PLAN.md).
+Voir [CURRENT_STATUS.md](CURRENT_STATUS.md).

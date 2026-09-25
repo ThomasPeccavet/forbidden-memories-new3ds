@@ -1,150 +1,128 @@
 # État courant — New Nintendo 3DS
 
-Dernière mise à jour : **21 septembre 2026**.
+Dernière mise à jour : **25 septembre 2026**.
 
 ## Résumé
 
-Le backend New 3DS/Azahar a dépassé le jalon du menu principal. Le jeu affiche
-désormais le menu français, accepte la navigation et la validation, lance une
-nouvelle partie, permet de saisir puis valider le nom du joueur et progresse
-jusqu'à la première cinématique / aux premiers dialogues.
+Le port 3DS a franchi le menu, la nouvelle partie, la carte et le premier duel.
+La lignée **B135.71** permet d'afficher la main, jouer plusieurs tours et laisser
+l'adversaire jouer. Le rendu 3D du duel est fonctionnel.
 
-Le verrou actif est maintenant :
+Deux problèmes restent séparés :
 
-> **la performance : le chemin fonctionnel actuel tourne à seulement quelques FPS
-> dans les tests récents.**
+1. **duel lent** : typiquement ~12–15 FPS et ~4 FPS lors de certaines attaques ;
+2. **dialogues 2D absents** : les objets existent mais leur renderer C2 ne tourne pas.
 
-La première cinématique atteinte présente également encore un rendu incorrect,
-mais ce défaut vient après le problème de cadence : avant de continuer à patcher
-les transitions, il faut comprendre où le temps d'exécution est réellement perdu.
+## Baseline fonctionnelle
 
-## Révision de référence
+B135.71 reste l'oracle du duel. Ses correctifs B135.64/B135.66/B135.71 doivent
+être conservés tant que leur cause native n'a pas été reconstruite.
 
-~~~text
-912036e9355873d652790a97e160819f031724d9
-UP TO FIRST CINEMATIC AND CHAT
-~~~
+Le gate `DAT_8009C4B8` est forcé uniquement dans la condition documentée où
+une main valide attend sa soumission.
 
-Cette révision inclut le chemin fonctionnel jusqu'à la première cinématique ainsi
-que plusieurs étapes de profiling/optimisation B100+.
+## Performance : résultats récents
 
-## Chemin actuellement validé
+### B135.74 — PROFILE / CLEAN
 
-- PS-X EXE chargé à 0x80010000 ;
-- entrée guest 0x800128CC ;
-- code résident ARM11 + fallback R3000A ;
-- BIOS, VBlank, pad et IRQ suffisants pour progresser ;
-- lectures CD réelles et file async suffisantes pour le chemin observé ;
-- GTE/helpers nécessaires au chemin courant ;
-- DMA2 / GPU waits bridgés pour les cas observés ;
-- GP0/GP1 et rasteriseur logiciel actifs ;
-- logo Konami et écran titre affichés ;
-- SU.mrg chargé et exécuté ;
-- menu principal affiché ;
-- navigation et validation fonctionnelles ;
-- « Nlle partie » atteinte ;
-- saisie du nom affichée ;
-- écriture et validation du nom fonctionnelles ;
-- première cinématique / premiers dialogues atteints.
+Le CLEAN compile hors du chemin chaud plusieurs familles de diagnostics :
+timers GP0, compteurs pixel, scans DMA et gros blocs console.
 
-## Ce qui a changé depuis B75
+**Résultat de test : aucune amélioration FPS observable.**
 
-B75 avait prouvé que le menu SU existait mais restait invisible. Depuis :
+### B135.75 — Interpreter Fast Path
 
-- le chemin de rendu a été corrigé suffisamment pour afficher le menu ;
-- la navigation du menu est utilisable ;
-- la transition nouvelle partie fonctionne ;
-- l'écran de nom est fonctionnel ;
-- le nom peut être écrit puis validé ;
-- le jeu poursuit son exécution après validation ;
-- le chemin atteint désormais la première cinématique / les premiers dialogues.
+- chunks interpréteur : 256 → 2048 ;
+- limite externe : 256 → 32 ;
+- plafond total inchangé : 65536 instructions ;
+- accès RAM 16/32 bits simplifiés ;
+- écriture redondante de `gpr[0]` supprimée.
 
-Le problème de menu invisible ne doit donc plus être réinvestigué comme priorité.
+**Résultat de test : pas d'amélioration visible.**
 
-## Performance — problème principal
+Conclusion : ne pas continuer les micro-optimisations de ce type sans nouvelle
+mesure du budget dominant.
 
-Des pistes ont déjà été intégrées :
+## Dialogues : localisation du défaut
 
-### B105 — présentation
+### B135.76
 
-- mesure du temps guest/rendu/VBlank/boucle ;
-- LUT RGB555 → BGR888 ;
-- suppression du memset complet à chaque frame.
+Correction de plusieurs erreurs du presenter :
 
-### B106 — présentation 3DS
+- B135.44 lisait des champs draw-area jamais remplis par
+  `fm_gpu_b127_perf_snapshot()` ;
+- prise en compte de Y=256 ;
+- échantillonnage de la page Y courante.
 
-- flush/swap uniquement du framebuffer supérieur ;
-- séparation du coût avant présentation, présentation et attente VBlank.
+### B135.77
 
-### B107 — profil release
+Tentative de priorité systématique à la draw-area E3/E4.
 
-- -O3 ;
-- NDEBUG ;
-- PSX_NO_DEBUG_TOOLS ;
-- -fomit-frame-pointer ;
-- reconstruction des shards PSXRecomp en release.
+**Résultat : régression écran noir.** La draw-page pouvait être le backbuffer en
+construction et ne devait pas être assimilée au frontbuffer.
 
-### B108 / B110 — timing et hotspots
+### B135.78
 
-- instrumentation du VSync guest ;
-- statistiques de boucle ;
-- mesure de plages guest ;
-- classement des plages les plus coûteuses.
+GP1 redevient autoritaire sur un vrai changement d'affichage. Le suivi de la
+draw-page n'est utilisé que dans un cas stale-GP1 conservateur.
 
-Malgré ces optimisations, le ralentissement reste visible. Cela indique que la
-cause principale est probablement ailleurs que dans la simple conversion du
-framebuffer.
+Capture importante sur le premier villageois :
 
-## Hypothèses à départager
+```text
+PRES g:0,0 l:0,0 d:0,0 p:0 nz:0/0
+```
 
-1. trop de temps passé dans le fallback R3000A ;
-2. une fonction guest / un callback exécuté anormalement souvent ;
-3. un wait PS1 bypassé de manière à créer une boucle active ;
-4. trop de travail GPU logiciel par frame ;
-5. coût important de copie/composition VRAM ;
-6. mauvais modèle VBlank/VSync provoquant plusieurs frames logiques par frame hôte ;
-7. bridge CD/DMA/GPU au timing incorrect ;
-8. instrumentation encore trop présente sur le chemin chaud.
+La bonne page est choisie mais elle ne contient pas le dialogue. Le presenter
+n'est donc plus le suspect principal.
 
-## Prochaine instrumentation
+### B135.79
 
-Mesurer au minimum :
+Instrumentation de la chaîne objets → walker → primitives GPU.
 
-- durée totale d'une frame hôte ;
-- durée passée dans le dispatcher ;
-- nombre d'instructions interprétées ;
-- nombre et durée des fallbacks R3000A ;
-- top 5 des plages PC guest par temps cumulé ;
-- temps du VBlank callback ;
-- temps du rendu logiciel ;
-- temps de copie/present ;
-- temps réellement passé à attendre VBlank ;
-- nombre de commandes GP0 / primitives par frame.
+Observation :
 
-Critère de succès :
+```text
+OBJ79 n:0/5/0/0/0/0/0
+WALK79 ... 408bc:0 ...
+GP2D79 rect/q/2c/3a:0/0/0/0
+```
 
-> pouvoir attribuer au moins 80 % du temps d'une frame à un ou deux composants
-> précis avant toute nouvelle optimisation.
+Interprétation : la liste C2 contient **5 objets**, mais
+`FUN_800408BC`, qui parcourt précisément `DAT_800F11C2`, n'est pas exécuté.
+Aucune primitive 2D correspondante n'atteint ensuite le GPU.
 
-## Cinématique
+### B135.80 — en attente de test
 
-La première cinématique est atteinte, mais son rendu n'est pas encore correct.
-Les travaux récents indiquent notamment des besoins autour du draw offset / draw
-area PS1, de la page framebuffer, du mode d'affichage, de RGB24/MDEC et de la
-composition de surfaces.
+B135.80 affiche :
 
-Cette partie doit être reprise juste après le diagnostic FPS afin d'éviter de
-confondre défaut de rendu et défaut de timing.
+- la table de renderers `0x800923DC..0x800923F4` ;
+- la case C2 `0x800923E0` ;
+- l'adresse attendue `800408BC` ;
+- si `800408BC` est une entrée reconnue du dispatcher ;
+- le nombre d'entrées dans `FUN_80041674`.
 
-## Ce qui reste non validé
+Le prochain test doit séparer :
 
-- cadence fluide/acceptable ;
-- cinématique fidèle ;
-- progression stable jusqu'au premier duel sur 3DS ;
-- émulation CD/IRQ/DMA générale sans bridges de bring-up ;
-- GTE complet ;
-- audio SPU/XA ;
-- memory card / sauvegarde ;
-- performance et stabilité sur New 3DS physique.
+- table C2 incorrecte ;
+- entrée 408BC absente du dispatcher ;
+- appel indirect/JALR cassé.
 
-Le runtime PC reste la référence fonctionnelle.
+## Problèmes encore ouverts
+
+- dialogue/personnage avant duel non rendu ;
+- dialogue après duel non rendu ;
+- images de cartes parfois associées aux mauvais noms/stats ;
+- duel trop lent ;
+- dette de bridges CD/DMA/GPU/IRQ ;
+- audio ;
+- sauvegarde memory card ;
+- validation New 3DS physique.
+
+## Ce qui ne doit plus être réinvestigué sans nouvelle preuve
+
+- menu SU invisible ;
+- simple sélection de page framebuffer comme cause du dialogue noir ;
+- probes de debug comme cause principale des 12–15 FPS ;
+- augmentation simple de la taille des chunks interpréteur comme solution FPS.
+
+Le runtime PC reste l'oracle fonctionnel pour les scènes attendues.

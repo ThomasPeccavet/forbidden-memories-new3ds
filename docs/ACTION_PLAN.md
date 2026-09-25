@@ -1,129 +1,103 @@
 # Plan d'action — New Nintendo 3DS
 
-Dernière mise à jour : **21 septembre 2026**.
+Dernière mise à jour : **25 septembre 2026**.
 
 ## Objectif actif
 
-Le menu SU est visible et navigable, « Nlle partie » fonctionne, la
-saisie/validation du nom fonctionne et le backend atteint la première
-cinématique / les premiers dialogues.
+Le port sait entrer en duel et jouer plusieurs tours, mais les dialogues 2D
+avant/après combat ne sont plus rendus.
 
-L'objectif immédiat est :
+Le prochain objectif est :
 
-> **retrouver une cadence acceptable en identifiant le hotspot réel, puis
-> corriger le rendu de la première cinématique.**
+> **rétablir la chaîne C2 de rendu du dialogue sans patch spécifique à un écran,
+> puis revenir au profiling global du duel.**
 
-## Phase 1 — Mesurer avant de modifier
+## Phase 1 — Tester B135.80
 
-Créer un profil court et lisible sur une fenêtre stable de plusieurs frames.
+Sur le premier villageois, relever :
 
-Mesurer par frame :
+```text
+TAB80 c0/c2/c4/cc:...
+C2TAB h:... ptr:........ exp:800408BC ent:... r416:...
+```
 
-- temps total boucle hôte ;
-- temps dispatcher / guest ;
-- temps callback VBlank ;
-- temps rendu GPU logiciel ;
-- temps composition/copie VRAM ;
-- temps de présentation 3DS ;
-- temps d'attente VBlank ;
-- instructions interprétées ;
-- appels fallback R3000A ;
-- commandes GP0 et primitives dessinées.
+Interprétation :
 
-Conserver les tops B110 de plages guest par temps cumulé, temps maximum et nombre
-d'appels.
+- `ptr != 800408BC` → table de fonctions C2 incorrecte ou mal chargée ;
+- `ptr = 800408BC`, `ent=0` → target absent du dispatcher compilé ;
+- `ptr = 800408BC`, `ent=1`, `408bc=0` → dispatch indirect/JALR défectueux ;
+- `408bc>0` mais GP2D reste à 0 → problème interne à 408BC / callbacks / sortie OT.
 
-### Critère de succès
+## Phase 2 — Corriger la cause, pas le symptôme
 
-Attribuer la majorité du coût à une catégorie concrète avant toute nouvelle
-optimisation.
+La correction devra être placée au bon niveau :
 
-## Phase 2 — Vérifier le timing guest
+- reconstruction de la table si elle est réellement corrompue ;
+- ajout de seed/entry si la fonction statique manque ;
+- correction du dispatch indirect si le pointeur est bon ;
+- correction d'un callback précis seulement si la trace le prouve.
 
-Contrôler :
+Éviter de forcer `FUN_800408BC` à chaque frame sans comprendre
+`FUN_80041674`.
 
-1. nombre de VBlanks guest par seconde hôte ;
-2. appels des callbacks guest par frame ;
-3. boucles qui attendent un état CD/DMA/GPU ;
-4. bridges qui passent immédiatement un wait au lieu de reproduire sa latence ;
-5. fonctions relancées plusieurs fois car un drapeau matériel n'évolue pas comme
-   sur PS1.
+## Phase 3 — Valider les dialogues
 
-### Angle d'attaque prioritaire
+Scénario minimal :
 
-Rechercher une plage PC avec énormément de hits et peu de progression logique :
-une routine qui devrait attendre mais tourne en boucle active expliquerait mieux
-quelques FPS qu'une simple conversion framebuffer déjà optimisée.
+1. nouvelle partie ;
+2. carte ;
+3. parler au premier villageois ;
+4. personnage et texte visibles ;
+5. entrer dans le duel ;
+6. finir le duel ;
+7. parler au personnage suivant ;
+8. texte/personnage visibles.
 
-## Phase 3 — Isoler interpréteur vs code recompilé
+Critère : aucune dépendance à un save-state ancien.
 
-Ajouter ou exploiter des compteurs distincts :
+## Phase 4 — Revenir à la performance duel
 
-- appels vers fonction recompilée ;
-- appels fallback ;
-- instructions R3000A interprétées ;
-- temps cumulé dans l'interpréteur ;
-- temps cumulé dans les fonctions ARM générées.
+Les essais déjà réfutés :
 
-Si quelques fonctions overlay dominent, les identifier par adresse et envisager
-leur recompilation ciblée.
+- B135.74 : suppression diagnostics chauds → aucun gain ;
+- B135.75 : fast path interpréteur → aucun gain visible.
 
-## Phase 4 — GPU logiciel et présentation
+La prochaine mesure doit séparer :
 
-Ne poursuivre ici que si le profiling l'indique.
+- code ARM recompilé ;
+- fallback R3000A ;
+- rasteriseur logiciel ;
+- DMA / OT / soumission ;
+- présentation ;
+- waits ;
+- routines guest répétées.
 
-Mesurer :
+Ne pas optimiser avant d'avoir identifié le budget dominant.
 
-- pixels réellement rasterisés ;
-- primitives par frame ;
-- coût texture/CLUT ;
-- coût composition base + overlay ;
-- coût conversion RGB555 ;
-- coût flush framebuffer.
+## Phase 5 — Images de cartes
 
-Pistes possibles seulement si confirmées : dirty rectangles, moins de copies,
-chemins spécialisés, traitement cache-friendly, puis à plus long terme rendu
-natif GPU 3DS.
+Une fois le dialogue stable :
 
-## Phase 5 — Première cinématique
+- tracer ID logique de carte ;
+- adresse/offset asset ;
+- CLUT / tpage ;
+- relation nom/stats/image ;
+- comparer au runtime PC.
 
-Une fois les FPS maîtrisés, reprendre :
+## Phase 6 — Réduire la dette B135
 
-- GP0 E3/E4/E5 draw area/draw offset ;
-- GP1 display start ;
-- display mode ;
-- RGB24 ;
-- MDEC input/output ;
-- page VRAM affichée ;
-- composition des plans.
+Pour B135.64 / 66 / 71 :
 
-### Critère de succès
+1. documenter condition et effet ;
+2. remonter au code PS1 qui devrait produire l'état ;
+3. remplacer progressivement le safety net par le comportement natif ;
+4. vérifier le duel après chaque retrait.
 
-Cinématique lisible et cadrée suffisamment pour poursuivre les dialogues sans
-patch visuel spécifique.
+## Discipline
 
-## Phase 6 — Premier duel
-
-1. progresser dans les dialogues ;
-2. tracer chaque nouvel overlay ;
-3. corriger uniquement les nouveaux besoins matériels rencontrés ;
-4. atteindre Simon Muran ;
-5. afficher le plateau ;
-6. jouer un tour complet.
-
-## Phase 7 — Réduire la dette de bring-up
-
-Pour chaque bridge : documenter sa condition, retrouver le comportement PS1,
-déplacer la correction dans CD/DMA/GPU/IRQ/timing, puis supprimer le patch
-spécifique.
-
-## Discipline de travail
-
-- profiler avant d'optimiser ;
-- ne pas transformer un appel inconnu en no-op sans preuve ;
-- ne pas réouvrir un problème déjà validé sauf régression ;
-- conserver capture/mesure à chaque jalon ;
-- comparer avec le runtime PC ;
-- ne pas versionner BIN, BIOS Sony, EXE extrait ni shards C propriétaires ;
-- garder PSXRecomp sur la révision documentée tant qu'un changement amont n'est
-  pas volontairement validé.
+- une hypothèse par branche ;
+- un test discriminant avant un correctif ;
+- conserver B135.71 comme oracle ;
+- ne pas rebasculer vers les heuristiques de framebuffer déjà réfutées ;
+- ne jamais committer BIN, BIOS Sony, EXE extrait ni données propriétaires ;
+- captures + compteurs + commit pour chaque jalon.

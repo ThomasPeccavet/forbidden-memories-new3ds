@@ -1,120 +1,103 @@
 # Feuille de route
 
 Objectif final : **Yu-Gi-Oh! Forbidden Memories PAL France jouable de bout en
-bout sur New Nintendo 3DS**, avec un chemin reproductible et de moins en moins
+bout sur New Nintendo 3DS**, avec un backend reproductible et de moins en moins
 dépendant des bridges de bring-up.
 
-Dernière mise à jour : **21 septembre 2026**.
+Dernière mise à jour : **25 septembre 2026**.
 
 ## 1 — Base française et analyse
 
-- [x] Identifier SLES-03948 et ses empreintes.
-- [x] Extraire et analyser le PS-X EXE.
-- [x] Exécuter plusieurs passes Ghidra.
-- [x] Étudier le chemin résident.
-- [x] Étudier SU.MRG et plusieurs overlays.
-- [x] Valider le runtime PC jusqu'au premier duel.
+- [x] Identifier SLES-03948.
+- [x] Extraire/analyser le PS-X EXE.
+- [x] Passes Ghidra françaises.
+- [x] Étude résident + overlays.
+- [x] Runtime PC jusqu'au premier duel.
 
 ## 2 — Backend natif New 3DS
 
-- [x] Application libctru native.
-- [x] Lecture BIN depuis SD.
+- [x] libctru / ARM11.
+- [x] lecture BIN MODE2/2352.
 - [x] RAM PS1 / CPUState.
-- [x] Code résident recompilé ARM11.
-- [x] Dispatcher statique.
-- [x] Fallback R3000A.
-- [x] HLE BIOS nécessaire au boot.
+- [x] code résident recompilé.
+- [x] dispatcher statique.
+- [x] fallback R3000A.
+- [x] HLE BIOS nécessaire au chemin courant.
 - [x] GP0/GP1 + rasteriseur logiciel.
-- [x] Logo Konami.
-- [x] Écran titre.
 
-## 3 — Kernel / CD / GPU du chemin courant
+## 3 — Menu / nouvelle partie / carte
 
-- [x] Pad START transmis au guest.
-- [x] VBlank / IRQ suffisants pour atteindre le menu.
-- [x] Lectures CD suffisantes pour les overlays rencontrés.
-- [x] File CD async suffisante pour le chemin observé.
-- [x] DMA2 / waits GPU bridgés pour le chemin observé.
-- [x] Helpers GTE nécessaires au chemin courant.
-- [ ] Remplacer les bridges de bring-up par des modèles généraux.
+- [x] logo Konami.
+- [x] écran titre.
+- [x] SU.mrg.
+- [x] menu français.
+- [x] navigation.
+- [x] nouvelle partie.
+- [x] saisie/validation du nom.
+- [x] carte et choix d'adversaire.
 
-## 4 — Overlay SU et menu principal
+## 4 — Premier duel 3DS
 
-- [x] Charger SU.mrg.
-- [x] Exécuter init/update/draw.
-- [x] Créer les objets du menu.
-- [x] Débloquer l'animation d'entrée.
-- [x] Afficher le menu français.
-- [x] Naviguer dans le menu.
-- [x] Valider une entrée.
+- [x] entrer dans un duel.
+- [x] afficher la main.
+- [x] jouer plusieurs tours.
+- [x] tour adverse.
+- [x] rendu 3D du duel.
+- [ ] corriger les images de cartes.
+- [ ] stabiliser toutes les transitions pré/post duel.
+- [ ] rendre les dialogues 2D visibles.
 
-## 5 — Nouvelle partie / introduction
+## 5 — Chaîne dialogue 2D — priorité actuelle
 
-- [x] Lancer « Nlle partie ».
-- [x] Afficher la saisie du nom.
-- [x] Saisir le nom.
-- [x] Valider le nom.
-- [x] Atteindre la première cinématique.
-- [x] Atteindre les premiers dialogues.
-- [ ] Corriger le rendu de la première cinématique.
-- [ ] Stabiliser les transitions suivantes.
-- [ ] Atteindre Simon Muran sur le backend 3DS.
+- [x] éliminer la sélection framebuffer comme cause principale.
+- [x] prouver que la liste C2 contient des objets.
+- [x] identifier `FUN_800408BC` comme renderer de C2.
+- [x] prouver qu'il n'est pas exécuté dans l'écran noir.
+- [x] instrumenter la table `0x800923DC..F4`.
+- [ ] tester B135.80.
+- [ ] corriger table / dispatcher / indirect call selon résultat.
+- [ ] valider dialogue avant et après duel.
 
-## 6 — Performance — priorité actuelle
+## 6 — Performance
 
-- [x] Compiler le runtime 3DS en -O3.
-- [x] Recompiler les shards générés en release.
-- [x] Optimiser la conversion RGB555.
-- [x] Éviter le clear complet à chaque frame.
-- [x] Limiter le flush/swap au top screen.
-- [x] Ajouter des mesures de temps de frame.
-- [x] Ajouter un profiler de plages guest.
-- [ ] Mesurer précisément interpréteur vs code ARM recompilé.
-- [ ] Identifier le hotspot dominant.
-- [ ] Vérifier les boucles d'attente/bypass CD-DMA-GPU.
-- [ ] Vérifier le ratio frame guest / VBlank hôte.
-- [ ] Ramener le chemin menu → cinématique à une cadence acceptable.
-- [ ] Tester ensuite sur New 3DS physique.
+- [x] -O3 / release.
+- [x] PROFILE/CLEAN séparés.
+- [x] B135.74 : diagnostics compilés hors CLEAN.
+- [x] conclure que B135.74 n'améliore pas les FPS.
+- [x] B135.75 : fast path interpréteur.
+- [x] conclure que B135.75 n'améliore pas visiblement les FPS.
+- [ ] profiler le budget réel duel.
+- [ ] identifier le hotspot dominant.
+- [ ] viser une cadence exploitable.
+- [ ] tester New 3DS physique.
 
-## 7 — Premier duel 3DS
+## 7 — Fidélité matérielle
 
-- [ ] Atteindre Simon Muran.
-- [ ] Afficher le plateau.
-- [ ] Afficher la main.
-- [ ] Jouer une carte.
-- [ ] Terminer un tour complet.
-- [ ] Comparer avec le runtime PC.
-
-## 8 — Fidélité matérielle
-
-- [ ] CD-ROM async général.
+- [ ] CD async général.
 - [ ] DMA GPU général.
 - [ ] IRQ/timers propres.
-- [ ] GTE complet selon les besoins rencontrés.
-- [ ] MDEC / RGB24 / cinématiques fidèles.
-- [ ] Texture window / CLUT / semi-transparence / masking validés.
-- [ ] Suppression progressive des bridges temporaires.
+- [ ] GTE complet selon besoins.
+- [ ] MDEC/RGB24.
+- [ ] texture window / CLUT / semi-transparence / masking validés.
+- [ ] suppression progressive des bridges.
 
-## 9 — Audio et sauvegarde
+## 8 — Audio / sauvegarde
 
 - [ ] SPU.
 - [ ] XA.
-- [ ] Synchronisation audio/vidéo.
-- [ ] Memory card.
-- [ ] Sauvegarde / chargement.
+- [ ] synchronisation audio/vidéo.
+- [ ] memory card.
+- [ ] sauvegarde/chargement.
 
-## 10 — Validation complète
+## 9 — Validation complète
 
-- [ ] Test New 3DS physique.
-- [ ] Profiling ARM11 final.
-- [ ] Campagne complète.
-- [ ] Menus / duels / progression validés.
-- [ ] Robustesse des changements d'overlay.
-- [ ] Nettoyage des diagnostics de bring-up.
+- [ ] campagne complète.
+- [ ] menus/duels/progression.
+- [ ] robustesse overlays.
+- [ ] profiling ARM11 final.
+- [ ] nettoyage diagnostics.
+- [ ] test New 3DS physique.
 
 ## Jalon immédiat
 
-> **Identifier la cause principale des quelques FPS actuels, la corriger, puis
-> reprendre le rendu de la première cinématique.**
-
-Voir [ACTION_PLAN.md](ACTION_PLAN.md).
+> **Tester B135.80 et restaurer le renderer C2 du dialogue.**

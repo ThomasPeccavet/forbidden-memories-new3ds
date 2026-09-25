@@ -1,75 +1,50 @@
 > [!NOTE]
-> **Jalon historique PC.** Ce document décrit le runtime PC du 16 septembre 2026. Le chantier prioritaire est désormais le backend New 3DS natif ; voir [CURRENT_STATUS.md](CURRENT_STATUS.md), [ACTION_PLAN.md](ACTION_PLAN.md) et [WORK_HANDOFF.md](WORK_HANDOFF.md).
+> **Jalon historique PC + comparaison 3DS.** Le scénario PC reste l'oracle
+> fonctionnel. Depuis septembre 2026, le backend New 3DS a lui aussi atteint un
+> duel jouable plusieurs tours, mais avec des limites de performance et de rendu.
 
-# Première partie et premières actions de duel sur PC
+# Première partie et premières actions de duel
 
-Validation du 16 septembre 2026, sur le runtime PC français construit dans ce
-dépôt. Une nouvelle partie avec le nom de test AAA a été créée ; les dialogues
-d'introduction ont été traversés jusqu'au choix Duel face à Simon Muran.
+## Runtime PC — référence
+
+Le runtime PC français a validé une nouvelle partie, les dialogues
+d'introduction, le duel contre Simon Muran, la pose d'une carte et le passage au
+tour adverse.
 
 ![Premier duel](../research/first-duel/duel.png)
-
-## Résultats observés
-
-- Le clavier de nom accepte les lettres et le déplacement du curseur.
-- Le nom est confirmé, le code du duelliste est annoncé et l'introduction
-  affiche les personnages et les dialogues français.
-- Le choix Duel conduit à la préparation des cartes, puis au plateau 3D.
-- Le joueur reçoit cinq cartes ; les deux compteurs de vie affichent 8000.
-- Une carte est sélectionnée, placée face cachée sur un emplacement du terrain,
-  puis son étoile gardienne est confirmée.
-- Start termine le tour : une carte apparaît côté adverse et une nouvelle main
-  est présentée au joueur. Son compteur de pioche passe de 35 à 34.
 
 ![Carte posée](../research/first-duel/card-set.png)
 
 ![Tour suivant](../research/first-duel/next-turn.png)
 
-Le duel n'a pas été terminé. Les dégâts, les fusions, les récompenses, l'audio,
-la sauvegarde puis son rechargement restent à valider. La présence du code du
-duelliste ne prouve pas à elle seule une sauvegarde fonctionnelle.
+Cette séquence reste l'oracle visuel/fonctionnel du port 3DS.
 
-Le moteur PC conserve sa prise en charge du code dynamique : cette avancée
-n'est pas la preuve d'un port intégralement natif ou d'une recompilation de tous
-les overlays. Les compteurs de dispatch ne sont pas un pourcentage de couverture.
+## Backend New 3DS — état au 25 septembre 2026
 
-## Configuration et entrées
+La lignée B135.71 atteint également un duel jouable :
 
-La révision du moteur reste `1965b2df424da03483a5370340433a862f78f103`.
-Le scénario réussi utilise le scheduler HLE par défaut, le rendu logiciel,
-le mode headless et une manette numérique déclarée explicitement :
+- main visible ;
+- plusieurs tours ;
+- adversaire actif ;
+- rendu 3D fonctionnel.
 
-```toml
-[controller]
-p1_mode="digital"
-lock_mode=true
-```
+Différences encore ouvertes :
 
-Les boutons injectés sont actifs à zéro : Start `0xFFF7`, Croix `0xBFFF`,
-Rond `0xDFFF`, Droite `0xFFDF`. Les commandes TCP acceptées ne suffisent pas à
-prouver une action : les captures et la réponse visuelle du jeu ont été vérifiées séparément.
+- ~12–15 FPS en situation normale ;
+- ~4 FPS pendant certaines attaques ;
+- certaines images de cartes ne correspondent pas encore au nom/stats ;
+- les dialogues 2D avant/après combat ne sont pas rendus.
 
-## Incident d'intégrité du disque
+Le bug dialogue est actuellement localisé en amont du GPU : la liste C2 contient
+5 objets mais `FUN_800408BC` n'est pas exécuté.
 
-Une copie de travail du BIN faisait 511336448 octets au lieu de 548427600.
-Une nouvelle extraction depuis `disc.zip` a retrouvé l'empreinte attendue :
-`9ef0d0ba5e42b838bd8312ecfe4071b09c44bc08ee896f6b76f913a41fe4b835`.
-Avec cette copie et le scheduler d'origine, le scénario a été rejoué depuis le début jusqu'au duel.
+## Données PC
 
-`probe_pc_boot.py` refuse désormais un disque dont la taille ou le SHA-256 ne
-correspond pas au BIN français connu.
+Le moteur PC utilise le scheduler HLE, le rendu logiciel et le contrôleur
+numérique verrouillé. Les scripts et preuves historiques restent dans
+`research/first-duel/`.
 
-## Rejouer et diagnostiquer
+## Portée
 
-Le script accepte `--input-script`. La séquence des actions de cette session est dans
-[inputs.json](../research/first-duel/inputs.json).
-
-```sh
-python tools/probe_pc_boot.py --runtime "<build>/fm-pc" --framework "<moteur>" --config "<game.toml avec controller digital>" --bios "<moteur>/bios/openbios.bin" --disc "<disque vérifié>/disc.cue" --output "work/replay-duel" --input-script research/first-duel/inputs.json
-```
-
-[evidence.json](../research/first-duel/evidence.json) contient les réponses du scénario vérifié, les empreintes des captures et les limites des vérifications. Les dumps RAM et données du jeu restent locaux.
-
-## Portée actuelle de ce document
-
-Ce document reste la référence fonctionnelle PC pour ce que le backend New 3DS devra reproduire : création d'une partie, introduction, entrée en duel, placement d'une carte et passage au tour adverse.
+Ce document décrit le comportement attendu du duel. Pour l'état exact du backend
+3DS, voir [CURRENT_STATUS.md](CURRENT_STATUS.md).

@@ -2,46 +2,55 @@
 
 Point d'entrée de la documentation du portage New Nintendo 3DS.
 
-Dernière mise à jour globale : **21 septembre 2026**.
+Dernière mise à jour globale : **25 septembre 2026**.
 
-## État courant
+## À lire en premier
 
-- [CURRENT_STATUS.md](CURRENT_STATUS.md) — état réel du backend : menu, nouvelle partie, saisie du nom, première cinématique et problème FPS.
-- [ACTION_PLAN.md](ACTION_PLAN.md) — plan actif : profiling, timing, fallback, puis cinématique.
-- [ROADMAP.md](ROADMAP.md) — feuille de route globale jusqu'au jeu complet.
-- [WORK_HANDOFF.md](WORK_HANDOFF.md) — contexte compact pour reprendre immédiatement.
-- [NEW3DS_PROTOTYPE.md](NEW3DS_PROTOTYPE.md) — architecture et build du prototype.
-- [ANALYSIS.md](ANALYSIS.md) — constantes et observations de la version française.
-- [AUTOMATED_TESTS.md](AUTOMATED_TESTS.md) — contrôles automatisés disponibles.
+- [CURRENT_STATUS.md](CURRENT_STATUS.md) — état réel du backend au jalon B135.80.
+- [ACTION_PLAN.md](ACTION_PLAN.md) — plan actif : restaurer le renderer C2, puis reprendre les performances.
+- [ROADMAP.md](ROADMAP.md) — feuille de route globale.
+- [WORK_HANDOFF.md](WORK_HANDOFF.md) — contexte compact pour reprendre sans historique de chat.
+- [B135.76_80_RENDER_PIPELINE.md](B135.76_80_RENDER_PIPELINE.md) — enquête actuelle sur les dialogues 2D.
+- [NEW3DS_PROTOTYPE.md](NEW3DS_PROTOTYPE.md) — architecture du prototype.
+- [ANALYSIS.md](ANALYSIS.md) — observations françaises consolidées.
+- [AUTOMATED_TESTS.md](AUTOMATED_TESTS.md) — CI et tests de régression.
 
-## Jalon actuel New 3DS
+## Jalon actuel
 
-Le backend a dépassé le menu SU :
+Le backend New 3DS sait désormais aller beaucoup plus loin que le menu :
 
-- logo Konami ;
-- écran titre ;
-- menu principal visible ;
-- navigation / validation ;
-- nouvelle partie ;
-- saisie et validation du nom ;
-- première cinématique / premiers dialogues atteints.
+- nouvelle partie et nom ;
+- carte / sélection d'adversaire ;
+- premier duel ;
+- main visible ;
+- plusieurs tours jouables ;
+- tour adverse fonctionnel.
 
-Le verrou prioritaire est maintenant la **performance**, avec seulement quelques
-FPS observés. La cinématique atteinte reste également visuellement incorrecte.
+La baseline duel B135.71 reste lente (~12–15 FPS, chute ~4 FPS en attaque) mais
+fonctionnelle.
 
-## Références historiques PC
+Le verrou immédiat est distinct : les dialogues 2D autour des combats ne sont
+plus rendus. B135.79 a prouvé que 5 objets existent dans la liste C2 mais que le
+renderer attendu `FUN_800408BC` n'est jamais appelé. B135.80 instrumente
+désormais la table de pointeurs utilisée par `FUN_80041674`.
 
-- [PC_RUNTIME_BASE.md](PC_RUNTIME_BASE.md)
-- [PC_RUNTIME_BUILD.md](PC_RUNTIME_BUILD.md)
+## Notes de performance
+
+- B135.74 CLEAN : aucun gain mesurable.
+- B135.75 Interpreter Fast Path : aucun gain visible.
+- Ne plus supposer que les probes ou le chunking de l'interpréteur expliquent
+  seuls la lenteur du duel.
+
+## Références historiques
+
 - [FIRST_MENU.md](FIRST_MENU.md)
 - [FIRST_DUEL.md](FIRST_DUEL.md)
-
-## Analyse Ghidra / SU
-
+- [PC_RUNTIME_BASE.md](PC_RUNTIME_BASE.md)
+- [PC_RUNTIME_BUILD.md](PC_RUNTIME_BUILD.md)
 - [GHIDRA_FIRST_PASS_REVIEW.md](GHIDRA_FIRST_PASS_REVIEW.md)
 - [SU_LOADING_TRACE.md](SU_LOADING_TRACE.md)
 - [SU_PROBE_RESULTS.md](SU_PROBE_RESULTS.md)
 - [SU_MENU_ANALYSIS.md](SU_MENU_ANALYSIS.md)
 
-Quand une note historique contredit [CURRENT_STATUS.md](CURRENT_STATUS.md), le
-document courant prévaut.
+Les notes historiques restent volontairement conservées. Si elles contredisent
+[CURRENT_STATUS.md](CURRENT_STATUS.md), l'état courant prévaut.
