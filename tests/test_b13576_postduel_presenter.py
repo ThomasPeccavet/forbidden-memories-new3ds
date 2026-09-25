@@ -8,27 +8,24 @@ MAIN = (ROOT / "3ds/source/main.c").read_text(encoding="utf-8")
 
 
 class B13576PostDuelPresenterTests(unittest.TestCase):
-    def _b13576_block(self) -> str:
-        marker = "B135.44 used fm_gpu_b127_perf_snapshot() here"
+    def _draw_page_resolution_block(self) -> str:
+        marker = "int b13577_draw_x1 = 0;"
         start = MAIN.index(marker)
-        end = MAIN.index("if (display_changed)", start)
+        end = MAIN.index("B104 : GP1(08)", start)
         return MAIN[start:end]
 
     def test_stale_gp1_path_reads_real_draw_environment(self) -> None:
-        block = self._b13576_block()
+        block = self._draw_page_resolution_block()
         self.assertIn("fm_gpu_b100_env_get(", block)
-        self.assertNotIn(
-            "\n                fm_gpu_b127_perf_snapshot(",
-            block,
-        )
+        self.assertNotIn("fm_gpu_b127_perf_snapshot(", block)
 
     def test_stale_gp1_path_tracks_both_x_and_y_pages(self) -> None:
-        block = self._b13576_block()
-        self.assertIn("unsigned draw_page_x = current_x;", block)
-        self.assertIn("unsigned draw_page_y = current_y;", block)
-        self.assertIn("draw_y1 >= 256", block)
-        self.assertIn("draw_page_y = 256u;", block)
-        self.assertIn("latch_y = draw_page_y;", block)
+        block = self._draw_page_resolution_block()
+        self.assertIn("unsigned b13577_draw_page_x = current_x;", block)
+        self.assertIn("unsigned b13577_draw_page_y = current_y;", block)
+        self.assertIn("b13577_draw_y1 >= 256", block)
+        self.assertIn("b13577_draw_page_y = 256u;", block)
+        self.assertIn("b13577_draw_page_valid_y = 1;", block)
 
     def test_density_sampling_uses_current_display_y(self) -> None:
         self.assertIn("unsigned sample_y = current_y;", MAIN)
