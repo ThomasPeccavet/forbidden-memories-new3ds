@@ -7,6 +7,10 @@
 #include <stdint.h>
 #include <string.h>
 
+#ifndef FM_PERF_PROFILE
+#define FM_PERF_PROFILE 0
+#endif
+
 
 extern int psx_dispatch_game_compiled(
     CPUState *cpu,
@@ -1263,6 +1267,7 @@ void psx_check_interrupts_dispatch_entry(
     uint32_t phys =
         resume_pc & 0x1FFFFFFFu;
 
+#if FM_PERF_PROFILE
     g_b13565_last_entry =
         resume_pc;
 
@@ -1295,6 +1300,7 @@ void psx_check_interrupts_dispatch_entry(
         default:
             break;
     }
+#endif
 
     /*
      * B135.70 - lightweight single-OT samples.

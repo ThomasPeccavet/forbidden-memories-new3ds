@@ -6,6 +6,10 @@
 #include <stdint.h>
 #include <string.h>
 
+#ifndef FM_PERF_PROFILE
+#define FM_PERF_PROFILE 0
+#endif
+
 
 /*
  * ============================================================
@@ -1375,6 +1379,7 @@ static void fm_dma2_complete(void)
 
 static void fm_dma2_linked_profile_finish(uint64_t start_ms)
 {
+#if FM_PERF_PROFILE
     /*
      * B135.29 - coarse linked-list timing.
      *
@@ -1412,13 +1417,18 @@ static void fm_dma2_linked_profile_finish(uint64_t start_ms)
     {
         g_dma2_max_empty_ot_nodes = g_dma2_last_empty_ot_nodes;
     }
+#else
+    (void)start_ms;
+#endif
 }
 
 
 static int fm_dma2_linked_list(void)
 {
-    uint64_t b120_start_ms =
-        osGetTime();
+    uint64_t b120_start_ms = 0u;
+
+#if FM_PERF_PROFILE
+    b120_start_ms = osGetTime();
 
     /*
      * B135.32: GHOT/GHOT2 must describe THIS linked list.  The previous
@@ -1426,6 +1436,7 @@ static int fm_dma2_linked_list(void)
      * sprites look like current frame hotspots.
      */
     fm_gpu_b13532_profile_reset();
+#endif
 
     /*
      * Skipped canonical ranges are remembered so a later malformed link
@@ -1435,8 +1446,10 @@ static int fm_dma2_linked_list(void)
     uint32_t b121_skip_hi[16];
     uint32_t b121_skip_ranges = 0u;
 
+#if FM_PERF_PROFILE
     uint32_t b13554_hand_list_hits = 0u;
     int b13554_hand_seen = 0;
+#endif
 
     uint32_t addr =
         g_dma2_madr
@@ -1690,6 +1703,7 @@ static int fm_dma2_linked_list(void)
             }
         }
 
+#if FM_PERF_PROFILE
         int b13554_is_hand_packet = 0;
 
         if (count >= 5u)
@@ -1756,6 +1770,7 @@ static int fm_dma2_linked_list(void)
         {
             ++g_b13554_hand_after_payloads;
         }
+#endif
 
         uint32_t command_addr =
             (

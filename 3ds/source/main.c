@@ -6,6 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef FM_PERF_PROFILE
+#define FM_PERF_PROFILE 0
+#endif
+
 #include "fm_platform.h"
 #include "fm_cpu.h"
 #include "fm_memory.h"
@@ -17618,7 +17622,11 @@ int main(void)
             FMDmaDebugStats b130_dma = {0};
             fm_memory_dma_debug(&b130_dma);
 
-            printf("BUILD B135.71-FORCE-HAND-SUBMIT-GATE (BASE B131)\n");
+#if FM_PERF_PROFILE
+            printf("BUILD B135.74-PROFILE (SAFE B135.71)\n");
+#else
+            printf("BUILD B135.74-CLEAN (SAFE B135.71)\n");
+#endif
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
@@ -17870,6 +17878,7 @@ int main(void)
                 (unsigned long)b130_dma.dma2_empty_fast_max
             );
 
+#if FM_PERF_PROFILE
             {
                 FMGpuOpcodePerf hot0 = {0};
                 FMGpuOpcodePerf hot1 = {0};
@@ -18151,6 +18160,7 @@ int main(void)
                         gpu_debug.b126_seen_3a;
                 }
             }
+#endif /* FM_PERF_PROFILE */
 
             /*
              * Les anciens diagnostics restent dans le fichier pour

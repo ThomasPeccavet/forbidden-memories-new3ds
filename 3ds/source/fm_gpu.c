@@ -7,6 +7,10 @@
 #include <stdint.h>
 #include <string.h>
 
+#ifndef FM_PERF_PROFILE
+#define FM_PERF_PROFILE 0
+#endif
+
 
 /*
  * ============================================================
@@ -925,6 +929,7 @@ static int b124_try_textured_rect(
 
     ++g_b124_rect_hits;
 
+#if FM_PERF_PROFILE
     g_b13543_last_x = x;
     g_b13543_last_y = y;
     g_b13543_last_w = w;
@@ -935,6 +940,7 @@ static int b124_try_textured_rect(
     g_b13543_last_area_y1 = g_draw_y1;
     g_b13543_last_area_x2 = g_draw_x2;
     g_b13543_last_area_y2 = g_draw_y2;
+#endif
 
     if (w <= 0 || h <= 0)
     {
@@ -958,7 +964,9 @@ static int b124_try_textured_rect(
 
     if (x0 >= x1 || y0 >= y1)
     {
+#if FM_PERF_PROFILE
         ++g_b13543_rect_clip_rejects;
+#endif
         return 1;
     }
 
@@ -1039,7 +1047,9 @@ static int b124_try_textured_rect(
                 continue;
             }
 
+#if FM_PERF_PROFILE
             ++g_b13543_rect_nonzero_texels;
+#endif
 
             if (
                 g_mask_check
@@ -1106,7 +1116,9 @@ static int b124_try_textured_rect(
             *dst =
                 color;
 
+#if FM_PERF_PROFILE
             ++g_b13543_rect_writes;
+#endif
         }
     }
 
@@ -1838,12 +1850,14 @@ static void b13511_shaded_textured_triangle(
     int semi
 )
 {
+#if FM_PERF_PROFILE
     ++g_b13534_tri_calls;
 
     uint64_t b13534_begin =
         g_b13534_sample_active
             ? svcGetSystemTick()
             : 0u;
+#endif
 
 #define B13511_SWAP_INT(a,b) do { int _t=(a); (a)=(b); (b)=_t; } while (0)
 #define B13511_SWAP_U32(a,b) do { uint32_t _t=(a); (a)=(b); (b)=_t; } while (0)
@@ -1984,12 +1998,14 @@ static void b13511_shaded_textured_triangle(
     {
         ++g_b13533_34_fast_hits;
 
+#if FM_PERF_PROFILE
         unsigned d =
             texctx.depth < 2u
                 ? texctx.depth
                 : 2u;
 
         ++g_b13535_depth_hits[d];
+#endif
     }
 
     /*
@@ -2008,10 +2024,12 @@ static void b13511_shaded_textured_triangle(
     if (ys < 0) ys = 0;
     if (ye > 512) ye = 512;
 
+#if FM_PERF_PROFILE
     uint64_t b13534_raster_begin =
         g_b13534_sample_active
             ? svcGetSystemTick()
             : 0u;
+#endif
 
     for (int y = ys; y < ye; ++y)
     {
@@ -2226,6 +2244,7 @@ static void b13511_shaded_textured_triangle(
             (uint64_t)b13537_fast_pixels;
     }
 
+#if FM_PERF_PROFILE
     if (g_b13534_sample_active)
     {
         uint64_t b13534_end =
@@ -2239,6 +2258,7 @@ static void b13511_shaded_textured_triangle(
 
         ++g_b13534_samples;
     }
+#endif
 
 #undef B13511_SWAP_INT
 #undef B13511_SWAP_U32
@@ -5497,10 +5517,10 @@ void fm_gpu_gp0_write(
         g_cmd_need
     )
     {
+#if FM_PERF_PROFILE
         /*
-         * B135.30: sample 1/16 completed commands.  The opcode is captured
-         * before execute_command() because that routine may update parser
-         * state for uploads and other GP0 families.
+         * B135.30/34/35: sampled opcode/raster timing is PROFILE-only.
+         * CLEAN executes the exact same GP0 command path without clocks.
          */
         uint8_t completed_opcode =
             (uint8_t)((g_cmd[0] >> 24) & 0xFFu);
@@ -5532,6 +5552,9 @@ void fm_gpu_gp0_write(
 
             execute_command();
         }
+#else
+        execute_command();
+#endif
 
         g_cmd_have =
             0;
