@@ -44,7 +44,19 @@ jobs:
       - name: Report object sizes and unresolved ABI imports
         run: |
           "$DEVKITARM/bin/arm-none-eabi-size" -t 3ds/build/*.o
+
+          defined=/tmp/fm-native-defined.txt
+          undefined=/tmp/fm-native-undefined.txt
+
+          "$DEVKITARM/bin/arm-none-eabi-nm" \
+            -g --defined-only 3ds/build/*.o \
+            | awk 'NF >= 3 {print $NF}' \
+            | sort -u > "$defined"
+
           "$DEVKITARM/bin/arm-none-eabi-nm" -u 3ds/build/*.o \
             | sed '/:$/d' \
             | awk '{print $NF}' \
-            | sort -u
+            | sort -u > "$undefined"
+
+          echo "External ABI imports after native cross-object resolution:"
+          comm -23 "$undefined" "$defined"
