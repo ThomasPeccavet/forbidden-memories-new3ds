@@ -16534,20 +16534,24 @@ int main(void)
                          * Execute across internal MIPS branch boundaries inside
                          * fm_interp.c. A 256-instruction chunk amortizes the
                          * block-return/dispatcher overhead while still letting
-                         * main.c enforce the 12 ms host slice accurately.
+                         * main.c enforce the host slice. B135.75 raises the
+                         * chunk from 256 to 2048 instructions while reducing
+                         * the outer limit from 256 to 32, preserving the same
+                         * 65536-instruction ceiling but cutting dispatcher/
+                         * clock-check overhead by up to 8x.
                          */
                         while (
                             game_running
                             &&
                             b13517_is_map_interp_pc(cpu->pc)
                             &&
-                            b13519_chunks < 256u
+                            b13519_chunks < 32u
                         )
                         {
                             interp =
                                 fm_interp_run_region(
                                     cpu,
-                                    256u,
+                                    2048u,
                                     0x000342B0u,
                                     0x00035AC8u,
                                     0x00034D30u
@@ -17623,9 +17627,9 @@ int main(void)
             fm_memory_dma_debug(&b130_dma);
 
 #if FM_PERF_PROFILE
-            printf("BUILD B135.74-PROFILE (SAFE B135.71)\n");
+            printf("BUILD B135.75-INTERP-PROFILE (SAFE B135.71)\n");
 #else
-            printf("BUILD B135.74-CLEAN (SAFE B135.71)\n");
+            printf("BUILD B135.75-INTERP-CLEAN (SAFE B135.71)\n");
 #endif
 
             printf(
