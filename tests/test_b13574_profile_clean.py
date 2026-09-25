@@ -19,8 +19,8 @@ class B13574ProfileCleanTests(unittest.TestCase):
         self.assertIn("-DFM_PERF_PROFILE=1", MAKEFILE)
 
     def test_clean_build_has_visible_identity(self) -> None:
-        self.assertIn("BUILD B135.74-CLEAN (SAFE B135.71)", MAIN)
-        self.assertIn("BUILD B135.74-PROFILE (SAFE B135.71)", MAIN)
+        self.assertIn("BUILD B135.75-INTERP-CLEAN (SAFE B135.71)", MAIN)
+        self.assertIn("BUILD B135.75-INTERP-PROFILE (SAFE B135.71)", MAIN)
 
     def test_hot_gpu_diagnostics_are_profile_only(self) -> None:
         self.assertIn("#if FM_PERF_PROFILE", GPU)
