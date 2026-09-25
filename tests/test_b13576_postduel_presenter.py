@@ -34,16 +34,16 @@ class B13576PostDuelPresenterTests(unittest.TestCase):
         self.assertIn("unsigned sample_y = current_y;", MAIN)
         self.assertIn("unsigned sy = (sample_y + py) & 511u;", MAIN)
 
-    def test_fallback_no_longer_forces_y_zero(self) -> None:
-        marker = "B135.76: preserve the current GP1 Y page"
+    def test_display_change_preserves_real_gp1_y(self) -> None:
+        marker = "A real GP1(05) display change is authoritative"
         pos = MAIN.index(marker)
-        snippet = MAIN[pos:pos + 500]
+        snippet = MAIN[pos:pos + 700]
         self.assertIn("latch_y = current_y;", snippet)
         self.assertNotIn("latch_y = 0u;", snippet)
 
     def test_compact_presenter_diagnostic_is_visible(self) -> None:
         self.assertIn(
-            "PRES gp1:%u,%u latch:%u,%u draw:%lu,%lu",
+            "PRES g:%u,%u l:%u,%u d:%lu,%lu p:%lu nz:%lu/%lu",
             MAIN,
         )
 
