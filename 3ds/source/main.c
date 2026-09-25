@@ -3007,6 +3007,15 @@ static uint32_t g_b13579_prev_2c = 0u;
 static uint32_t g_b13579_prev_3a = 0u;
 
 /*
+ * B135.80 - prove the C2 function-table / indirect-dispatch link.
+ * 80041674 walks list heads C0..CC through the seven function pointers
+ * stored at 800923DC..800923F4.  C2 is index 1 -> 800923E0 and must
+ * resolve to FUN_800408BC, the routine that consumes DAT_800F11C2.
+ */
+static uint32_t g_b13580_hit_41674 = 0u;
+static uint32_t g_b13580_prev_41674 = 0u;
+
+/*
  * B135.53 - the active CC objects on the duel screen all point to
  * FUN_80016C20.  FUN_80017E94 is its constructor and FUN_800166A0
  * is the actual miniature-card renderer called by 80016C20.
@@ -4698,6 +4707,10 @@ static void fm_trace_dispatch(
 
         case 0x000408BCu:
             ++g_b13579_hit_408bc;
+            break;
+
+        case 0x00041674u:
+            ++g_b13580_hit_41674;
             break;
 
         case 0x00040F2Cu:
@@ -17799,9 +17812,9 @@ int main(void)
             fm_memory_dma_debug(&b130_dma);
 
 #if FM_PERF_PROFILE
-            printf("BUILD B135.79-DIALOG-PIPE-PROFILE (SAFE B135.71)\n");
+            printf("BUILD B135.80-C2-INDIRECT-PROFILE (SAFE B135.71)\n");
 #else
-            printf("BUILD B135.79-DIALOG-PIPE-CLEAN (SAFE B135.71)\n");
+            printf("BUILD B135.80-C2-INDIRECT-CLEAN (SAFE B135.71)\n");
 #endif
 
             printf(
@@ -17910,6 +17923,43 @@ int main(void)
                     (unsigned long)total_draw79
                 );
 
+                /*
+                 * B135.80 - inspect the exact function-pointer slot used for
+                 * list C2.  No mutation: this is a read-only discriminator.
+                 */
+                uint32_t tab_c0 =
+                    cpu ? cpu->read_word(0x800923DCu) : 0u;
+                uint32_t tab_c2 =
+                    cpu ? cpu->read_word(0x800923E0u) : 0u;
+                uint32_t tab_c4 =
+                    cpu ? cpu->read_word(0x800923E4u) : 0u;
+                uint32_t tab_cc =
+                    cpu ? cpu->read_word(0x800923F4u) : 0u;
+
+                int c2_head =
+                    cpu
+                        ? (int16_t)cpu->read_half(0x800F11C2u)
+                        : -1;
+
+                uint32_t d41674 =
+                    g_b13580_hit_41674 - g_b13580_prev_41674;
+
+                printf(
+                    "TAB80 c0/c2/c4/cc:%05lX/%05lX/%05lX/%05lX\n",
+                    (unsigned long)(tab_c0 & 0x1FFFFFu),
+                    (unsigned long)(tab_c2 & 0x1FFFFFu),
+                    (unsigned long)(tab_c4 & 0x1FFFFFu),
+                    (unsigned long)(tab_cc & 0x1FFFFFu)
+                );
+
+                printf(
+                    "C2TAB h:%d ptr:%08lX exp:800408BC ent:%d r416:%lu\n",
+                    c2_head,
+                    (unsigned long)tab_c2,
+                    psx_game_is_function_entry(0x800408BCu),
+                    (unsigned long)d41674
+                );
+
                 uint32_t d40b48 =
                     g_b72_hit_40b48 - g_b13579_prev_40b48;
                 uint32_t d408bc =
@@ -17949,6 +17999,8 @@ int main(void)
                     (unsigned long)d2c79,
                     (unsigned long)d3a79
                 );
+
+                g_b13580_prev_41674 = g_b13580_hit_41674;
 
                 g_b13579_prev_40b48 = g_b72_hit_40b48;
                 g_b13579_prev_408bc = g_b13579_hit_408bc;
