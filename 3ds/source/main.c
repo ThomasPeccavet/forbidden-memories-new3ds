@@ -3015,6 +3015,24 @@ static uint32_t g_b13579_prev_3a = 0u;
 static uint32_t g_b13580_hit_41674 = 0u;
 static uint32_t g_b13580_prev_41674 = 0u;
 
+/* B135.82: preserve the last C2 renderer invocation while its list is live. */
+#if FM_PERF_PROFILE
+static uint32_t g_b13582_active_calls = 0u;
+static uint32_t g_b13582_returned = 0u;
+static uint32_t g_b13582_gp0_words = 0u;
+static uint32_t g_b13582_last_head = 0u;
+static uint32_t g_b13582_last_nodes = 0u;
+static uint32_t g_b13582_last_drawable = 0u;
+static uint32_t g_b13582_last_bad = 0u;
+static uint32_t g_b13582_last_flags = 0u;
+static uint32_t g_b13582_last_callback = 0u;
+static uint32_t g_b13582_last_ra = 0u;
+static uint32_t g_b13582_last_424b8 = 0u;
+static uint32_t g_b13582_last_422c0 = 0u;
+static uint32_t g_b13582_pending = 0u;
+static uint64_t g_b13582_gp0_at_entry = 0u;
+#endif
+
 /*
  * B135.53 - the active CC objects on the duel screen all point to
  * FUN_80016C20.  FUN_80017E94 is its constructor and FUN_800166A0
@@ -4206,6 +4224,15 @@ static void fm_trace_dispatch(
     uint32_t phys
 )
 {
+#if FM_PERF_PROFILE
+    if (g_b13582_pending && dispatch_address == g_b13582_last_ra)
+    {
+        ++g_b13582_returned;
+        g_b13582_gp0_words =
+            (uint32_t)(fm_gpu_gp0_count() - g_b13582_gp0_at_entry);
+        g_b13582_pending = 0u;
+    }
+#endif
     if (phys != g_trace_last_phys)
     {
         g_trace_last_phys =
@@ -4389,6 +4416,9 @@ static void fm_trace_dispatch(
 
         case 0x000424B8u:
             ++g_b13556_hit_424b8;
+#if FM_PERF_PROFILE
+            if (g_b13582_pending) ++g_b13582_last_424b8;
+#endif
             if (cpu)
             {
                 g_b13556_last_424_mode =
@@ -4707,6 +4737,57 @@ static void fm_trace_dispatch(
 
         case 0x000408BCu:
             ++g_b13579_hit_408bc;
+#if FM_PERF_PROFILE
+            if (cpu)
+            {
+                int head82 = -1;
+                uint32_t nodes82 = 0u, drawable82 = 0u, bad82 = 0u;
+                head82 = (int16_t)cpu->read_half(0x800F11C2u);
+                int idx82 = head82;
+                uint64_t seen82[2] = {0u, 0u};
+                while (idx82 >= 0 && nodes82 < 0x60u)
+                {
+                    if (idx82 >= 0x60 ||
+                        (seen82[(unsigned)idx82 >> 6] &
+                         (1ull << ((unsigned)idx82 & 63u))))
+                    {
+                        ++bad82;
+                        break;
+                    }
+                    seen82[(unsigned)idx82 >> 6] |=
+                        1ull << ((unsigned)idx82 & 63u);
+                    uint32_t node82 =
+                        0x800F1210u + (uint32_t)idx82 * 0x70u;
+                    if ((cpu->read_byte(node82 + 8u) & 0xC0u) == 0xC0u)
+                        ++drawable82;
+                    ++nodes82;
+                    idx82 = (int16_t)cpu->read_half(node82 + 2u);
+                }
+                if (idx82 >= 0 && nodes82 == 0x60u) ++bad82;
+                if (head82 >= 0 && head82 < 0x60)
+                {
+                    uint32_t obj82 = 0x800F1210u + (uint32_t)head82 * 0x70u;
+                    ++g_b13582_active_calls;
+                    g_b13582_last_head = (uint32_t)head82;
+                    g_b13582_last_nodes = nodes82;
+                    g_b13582_last_drawable = drawable82;
+                    g_b13582_last_bad = bad82;
+                    g_b13582_last_flags = cpu->read_byte(obj82 + 8u);
+                    g_b13582_last_callback = cpu->read_word(obj82 + 0x24u);
+                    g_b13582_last_ra = cpu->gpr[31];
+                    g_b13582_last_424b8 = 0u;
+                    g_b13582_last_422c0 = 0u;
+                    g_b13582_gp0_at_entry = fm_gpu_gp0_count();
+                    g_b13582_pending = 1u;
+                }
+            }
+#endif
+            break;
+
+        case 0x000422C0u:
+#if FM_PERF_PROFILE
+            if (g_b13582_pending) ++g_b13582_last_422c0;
+#endif
             break;
 
         case 0x00041674u:
@@ -17812,9 +17893,9 @@ int main(void)
             fm_memory_dma_debug(&b130_dma);
 
 #if FM_PERF_PROFILE
-            printf("BUILD B135.81-C2-ENTRY-PROFILE (SAFE B135.71)\n");
+            printf("BUILD B135.82-C2-ACTIVE-PROFILE (SAFE B135.71)\n");
 #else
-            printf("BUILD B135.81-C2-ENTRY-CLEAN (SAFE B135.71)\n");
+            printf("BUILD B135.82-C2-ACTIVE-CLEAN (SAFE B135.71)\n");
 #endif
 
             printf(
@@ -19481,7 +19562,7 @@ int main(void)
                 if (cpu)
                     b13549_obj_list_probe(cpu, 0x800F11C2u,
                                             NULL, &nodes81, NULL, NULL, NULL);
-                printf("\x1b[H\x1b[2K B135.81 C2 / OVERLAY DIAG\n");
+                printf("\x1b[H\x1b[2K B135.82 C2 ACTIVE DIAG\n");
                 printf("\x1b[2K PC:%08lX RA:%08lX C2:%lu\n",
                        (unsigned long)(cpu ? cpu->pc : 0u),
                        (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -19515,6 +19596,24 @@ int main(void)
                        (unsigned long long)gpu_debug.gp0_words,
                        (unsigned long)gpu_debug.b124_rect_hits,
                        (unsigned long)gpu_debug.b125_texquad_hits);
+                printf("\x1b[2K live/ret:%lu/%lu head:%lu\n",
+                       (unsigned long)g_b13582_active_calls,
+                       (unsigned long)g_b13582_returned,
+                       (unsigned long)g_b13582_last_head);
+                printf("\x1b[2K nodes/draw/bad:%lu/%lu/%lu\n",
+                       (unsigned long)g_b13582_last_nodes,
+                       (unsigned long)g_b13582_last_drawable,
+                       (unsigned long)g_b13582_last_bad);
+                printf("\x1b[2K last cb:%08lX fl:%02lX\n",
+                       (unsigned long)g_b13582_last_callback,
+                       (unsigned long)g_b13582_last_flags);
+                printf("\x1b[2K last ra:%08lX pending:%lu\n",
+                       (unsigned long)g_b13582_last_ra,
+                       (unsigned long)g_b13582_pending);
+                printf("\x1b[2K last GP0/422/424:%lu/%lu/%lu\n",
+                       (unsigned long)g_b13582_gp0_words,
+                       (unsigned long)g_b13582_last_422c0,
+                       (unsigned long)g_b13582_last_424b8);
             }
 #endif
 
