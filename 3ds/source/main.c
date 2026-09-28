@@ -17949,9 +17949,9 @@ int main(void)
             fm_memory_dma_debug(&b130_dma);
 
 #if FM_PERF_PROFILE
-            printf("BUILD B135.86-TEXT-PROFILE (SAFE B135.71)\n");
+            printf("BUILD B135.87-BLACK-PROFILE (SAFE B135.71)\n");
 #else
-            printf("BUILD B135.86-TEXT-CLEAN (SAFE B135.71)\n");
+            printf("BUILD B135.87-BLACK-CLEAN (SAFE B135.71)\n");
 #endif
 
             printf(
@@ -19620,7 +19620,47 @@ int main(void)
                 if (t86.glyph_write >= 0x800EC390u &&
                     t86.glyph_write < 0x800F0000u)
                     glyph_count86 = (t86.glyph_write - 0x800EC390u) / 0x16u;
-                printf("\x1b[H\x1b[2K B135.86 SCRIPT / GLYPH DIAG\n");
+                printf("\x1b[H\x1b[2K B135.87 TEXT / BLACK PAGE DIAG\n");
+                /* Four canonical PS1 pages, the exact GP1 view, and the
+                 * stable host composite. One pixel per 8x8 block. */
+                uint32_t nz87[6] = {0u, 0u, 0u, 0u, 0u, 0u};
+                unsigned gp1x87 = fm_gpu_display_x();
+                unsigned gp1y87 = fm_gpu_display_y();
+                for (unsigned y87 = 0u; y87 < 240u; y87 += 8u)
+                    for (unsigned x87 = 0u; x87 < 320u; x87 += 8u)
+                    {
+                        for (unsigned page87 = 0u; page87 < 4u; ++page87)
+                        {
+                            unsigned px87 = (page87 & 1u) ? 320u : 0u;
+                            unsigned py87 = (page87 & 2u) ? 256u : 0u;
+                            if ((vram[(py87 + y87) * 1024u + px87 + x87]
+                                 & 0x7FFFu) != 0u)
+                                ++nz87[page87];
+                        }
+                        if (gp1x87 + x87 < 1024u && gp1y87 + y87 < 512u &&
+                            (vram[(gp1y87 + y87) * 1024u + gp1x87 + x87]
+                             & 0x7FFFu) != 0u)
+                            ++nz87[4];
+                        if (g_b84_latch_valid &&
+                            (composite[y87 * 320u + x87] & 0x7FFFu) != 0u)
+                            ++nz87[5];
+                    }
+                printf("\x1b[2K VRAM 0/320 y0:%lu/%lu y256:%lu/%lu\n",
+                       (unsigned long)nz87[0], (unsigned long)nz87[1],
+                       (unsigned long)nz87[2], (unsigned long)nz87[3]);
+                printf("\x1b[2K GP1/composite nz:%lu/%lu latch:%u,%u valid:%lu\n",
+                       (unsigned long)nz87[4], (unsigned long)nz87[5],
+                       g_b84_latch_x, g_b84_latch_y,
+                       (unsigned long)g_b84_latch_valid);
+                printf("\x1b[2K frame:%lu vsync wait:%d target:%lu done:%lu\n",
+                       (unsigned long)frame, g_vsync_wait_active,
+                       (unsigned long)g_vsync_wait_until_frame,
+                       (unsigned long)g_b1358_vsync_completions);
+                printf("\x1b[2K latch/present/skip:%lu/%lu/%lu pick:%lu\n",
+                       (unsigned long)g_b84_latch_count,
+                       (unsigned long)g_b86_present_count,
+                       (unsigned long)g_b86_skipped_presents,
+                       (unsigned long)g_b13578_last_pick);
                 printf("\x1b[2K PC:%08lX RA:%08lX cat6 head:%d\n",
                        (unsigned long)(cpu ? cpu->pc : 0u),
                        (unsigned long)(cpu ? cpu->gpr[31] : 0u), h86);
@@ -19664,7 +19704,7 @@ int main(void)
                        (unsigned long)t86.last_remove_index,
                        (unsigned long)t86.last_remove_flags,
                        (unsigned long)t86.last_remove_ra);
-                for (unsigned slot86 = 0; cpu && slot86 < 4u; ++slot86)
+                for (unsigned slot86 = 0; cpu && slot86 < 1u; ++slot86)
                 {
                     uint32_t ctx86 = 0x800F0850u + slot86 * 100u;
                     printf("\x1b[2K slot%u fl/id:%04X/%04X state:%02X obj:%08lX glyph:%08lX\n",
