@@ -18257,6 +18257,44 @@ int main(void)
                 (unsigned long)g_b74_hit_menu_draw_cb
             );
 
+            /*
+             * B135.90 - main-menu object audit.
+             * The first five SU objects are the visible main-menu group.
+             * Capture flags, X/Y, target X/Y, timer and sprite pointer so we
+             * can distinguish a visibility/position bug from missing assets.
+             */
+            if (
+                g_b102_menu_bridge_active
+                &&
+                fm_memory_read_word(0x8009C898u) == 0x80180B4Cu
+            )
+            {
+                for (unsigned mi90 = 0u; mi90 < 5u; ++mi90)
+                {
+                    uint32_t obj90 =
+                        fm_memory_read_word(0x80184794u + mi90 * 4u);
+
+                    if (obj90 >= 0x80000000u && obj90 < 0x80200000u)
+                    {
+                        printf(
+                            "M%u f:%04X xy:%d,%d to:%d,%d t:%u spr:%05lX\n",
+                            mi90,
+                            fm_memory_read_half(obj90 + 0x08u),
+                            (int16_t)fm_memory_read_half(obj90 + 0x30u),
+                            (int16_t)fm_memory_read_half(obj90 + 0x32u),
+                            (int16_t)fm_memory_read_half(obj90 + 0x38u),
+                            (int16_t)fm_memory_read_half(obj90 + 0x3Au),
+                            (unsigned)fm_memory_read_half(obj90 + 0x60u),
+                            (unsigned long)(fm_memory_read_word(obj90 + 0x4Cu) & 0x1FFFFFu)
+                        );
+                    }
+                    else
+                    {
+                        printf("M%u invalid:%08lX\n", mi90, (unsigned long)obj90);
+                    }
+                }
+            }
+
             printf(
                 "PRES g:%u,%u l:%u,%u d:%lu,%lu p:%lu nz:%lu/%lu\n",
                 fm_gpu_display_x(),
@@ -19878,7 +19916,7 @@ int main(void)
                 if (t86.glyph_write >= 0x800EC390u &&
                     t86.glyph_write < 0x800F0000u)
                     glyph_count86 = (t86.glyph_write - 0x800EC390u) / 0x16u;
-                printf("\x1b[H\x1b[2K B135.89 QUICKLOAD PAGE RECOVERY\n");
+                printf("\x1b[H\x1b[2K B135.90 MAIN MENU ITEMS\n");
                 printf("\x1b[2K RUN:%u MEM:%d QS rc:%ld S/L:%lu/%lu\n",
                        (unsigned)game_running, memory_status,
                        (long)g_b135_qs_last_result,
