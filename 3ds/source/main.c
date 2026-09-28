@@ -1859,6 +1859,18 @@ static uint32_t g_b13588_reseed_count = 0u;
 static uint32_t g_b13588_reseed_draw_pick = 0u;
 static uint32_t g_b13588_reseed_gp1_pick = 0u;
 
+/*
+ * B135.89 - recover a canonical framebuffer after quick-load when restored
+ * GP1 still points at a saturated stale page (the Konami logo case).
+ */
+static uint32_t g_b13589_recovery_count = 0u;
+static uint32_t g_b13589_recovery_x = 0u;
+static uint32_t g_b13589_recovery_y = 0u;
+static uint32_t g_b13589_recovery_nz = 0u;
+static uint32_t g_b13589_gp1_nz = 0u;
+static uint32_t g_b13589_hold_active = 0u;
+static uint32_t g_b13589_hold_latches = 0u;
+
 static unsigned b13578_page_index(unsigned x, unsigned y)
 {
     return (y >= 256u ? 2u : 0u) + (x >= 320u ? 1u : 0u);
@@ -17344,7 +17356,74 @@ int main(void)
                     );
                 }
 
-                if (
+                /*
+                 * B135.89:
+                 * The failing quick-state has GP1 on a fully occupied Konami
+                 * page (~1200/1200 sampled texels) while another canonical
+                 * framebuffer at y=256 contains a distinct sparse scene.
+                 * Search all four framebuffer pages only for this one-shot
+                 * recovery. Prefer the most populated distinct page below
+                 * the saturated-logo threshold; this avoids blindly picking
+                 * texture/atlas pages and leaves normal runtime arbitration
+                 * untouched.
+                 */
+                uint32_t page_hash_89[4] = {0u,0u,0u,0u};
+                uint32_t page_nz_89[4] = {0u,0u,0u,0u};
+
+                for (unsigned page89 = 0u; page89 < 4u; ++page89)
+                {
+                    unsigned px89 = (page89 & 1u) ? 320u : 0u;
+                    unsigned py89 = (page89 & 2u) ? 256u : 0u;
+
+                    b13578_sample_page(
+                        vram, px89, py89,
+                        &page_hash_89[page89],
+                        &page_nz_89[page89]
+                    );
+                }
+
+                unsigned gp1_idx_89 =
+                    b13578_page_index(current_x, current_y);
+
+                g_b13589_gp1_nz = page_nz_89[gp1_idx_89];
+
+                unsigned recover_idx_89 = 4u;
+                uint32_t recover_nz_89 = 0u;
+
+                if (g_b13589_gp1_nz >= 1000u)
+                {
+                    for (unsigned page89 = 0u; page89 < 4u; ++page89)
+                    {
+                        if (
+                            page89 != gp1_idx_89
+                            &&
+                            page_nz_89[page89] >= 32u
+                            &&
+                            page_nz_89[page89] < 1000u
+                            &&
+                            page_nz_89[page89] > recover_nz_89
+                        )
+                        {
+                            recover_idx_89 = page89;
+                            recover_nz_89 = page_nz_89[page89];
+                        }
+                    }
+                }
+
+                if (recover_idx_89 < 4u)
+                {
+                    latch_x = (recover_idx_89 & 1u) ? 320u : 0u;
+                    latch_y = (recover_idx_89 & 2u) ? 256u : 0u;
+
+                    g_b13589_recovery_x = latch_x;
+                    g_b13589_recovery_y = latch_y;
+                    g_b13589_recovery_nz = recover_nz_89;
+                    g_b13589_hold_active = 1u;
+                    ++g_b13589_recovery_count;
+
+                    g_b13578_last_pick = 2u; /* recovered canonical page */
+                }
+                else if (
                     (draw_x_88 != current_x || draw_y_88 != current_y)
                     &&
                     draw_nz_88 >= 32u
@@ -17484,6 +17563,26 @@ int main(void)
                     g_b13578_last_current_nz = nz;
                     g_b13578_last_draw_nz = nz;
                 }
+            }
+            else if (
+                g_b13589_hold_active
+                &&
+                g_b1358_vsync_completed
+                &&
+                b104_gp0 != g_b1357_last_latched_gp0
+            )
+            {
+                /*
+                 * Keep the recovered framebuffer until the guest performs a
+                 * real GP1 display change. This prevents stale-GP1 arbitration
+                 * from immediately replacing the recovered scene with the
+                 * pre-load Konami page.
+                 */
+                latch_x = g_b13589_recovery_x;
+                latch_y = g_b13589_recovery_y;
+                need_latch = 1;
+                g_b13578_last_pick = 2u;
+                ++g_b13589_hold_latches;
             }
             else if (
                 g_b1358_vsync_completed
@@ -17688,6 +17787,22 @@ int main(void)
 
             if (display_changed)
             {
+                /*
+                 * Do not cancel the B135.89 hold on the synthetic first
+                 * post-load "change" caused by resetting the host baseline.
+                 * A subsequent real GP1 change releases the recovered page.
+                 */
+                if (
+                    g_b13589_hold_active
+                    &&
+                    g_b13588_reseed_count != 0u
+                    &&
+                    g_b84_latch_valid
+                )
+                {
+                    g_b13589_hold_active = 0u;
+                }
+
                 g_b86_last_display_x = current_x;
                 g_b86_last_display_y = current_y;
                 ++g_b86_display_changes;
@@ -19763,7 +19878,7 @@ int main(void)
                 if (t86.glyph_write >= 0x800EC390u &&
                     t86.glyph_write < 0x800F0000u)
                     glyph_count86 = (t86.glyph_write - 0x800EC390u) / 0x16u;
-                printf("\x1b[H\x1b[2K B135.88 QUICKLOAD / PRESENTER\n");
+                printf("\x1b[H\x1b[2K B135.89 QUICKLOAD PAGE RECOVERY\n");
                 printf("\x1b[2K RUN:%u MEM:%d QS rc:%ld S/L:%lu/%lu\n",
                        (unsigned)game_running, memory_status,
                        (long)g_b135_qs_last_result,
@@ -19814,6 +19929,14 @@ int main(void)
                        (unsigned long)g_b13588_reseed_draw_pick,
                        (unsigned long)g_b13588_reseed_gp1_pick,
                        (unsigned long)g_b13588_reseed_presenter);
+                printf("\x1b[2K QL recover:%lu page:%lu,%lu nz:%lu gp1:%lu hold:%lu/%lu\n",
+                       (unsigned long)g_b13589_recovery_count,
+                       (unsigned long)g_b13589_recovery_x,
+                       (unsigned long)g_b13589_recovery_y,
+                       (unsigned long)g_b13589_recovery_nz,
+                       (unsigned long)g_b13589_gp1_nz,
+                       (unsigned long)g_b13589_hold_active,
+                       (unsigned long)g_b13589_hold_latches);
                 printf("\x1b[2K PC:%08lX RA:%08lX cat6 head:%d\n",
                        (unsigned long)(cpu ? cpu->pc : 0u),
                        (unsigned long)(cpu ? cpu->gpr[31] : 0u), h86);
