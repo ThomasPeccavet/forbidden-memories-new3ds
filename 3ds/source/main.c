@@ -9069,126 +9069,10 @@ static int fm_hle_gpu_load_image(CPUState *cpu)
 
 
 /*
- * ============================================================
- * B26 - WA_MRG -> VRAM bridge
- * ============================================================
- *
- * B25 a confirme que le runtime actuel n'appelle pas encore LoadImage2.
- * Pour connecter quand meme une vraie ressource du disque au pipeline
- * GPU PS1, on injecte le background PAL decode par B23/B24 dans les
- * deux pages framebuffer (x=0 et x=320) via la vraie commande
- * GP0 A0h CPU->VRAM.
- *
- * Ce n'est plus un simple "preview" 3DS : les pixels passent par le
- * parser GP0 et vivent dans la VRAM emulee, donc les primitives du jeu
- * peuvent ensuite dessiner par-dessus.
- */
-static uint32_t g_bg_vram_pending = 0u;
-static uint32_t g_bg_vram_calls = 0u;
-static uint32_t g_bg_vram_ok = 0u;
-static uint32_t g_bg_vram_pixels = 0u;
-static uint32_t g_bg_vram_words = 0u;
-static uint32_t g_bg_vram_after_upload_nz = 0u;
-
-/*
  * B42 : 1 = framebuffer reel du jeu, 0 = ancien mode diagnostic
  * avec background WA_MRG force et clears noirs bloques.
  */
 static int g_b42_native_video = 1;
-
-static void fm_bg_upload_rect_gp0(
-    const uint16_t *pixels,
-    uint32_t page_x
-)
-{
-    uint32_t src_x = 0u;
-    uint32_t src_y = 48u;
-    uint32_t w = 320u;
-    uint32_t h = 160u;
-
-    if (!pixels)
-    {
-        return;
-    }
-
-    if (g_bg.type == 2u)
-    {
-        src_x = 32u;
-        src_y = 0u;
-        w = 256u;
-        h = 256u;
-    }
-
-    uint32_t dst_x = page_x + src_x;
-    uint32_t dst_y = src_y;
-
-    fm_gpu_gp0_write(0xA0000000u);
-    fm_gpu_gp0_write((dst_y << 16) | dst_x);
-    fm_gpu_gp0_write((h << 16) | w);
-
-    uint32_t packed = 0u;
-    uint32_t half = 0u;
-
-    for (uint32_t y = 0u; y < h; ++y)
-    {
-        const uint16_t *row =
-            pixels + (src_y + y) * 320u + src_x;
-
-        for (uint32_t x = 0u; x < w; ++x)
-        {
-            uint32_t c = row[x];
-
-            if (half == 0u)
-            {
-                packed = c;
-                half = 1u;
-            }
-            else
-            {
-                packed |= c << 16;
-                fm_gpu_gp0_write(packed);
-                packed = 0u;
-                half = 0u;
-                ++g_bg_vram_words;
-            }
-
-            ++g_bg_vram_pixels;
-        }
-    }
-
-    if (half != 0u)
-    {
-        fm_gpu_gp0_write(packed);
-        ++g_bg_vram_words;
-    }
-}
-
-
-static void fm_bg_upload_preview_to_vram(
-    const uint16_t *pixels
-)
-{
-    if (!pixels || !g_bg.loaded)
-    {
-        return;
-    }
-
-    ++g_bg_vram_calls;
-    g_bg_vram_pixels = 0u;
-    g_bg_vram_words = 0u;
-
-    fm_bg_upload_rect_gp0(pixels, 0u);
-    fm_bg_upload_rect_gp0(pixels, 320u);
-
-    /* Snapshot immediat : prouve si l'upload a reellement rempli la VRAM. */
-    FMGpuDebugStats snap;
-    memset(&snap, 0, sizeof(snap));
-    fm_gpu_debug_stats(&snap);
-    g_bg_vram_after_upload_nz = snap.nonzero_vram;
-
-    ++g_bg_vram_ok;
-}
-
 
 static uint32_t fm_bg_bcd_index(uint32_t group, uint32_t ordinal)
 {
@@ -9626,7 +9510,6 @@ static int fm_bg_load(
     }
 
     g_bg.loaded = 1;
-    g_bg_vram_pending = 1u;
     return 1;
 }
 
@@ -16146,26 +16029,6 @@ int main(void)
             fm_gpu_b42_set_preserve_background_clears(
                 g_b42_native_video ? 0 : 1
             );
-
-            if (!g_b42_native_video && g_bg.loaded)
-            {
-                g_bg_vram_pending = 1u;
-            }
-        }
-
-        /*
-         * ====================================================
-         * B26 - push du vrai background dans la VRAM PS1
-         * ====================================================
-         */
-        if (
-            !g_b42_native_video
-            && g_bg_vram_pending
-            && g_bg.loaded
-        )
-        {
-            fm_bg_upload_preview_to_vram(preview);
-            g_bg_vram_pending = 0u;
         }
 
         /*
@@ -17131,36 +16994,6 @@ int main(void)
         else if (
             !g_b42_native_video
             && g_bg.loaded
-            && g_bg_vram_ok != 0u
-        )
-        {
-            /*
-             * Ancien mode B26/B28 conserve pour comparaison avec ZL.
-             */
-            unsigned vx = fm_gpu_display_x();
-            unsigned vy = fm_gpu_display_y();
-
-            if (vx != 0u && vx != 320u)
-            {
-                vx = 320u;
-            }
-
-            if (vy > 256u)
-            {
-                vy = 0u;
-            }
-
-            fm_present_rgb555(
-                vram + vy * 1024u + vx,
-                1024,
-                0
-            );
-
-            b131_presented_this_loop = 1;
-        }
-        else if (
-            !g_b42_native_video
-            && g_bg.loaded
         )
         {
             fm_present_rgb555(
@@ -18103,14 +17936,6 @@ int main(void)
                 (unsigned long)g_loadimg_hle_ok,
                 (unsigned long)g_loadimg_hle_fail,
                 (unsigned long)g_loadimg_hle_pixels
-            );
-
-            printf(
-                "BGVRAM C/OK:%lu/%lu pix:%lu words:%lu\n",
-                (unsigned long)g_bg_vram_calls,
-                (unsigned long)g_bg_vram_ok,
-                (unsigned long)g_bg_vram_pixels,
-                (unsigned long)g_bg_vram_words
             );
 
             printf(
