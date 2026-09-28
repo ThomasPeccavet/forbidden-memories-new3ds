@@ -1,0 +1,123 @@
+name: 3DS Lab B135.87
+
+on:
+  push:
+    branches:
+      - diag/b135.87-black-page
+    paths:
+      - '.github/workflows/3ds-lab.yml'
+      - '3ds/**'
+      - 'tools/**'
+      - 'tests/**'
+  workflow_dispatch:
+
+jobs:
+  lab-test:
+    runs-on: [self-hosted, 3ds, azahar, new3ds]
+    timeout-minutes: 20
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Inspect lab
+        shell: bash
+        run: |
+          set -u
+          echo "RUNNER_OS=$RUNNER_OS"
+          echo "HOME=$HOME"
+          uname -a || true
+          command -v git || true
+          command -v make || true
+          command -v arm-none-eabi-gcc || true
+          command -v 3dsxtool || true
+          command -v azahar || true
+          command -v azahar-cli || true
+          command -v xvfb-run || true
+          echo "DEVKITPRO=${DEVKITPRO:-}"
+          echo "DEVKITARM=${DEVKITARM:-}"
+          echo "workspace=$GITHUB_WORKSPACE"
+          test -d 3ds && echo "3ds=present" || echo "3ds=missing"
+          test -d work && echo "work=present" || echo "work=missing"
+
+      - name: Locate persistent project assets
+        shell: bash
+        run: |
+          set -u
+          {
+            for p in \
+              "/home/mao/documents/forbidden-memories-new3ds" \
+              "/home/thomas/forbidden-memories-new3ds" \
+              "$HOME/forbidden-memories-new3ds" \
+              "/c/Users/MAO/Documents/forbidden-memories-new3ds"
+            do
+              if [ -d "$p" ]; then
+                echo "PROJECT_ROOT=$p"
+                break
+              fi
+            done
+          } >> "$GITHUB_ENV"
+
+      - name: Restore private generated build inputs
+        shell: bash
+        run: |
+          set -eu
+          if [ -n "${PROJECT_ROOT:-}" ] && [ -d "$PROJECT_ROOT/work" ]; then
+            rm -rf work
+            cp -a "$PROJECT_ROOT/work" ./work
+            echo "restored persistent work tree"
+          else
+            echo "No persistent work tree found; using checked-out content only"
+          fi
+
+      - name: Validate source
+        shell: bash
+        run: |
+          set -eu
+          python3 tools/validate_main_c.py
+          python3 -m unittest discover -s tests -p 'test_*.py'
+
+      - name: Build B135.87 profile
+        shell: bash
+        run: |
+          set -eu
+          if [ -z "${DEVKITPRO:-}" ] && [ -d /opt/devkitpro ]; then export DEVKITPRO=/opt/devkitpro; fi
+          if [ -z "${DEVKITARM:-}" ] && [ -n "${DEVKITPRO:-}" ]; then export DEVKITARM="$DEVKITPRO/devkitARM"; fi
+          export PATH="${DEVKITARM:+$DEVKITARM/bin:}${DEVKITPRO:+$DEVKITPRO/tools/bin:}$PATH"
+          make -C 3ds clean
+          make -C 3ds profile -j2
+          test -f 3ds/fm-new3ds-profile.3dsx
+          ls -lh 3ds/fm-new3ds-profile.3dsx
+
+      - name: Smoke test in Azahar
+        shell: bash
+        run: |
+          set -u
+          APP="$GITHUB_WORKSPACE/3ds/fm-new3ds-profile.3dsx"
+          AZ=""
+          for c in azahar azahar-cli; do
+            if command -v "$c" >/dev/null 2>&1; then AZ="$(command -v "$c")"; break; fi
+          done
+          if [ -z "$AZ" ]; then echo "AZAHAR_RESULT=not-found" | tee azahar-result.txt; exit 2; fi
+          echo "AZAHAR=$AZ" > azahar-result.txt
+          set +e
+          if command -v xvfb-run >/dev/null 2>&1; then
+            timeout 25s xvfb-run -a "$AZ" --no-gui --execute "$APP" >>azahar-result.txt 2>&1
+          else
+            timeout 25s "$AZ" --no-gui --execute "$APP" >>azahar-result.txt 2>&1
+          fi
+          rc=$?
+          set -e
+          echo "AZAHAR_RC=$rc" | tee -a azahar-result.txt
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then exit "$rc"; fi
+
+      - name: Upload lab report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b13587-lab-report
+          path: |
+            azahar-result.txt
+            3ds/fm-new3ds-profile.3dsx
+          if-no-files-found: ignore
