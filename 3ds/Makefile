@@ -167,7 +167,11 @@ $(BUILD)/gpu_vram_dirty.o: $(RUNTIME)/src/gpu_vram_dirty.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 
-$(TARGET).elf: generated-release $(OBJECTS) $(GENERATED_COMBINED)
+$(GENERATED_COMBINED): generated-release
+	@test -s "$@"
+
+
+$(TARGET).elf: $(OBJECTS) $(GENERATED_COMBINED)
 	$(CC) \
 		$(LDFLAGS) \
 		$(OBJECTS) \
