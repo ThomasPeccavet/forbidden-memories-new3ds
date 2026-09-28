@@ -3031,6 +3031,10 @@ static uint32_t g_b13582_last_424b8 = 0u;
 static uint32_t g_b13582_last_422c0 = 0u;
 static uint32_t g_b13582_pending = 0u;
 static uint64_t g_b13582_gp0_at_entry = 0u;
+static uint32_t g_b13583_outer_c2_create = 0u;
+static uint32_t g_b13583_outer_remove = 0u;
+static uint32_t g_b13583_last_create_ra = 0u;
+static uint32_t g_b13583_last_create_index = 0u;
 #endif
 
 /*
@@ -5279,6 +5283,20 @@ static void fm_trace_dispatch(
         case 0x000403D0u:
             ++g_b49_fn_403d0;
             if (cpu) g_b49_ra_403d0 = cpu->gpr[31];
+#if FM_PERF_PROFILE
+            if (cpu && cpu->gpr[5] == 1u)
+            {
+                ++g_b13583_outer_c2_create;
+                g_b13583_last_create_index = cpu->gpr[4];
+                g_b13583_last_create_ra = cpu->gpr[31];
+            }
+#endif
+            break;
+
+        case 0x00040530u:
+#if FM_PERF_PROFILE
+            ++g_b13583_outer_remove;
+#endif
             break;
 
         case 0x00042BD8u:
@@ -17893,9 +17911,9 @@ int main(void)
             fm_memory_dma_debug(&b130_dma);
 
 #if FM_PERF_PROFILE
-            printf("BUILD B135.82-C2-ACTIVE-PROFILE (SAFE B135.71)\n");
+            printf("BUILD B135.83-C2-CREATE-PROFILE (SAFE B135.71)\n");
 #else
-            printf("BUILD B135.82-C2-ACTIVE-CLEAN (SAFE B135.71)\n");
+            printf("BUILD B135.83-C2-CREATE-CLEAN (SAFE B135.71)\n");
 #endif
 
             printf(
@@ -19562,7 +19580,7 @@ int main(void)
                 if (cpu)
                     b13549_obj_list_probe(cpu, 0x800F11C2u,
                                             NULL, &nodes81, NULL, NULL, NULL);
-                printf("\x1b[H\x1b[2K B135.82 C2 ACTIVE DIAG\n");
+                printf("\x1b[H\x1b[2K B135.83 DIALOGUE CREATE DIAG\n");
                 printf("\x1b[2K PC:%08lX RA:%08lX C2:%lu\n",
                        (unsigned long)(cpu ? cpu->pc : 0u),
                        (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -19614,6 +19632,34 @@ int main(void)
                        (unsigned long)g_b13582_gp0_words,
                        (unsigned long)g_b13582_last_422c0,
                        (unsigned long)g_b13582_last_424b8);
+                FMDialogueCreateTrace create83 = {0};
+                fm_runtime_dialogue_create_trace(&create83);
+                printf("\x1b[2K create all/C2 gen:%lu/%lu\n",
+                       (unsigned long)create83.constructor_calls,
+                       (unsigned long)create83.c2_constructor_calls);
+                printf("\x1b[2K create C2 outer:%lu idx:%lu\n",
+                       (unsigned long)g_b13583_outer_c2_create,
+                       (unsigned long)(create83.c2_constructor_calls
+                           ? create83.last_c2_index : g_b13583_last_create_index));
+                printf("\x1b[2K create RA:%08lX head before:%ld\n",
+                       (unsigned long)(create83.c2_constructor_calls
+                           ? create83.last_c2_ra : g_b13583_last_create_ra),
+                       create83.c2_constructor_calls
+                           ? (long)(int32_t)create83.last_c2_head_before
+                           : -1l);
+                printf("\x1b[2K remove gen/outer:%lu/%lu cat:%lu\n",
+                       (unsigned long)create83.remove_calls,
+                       (unsigned long)g_b13583_outer_remove,
+                       (unsigned long)create83.last_remove_category);
+                printf("\x1b[2K heads 0/1/2/3:%d/%d/%d/%d\n",
+                       cpu ? (int16_t)cpu->read_half(0x800F11C0u) : -1,
+                       cpu ? (int16_t)cpu->read_half(0x800F11C2u) : -1,
+                       cpu ? (int16_t)cpu->read_half(0x800F11C4u) : -1,
+                       cpu ? (int16_t)cpu->read_half(0x800F11C6u) : -1);
+                printf("\x1b[2K heads 4/5/6:%d/%d/%d\n",
+                       cpu ? (int16_t)cpu->read_half(0x800F11C8u) : -1,
+                       cpu ? (int16_t)cpu->read_half(0x800F11CAu) : -1,
+                       cpu ? (int16_t)cpu->read_half(0x800F11CCu) : -1);
             }
 #endif
 

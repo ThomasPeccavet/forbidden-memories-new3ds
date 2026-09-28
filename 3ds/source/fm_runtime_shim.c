@@ -46,6 +46,7 @@ static uint32_t g_b13565_e_85d98 = 0u;
 static uint32_t g_b13565_e_85d08 = 0u;
 static uint32_t g_b13565_last_entry = 0u;
 static FMDialogueEntryTrace g_dialogue_entry_trace;
+static FMDialogueCreateTrace g_dialogue_create_trace;
 
 /*
  * B135.67 - locate the hand layer across the REAL frame pipeline.
@@ -1314,6 +1315,26 @@ void psx_check_interrupts_dispatch_entry(
                 g_dialogue_entry_trace.renderer_last_ra = cpu->gpr[31];
             break;
 
+        case 0x000403D0u:
+            ++g_dialogue_create_trace.constructor_calls;
+            if (cpu && cpu->gpr[5] == 1u)
+            {
+                ++g_dialogue_create_trace.c2_constructor_calls;
+                g_dialogue_create_trace.last_c2_index = cpu->gpr[4];
+                g_dialogue_create_trace.last_c2_ra = cpu->gpr[31];
+                g_dialogue_create_trace.last_c2_head_before =
+                    (uint32_t)(int32_t)(int16_t)cpu->read_half(0x800F11C2u);
+            }
+            break;
+
+        case 0x00040530u:
+            ++g_dialogue_create_trace.remove_calls;
+            if (cpu && (cpu->gpr[4] & 0x1FFFFFFFu) >= 0x000F1210u
+                    && (cpu->gpr[4] & 0x1FFFFFFFu) < 0x001FFFF0u)
+                g_dialogue_create_trace.last_remove_category =
+                    cpu->read_half(cpu->gpr[4] + 0x1Eu);
+            break;
+
         case 0x00012D60u:
             ++g_b13565_e_12d60;
             break;
@@ -1684,6 +1705,11 @@ void fm_runtime_b13565_entries(
 void fm_runtime_dialogue_entry_trace(FMDialogueEntryTrace *out)
 {
     if (out) *out = g_dialogue_entry_trace;
+}
+
+void fm_runtime_dialogue_create_trace(FMDialogueCreateTrace *out)
+{
+    if (out) *out = g_dialogue_create_trace;
 }
 
 

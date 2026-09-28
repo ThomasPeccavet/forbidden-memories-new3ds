@@ -217,6 +217,19 @@ typedef struct FMDialogueEntryTrace
 
 void fm_runtime_dialogue_entry_trace(FMDialogueEntryTrace *out);
 
+typedef struct FMDialogueCreateTrace
+{
+    uint32_t constructor_calls;
+    uint32_t c2_constructor_calls;
+    uint32_t remove_calls;
+    uint32_t last_c2_index;
+    uint32_t last_c2_ra;
+    uint32_t last_c2_head_before;
+    uint32_t last_remove_category;
+} FMDialogueCreateTrace;
+
+void fm_runtime_dialogue_create_trace(FMDialogueCreateTrace *out);
+
 void fm_runtime_b13567_pipeline(
     uint32_t *fin_entries,
     uint32_t *fin_b8,
