@@ -226,6 +226,10 @@ typedef struct FMDialogueCreateTrace
     uint32_t last_c2_ra;
     uint32_t last_c2_head_before;
     uint32_t last_remove_category;
+    uint32_t category2_constructor_calls, last_category2_create_ra;
+    uint32_t last_category2_create_index;
+    uint32_t category2_remove_calls, last_category2_remove_ra;
+    uint32_t last_category2_remove_index, last_category2_remove_flags;
 } FMDialogueCreateTrace;
 
 void fm_runtime_dialogue_create_trace(FMDialogueCreateTrace *out);

@@ -3037,6 +3037,14 @@ static uint32_t g_b13583_last_create_ra = 0u;
 static uint32_t g_b13583_last_create_index = 0u;
 static uint32_t g_b13584_outer_cat2 = 0u;
 static uint32_t g_b13584_outer_draw = 0u;
+static uint32_t g_b13585_outer_cat2_live = 0u;
+static uint32_t g_b13585_outer_cat2_drawable = 0u;
+static uint32_t g_b13585_cat2_flags = 0u;
+static uint32_t g_b13585_cat2_callback = 0u;
+static uint32_t g_b13585_cat2_category = 0u;
+static uint32_t g_b13585_cat2_ra = 0u;
+static uint32_t g_b13585_outer_cat2_create = 0u;
+static uint32_t g_b13585_outer_cat2_remove = 0u;
 #endif
 
 /*
@@ -5289,6 +5297,8 @@ static void fm_trace_dispatch(
             ++g_b49_fn_403d0;
             if (cpu) g_b49_ra_403d0 = cpu->gpr[31];
 #if FM_PERF_PROFILE
+            if (cpu && cpu->gpr[5] == 2u)
+                ++g_b13585_outer_cat2_create;
             if (cpu && cpu->gpr[5] == 1u)
             {
                 ++g_b13583_outer_c2_create;
@@ -5301,6 +5311,10 @@ static void fm_trace_dispatch(
         case 0x00040530u:
 #if FM_PERF_PROFILE
             ++g_b13583_outer_remove;
+            if (cpu && (cpu->gpr[4] & 0x1FFFFFFFu) >= 0x000F1210u &&
+                (cpu->gpr[4] & 0x1FFFFFFFu) < 0x000F3C10u &&
+                cpu->read_half(cpu->gpr[4] + 0x1Eu) == 2u)
+                ++g_b13585_outer_cat2_remove;
 #endif
             break;
 
@@ -6000,6 +6014,21 @@ static void fm_trace_dispatch(
             ++g_b72_hit_40b48;
 #if FM_PERF_PROFILE
             ++g_b13584_outer_cat2;
+            if (cpu)
+            {
+                int head85 = (int16_t)cpu->read_half(0x800F11C4u);
+                g_b13585_cat2_ra = cpu->gpr[31];
+                if (head85 >= 0 && head85 < 0x60)
+                {
+                    uint32_t obj85 = 0x800F1210u + (uint32_t)head85 * 0x70u;
+                    ++g_b13585_outer_cat2_live;
+                    g_b13585_cat2_flags = cpu->read_half(obj85 + 8u);
+                    g_b13585_cat2_callback = cpu->read_word(obj85 + 0x24u);
+                    g_b13585_cat2_category = cpu->read_half(obj85 + 0x1Eu);
+                    if ((g_b13585_cat2_flags & 0xC0u) == 0xC0u)
+                        ++g_b13585_outer_cat2_drawable;
+                }
+            }
 #endif
             if (cpu)
             {
@@ -17919,9 +17948,9 @@ int main(void)
             fm_memory_dma_debug(&b130_dma);
 
 #if FM_PERF_PROFILE
-            printf("BUILD B135.84-LAYER-PROFILE (SAFE B135.71)\n");
+            printf("BUILD B135.85-OBJECT-PROFILE (SAFE B135.71)\n");
 #else
-            printf("BUILD B135.84-LAYER-CLEAN (SAFE B135.71)\n");
+            printf("BUILD B135.85-OBJECT-CLEAN (SAFE B135.71)\n");
 #endif
 
             printf(
@@ -19588,7 +19617,7 @@ int main(void)
                 if (cpu)
                     b13549_obj_list_probe(cpu, 0x800F11C2u,
                                             NULL, &nodes81, NULL, NULL, NULL);
-                printf("\x1b[H\x1b[2K B135.84 DIALOGUE LAYER DIAG\n");
+                printf("\x1b[H\x1b[2K B135.85 OBJECT STATE DIAG\n");
                 printf("\x1b[2K PC:%08lX RA:%08lX C2:%lu\n",
                        (unsigned long)(cpu ? cpu->pc : 0u),
                        (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -19704,6 +19733,25 @@ int main(void)
                 printf("\x1b[2K cat2 nodes/draw/tail:%lu/%lu/%d\n",
                        (unsigned long)cat2_nodes84,
                        (unsigned long)cat2_draw84, cat2_idx84);
+                printf("\x1b[2K cat2 outer live/draw:%lu/%lu ra:%08lX\n",
+                       (unsigned long)g_b13585_outer_cat2_live,
+                       (unsigned long)g_b13585_outer_cat2_drawable,
+                       (unsigned long)g_b13585_cat2_ra);
+                printf("\x1b[2K cat2 obj fl:%04lX cat:%lu cb:%08lX\n",
+                       (unsigned long)g_b13585_cat2_flags,
+                       (unsigned long)g_b13585_cat2_category,
+                       (unsigned long)g_b13585_cat2_callback);
+                printf("\x1b[2K cat2 create gen/outer:%lu/%lu idx:%lu ra:%08lX\n",
+                       (unsigned long)create83.category2_constructor_calls,
+                       (unsigned long)g_b13585_outer_cat2_create,
+                       (unsigned long)create83.last_category2_create_index,
+                       (unsigned long)create83.last_category2_create_ra);
+                printf("\x1b[2K cat2 remove gen/outer:%lu/%lu idx:%lu fl:%04lX ra:%08lX\n",
+                       (unsigned long)create83.category2_remove_calls,
+                       (unsigned long)g_b13585_outer_cat2_remove,
+                       (unsigned long)create83.last_category2_remove_index,
+                       (unsigned long)create83.last_category2_remove_flags,
+                       (unsigned long)create83.last_category2_remove_ra);
                 printf("\x1b[2K draw gen/outer/prim:%lu/%lu/%lu\n",
                        (unsigned long)layer84.object_render_calls,
                        (unsigned long)g_b13584_outer_draw,

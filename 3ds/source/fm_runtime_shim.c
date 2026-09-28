@@ -1345,6 +1345,12 @@ void psx_check_interrupts_dispatch_entry(
 
         case 0x000403D0u:
             ++g_dialogue_create_trace.constructor_calls;
+            if (cpu && cpu->gpr[5] == 2u)
+            {
+                ++g_dialogue_create_trace.category2_constructor_calls;
+                g_dialogue_create_trace.last_category2_create_ra = cpu->gpr[31];
+                g_dialogue_create_trace.last_category2_create_index = cpu->gpr[4];
+            }
             if (cpu && cpu->gpr[5] == 1u)
             {
                 ++g_dialogue_create_trace.c2_constructor_calls;
@@ -1358,9 +1364,21 @@ void psx_check_interrupts_dispatch_entry(
         case 0x00040530u:
             ++g_dialogue_create_trace.remove_calls;
             if (cpu && (cpu->gpr[4] & 0x1FFFFFFFu) >= 0x000F1210u
-                    && (cpu->gpr[4] & 0x1FFFFFFFu) < 0x001FFFF0u)
+                    && (cpu->gpr[4] & 0x1FFFFFFFu) < 0x000F3C10u &&
+                    ((cpu->gpr[4] & 0x1FFFFFFFu) - 0x000F1210u) % 0x70u == 0u)
+            {
                 g_dialogue_create_trace.last_remove_category =
                     cpu->read_half(cpu->gpr[4] + 0x1Eu);
+                if (g_dialogue_create_trace.last_remove_category == 2u)
+                {
+                    ++g_dialogue_create_trace.category2_remove_calls;
+                    g_dialogue_create_trace.last_category2_remove_ra = cpu->gpr[31];
+                    g_dialogue_create_trace.last_category2_remove_index =
+                        ((cpu->gpr[4] & 0x1FFFFFFFu) - 0x000F1210u) / 0x70u;
+                    g_dialogue_create_trace.last_category2_remove_flags =
+                        cpu->read_byte(cpu->gpr[4] + 8u);
+                }
+            }
             break;
 
         case 0x00012D60u:
