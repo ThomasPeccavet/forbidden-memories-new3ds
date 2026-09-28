@@ -1305,39 +1305,18 @@ static uint32_t g_b75_objects_settled = 0u;
 
 /*
  * ============================================================
- * B76 - ressource graphique SU a 0x801AF800
+ * B76 - diagnostic ressource graphique SU
  * ============================================================
  *
- * FUN_8006B350 charge 0x73 secteurs (0x39800 octets) de SU.MRG :
+ * L'ancien bridge rechargeait artificiellement 0x801AF800 depuis
+ * SU.MRG si la zone etait vide. Les captures ont confirme que cette
+ * ressource est deja chargee naturellement par le chemin CD guest.
  *
- *   +0x00000 : 0x20000 -> tampon
- *   +0x20000 : 0x10000 -> tampon
- *   +0x30000 : 0x01000 -> 0x801DD000
- *   +0x31000 : 0x08000 -> 0x80180000 (code overlay)
- *   +0x39000 : 0x00800 -> 0x801AF800 (ressource sprites)
- *
- * Le code du menu utilise 0x801AF800 comme ressource de tous ses
- * objets. Si cette derniere etape n'a pas ete publiee par notre
- * chemin CD asynchrone, FUN_800418C0 voit un bloc sprite vide et
- * retourne avant d'emettre les primitives du menu.
- *
- * B76 ne force le secteur que si les 64 premiers octets de
- * 0x801AF800 sont TOUS nuls.
+ * Le bridge de mutation est supprime. On conserve uniquement les
+ * compteurs d'observation utilises par B77/B78.
  */
-static uint32_t g_b76_resource_bridge = 0u;
-static uint32_t g_b76_resource_attempt = 0u;
-static int32_t  g_b76_resource_rc = 0;
-static uint32_t g_b76_su_lba = 0u;
-static uint32_t g_b76_su_size = 0u;
-static uint32_t g_b76_pre_nonzero = 0u;
-static uint32_t g_b76_post_nonzero = 0u;
-static uint32_t g_b76_objects_rearmed = 0u;
-static uint32_t g_b76_bridge_frame = 0u;
-
 static uint32_t g_b76_418c0_menu_hits = 0u;
 static uint32_t g_b76_last_menu_obj = 0u;
-
-static uint8_t g_b76_sector[2048];
 
 
 /*
@@ -1449,54 +1428,6 @@ static uint32_t g_b78_dma_wait_samples = 0u;
 static uint32_t g_b78_dma_madr = 0u;
 static uint32_t g_b78_dma_bcr = 0u;
 static uint32_t g_b78_dma_chcr = 0u;
-
-
-/*
- * ============================================================
- * B79 - soumission directe des packets produits par le menu
- * ============================================================
- *
- * B78 a prouve que chaque objet SU :
- *   - alloue un packet GPU valide dans DAT_800FF5C4 ;
- *   - avance le packet allocator ;
- *   - modifie son bucket dans l'Ordering Table.
- *
- * Exemple observe :
- *   header : 0509CA58
- *   GP0    : E1000228
- *            64808080
- *            002A006C
- *            3428A060
- *            00200068
- *
- * Le verrou est donc apres la construction du packet.
- *
- * B79 prend UNIQUEMENT les packets nouvellement alloues par les
- * 11 objets menu et envoie leurs mots GP0 directement au parser
- * GPU, sans attendre GsSortOt / DrawOTag / DMA2.
- *
- * Aucun packet n'est fabrique : ce sont exactement les mots
- * produits par le code original.
- *
- * Si le menu devient visible, le bug est confirme dans :
- *      OT -> DrawOTag -> DMA2
- * Si rien ne change, on investiguera texture/CLUT/VRAM.
- */
-static uint32_t g_b79_direct_calls = 0u;
-static uint32_t g_b79_direct_packets = 0u;
-static uint32_t g_b79_direct_words = 0u;
-static uint32_t g_b79_direct_bad = 0u;
-
-static uint32_t g_b79_last_header = 0u;
-static uint32_t g_b79_last_packet = 0u;
-static uint32_t g_b79_last_count = 0u;
-static uint32_t g_b79_last_opcode = 0u;
-
-static uint32_t g_b79_last_cmd0 = 0u;
-static uint32_t g_b79_last_cmd1 = 0u;
-static uint32_t g_b79_last_cmd2 = 0u;
-static uint32_t g_b79_last_cmd3 = 0u;
-static uint32_t g_b79_last_cmd4 = 0u;
 
 
 /*
@@ -1689,7 +1620,7 @@ static uint32_t g_b83_c5_after = 0u;
  *    l'ecran 3DS : un seul update guest peut demander 10-20 frames.
  *
  * 2) La VRAM est presentee a CHAQUE frame 3DS pendant que le guest
- *    construit encore son image. Avec le bridge direct B79, on voit
+ *    construit encore son image. Pendant le rendu asynchrone, on voit
  *    donc parfois une frame partiellement dessinee -> clignotement.
  *
  * B84 :
@@ -2350,122 +2281,6 @@ static uint32_t g_b93_917f8_max_ms = 0u;
 static uint32_t g_b93_917f8_last_out = 0u;
 
 
-static void fm_b79_submit_new_menu_packets(
-    uint32_t begin,
-    uint32_t end
-)
-{
-    ++g_b79_direct_calls;
-
-    if (
-        begin < 0x80000000u
-        ||
-        begin >= 0x80200000u
-        ||
-        end <= begin
-        ||
-        end > 0x80200000u
-        ||
-        (begin & 3u) != 0u
-        ||
-        (end & 3u) != 0u
-    )
-    {
-        ++g_b79_direct_bad;
-        return;
-    }
-
-    uint32_t p = begin;
-
-    while (p < end)
-    {
-        if (p + 4u > end)
-        {
-            ++g_b79_direct_bad;
-            break;
-        }
-
-        uint32_t header =
-            fm_memory_read_word(p);
-
-        uint32_t count =
-            header >> 24;
-
-        uint32_t bytes =
-            4u + count * 4u;
-
-        /*
-         * Les packets observes ici sont petits.
-         * Garde-fou contre une RAM corrompue.
-         */
-        if (
-            count == 0u
-            ||
-            count > 32u
-            ||
-            p + bytes > end
-        )
-        {
-            ++g_b79_direct_bad;
-            break;
-        }
-
-        g_b79_last_header = header;
-        g_b79_last_packet = p;
-        g_b79_last_count = count;
-
-        g_b79_last_cmd0 =
-            count > 0u
-                ? fm_memory_read_word(p + 4u)
-                : 0u;
-
-        g_b79_last_cmd1 =
-            count > 1u
-                ? fm_memory_read_word(p + 8u)
-                : 0u;
-
-        g_b79_last_cmd2 =
-            count > 2u
-                ? fm_memory_read_word(p + 12u)
-                : 0u;
-
-        g_b79_last_cmd3 =
-            count > 3u
-                ? fm_memory_read_word(p + 16u)
-                : 0u;
-
-        g_b79_last_cmd4 =
-            count > 4u
-                ? fm_memory_read_word(p + 20u)
-                : 0u;
-
-        /*
-         * Le premier mot peut etre une commande d'environnement
-         * E1 suivie de la primitive sprite. On conserve exactement
-         * l'ordre produit par le guest.
-         */
-        for (uint32_t i = 0u; i < count; ++i)
-        {
-            uint32_t word =
-                fm_memory_read_word(
-                    p + 4u + i * 4u
-                );
-
-            fm_gpu_gp0_write(word);
-            ++g_b79_direct_words;
-
-            if (i == 0u)
-            {
-                g_b79_last_opcode =
-                    word >> 24;
-            }
-        }
-
-        ++g_b79_direct_packets;
-
-        p += bytes;
-    }
-}
 static uint32_t g_hit_delay_wait = 0;
 static uint32_t g_hit_intro_init = 0;
 static uint32_t g_hit_boot_loop = 0;
@@ -5140,31 +4955,6 @@ static void fm_trace_dispatch(
                     }
                 }
 
-                /*
-                 * B79 - test decisif :
-                 * les mots GP0 crees par CE rendu d'objet sont
-                 * envoyes directement au GPU.
-                 */
-                /*
-                 * B135.91 - retire le bypass B79 du menu.
-                 *
-                 * B79 etait un pont de bring-up qui poussait directement
-                 * les packets fraichement alloues vers GP0. Le chemin OT /
-                 * DrawOTag / DMA2 est maintenant suffisamment avance et doit
-                 * rester responsable de l'ordre complet des primitives,
-                 * y compris les uploads texture/CLUT qui ne sont pas
-                 * necessairement dans le delta de l'objet courant.
-                 *
-                 * Conserver l'instrumentation B78/B79, mais ne plus soumettre
-                 * directement les packets du menu.
-                 */
-                if (0)
-                {
-                    fm_b79_submit_new_menu_packets(
-                        g_b78_alloc_before,
-                        g_b78_alloc_after
-                    );
-                }
 
 
                 g_b78_bucket_after =
@@ -12907,163 +12697,6 @@ int main(void)
                     frame;
 
                 ++g_b75_menu_entrance_bridge;
-            }
-        }
-
-
-        /*
-         * ====================================================
-         * B76 - charger le tail graphique SU manquant
-         * ====================================================
-         */
-        if (
-            game_running
-            &&
-            g_b73_hit_menu_init != 0u
-            &&
-            g_b75_menu_entrance_bridge != 0u
-            &&
-            g_b76_resource_attempt == 0u
-        )
-        {
-            ++g_b76_resource_attempt;
-
-            g_b76_pre_nonzero = 0u;
-
-            for (unsigned i = 0u; i < 64u; ++i)
-            {
-                if (
-                    fm_memory_read_byte(
-                        0x801AF800u + i
-                    )
-                    != 0u
-                )
-                {
-                    ++g_b76_pre_nonzero;
-                }
-            }
-
-            /*
-             * Ne rien toucher si la ressource est deja presente.
-             */
-            if (g_b76_pre_nonzero == 0u)
-            {
-                uint32_t su_lba = 0u;
-                uint32_t su_size = 0u;
-
-                int found =
-                    fm_disc_find_file(
-                        "\\DATA\\SU.MRG;1",
-                        &su_lba,
-                        &su_size
-                    );
-
-                if (!found)
-                {
-                    found =
-                        fm_disc_find_file(
-                            "\\SU.MRG;1",
-                            &su_lba,
-                            &su_size
-                        );
-                }
-
-                g_b76_su_lba = su_lba;
-                g_b76_su_size = su_size;
-
-                if (
-                    found
-                    &&
-                    su_size >= 0x39800u
-                )
-                {
-                    /*
-                     * 0x39000 / 0x800 = secteur relatif 0x72.
-                     */
-                    int rc =
-                        fm_disc_read_sector(
-                            su_lba + 0x72u,
-                            g_b76_sector
-                        );
-
-                    g_b76_resource_rc = rc;
-
-                    if (rc == 0)
-                    {
-                        for (unsigned i = 0u; i < 2048u; ++i)
-                        {
-                            fm_memory_write_byte(
-                                0x801AF800u + i,
-                                g_b76_sector[i]
-                            );
-                        }
-
-                        /*
-                         * Les objets ont ete initialises avant que la
-                         * ressource soit disponible. Enlever seulement
-                         * le bit 0x10 force le vrai FUN_80042090 puis
-                         * FUN_80041FBC a recalculer +0x50/+0x4C.
-                         */
-                        for (unsigned i = 0u; i < 11u; ++i)
-                        {
-                            uint32_t obj =
-                                fm_memory_read_word(
-                                    0x80184794u + i * 4u
-                                );
-
-                            if (
-                                obj < 0x80000000u
-                                ||
-                                obj >= 0x80200000u
-                            )
-                            {
-                                continue;
-                            }
-
-                            uint16_t flags =
-                                fm_memory_read_half(
-                                    obj + 0x08u
-                                );
-
-                            flags &=
-                                (uint16_t)~0x0010u;
-
-                            fm_memory_write_byte(
-                                obj + 0x08u,
-                                (uint8_t)(flags & 0xFFu)
-                            );
-
-                            fm_memory_write_byte(
-                                obj + 0x09u,
-                                (uint8_t)(flags >> 8)
-                            );
-
-                            ++g_b76_objects_rearmed;
-                        }
-
-                        g_b76_bridge_frame = frame;
-                        ++g_b76_resource_bridge;
-                    }
-                }
-                else
-                {
-                    g_b76_resource_rc = -2;
-                }
-            }
-
-            g_b76_post_nonzero = 0u;
-
-            for (unsigned i = 0u; i < 64u; ++i)
-            {
-                if (
-                    fm_memory_read_byte(
-                        0x801AF800u + i
-                    )
-                    != 0u
-                )
-                {
-                    ++g_b76_post_nonzero;
-                }
             }
         }
 
