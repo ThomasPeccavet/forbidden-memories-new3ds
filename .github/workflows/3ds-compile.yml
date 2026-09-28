@@ -29,9 +29,10 @@ jobs:
         run: |
           test -f "$DEVKITARM/3ds_rules"
           test -f "$DEVKITPRO/libctru/include/3ds.h"
-          arm-none-eabi-gcc --version
+          "$DEVKITARM/bin/arm-none-eabi-gcc" --version
       - name: Compile profile C objects
         run: |
+          export PATH="$DEVKITARM/bin:$PATH"
           make -C 3ds PROFILE=1 -j2 \
             build-profile/main.o \
             build-profile/platform.o \
