@@ -1,9 +1,14 @@
 #include "fm_memory.h"
 #include "fm_gpu.h"
 
+#include <3ds.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+
+#ifndef FM_PERF_PROFILE
+#define FM_PERF_PROFILE 0
+#endif
 
 
 /*
@@ -164,19 +169,60 @@ static uint32_t g_dma2_last_words = 0;
 static uint32_t g_dma2_last_first_header = 0;
 
 /*
- * B118 - O(1) cycle guard for DMA2 linked lists.
+ * B120 - DMA2 hot path.
  *
- * PS1 RAM contains 2 MiB / 4 = 524288 aligned word addresses.
- * One bit per possible node costs 64 KiB and avoids the pathological
- * 65536-node re-walk when a corrupted OT forms a cycle.
+ * B119 captures show ~4300 linked-list nodes for only ~400-500 GP0
+ * words. B118 used a 64 KiB memset before EVERY list just for cycle
+ * detection. Replace that with a generation table: no per-list clear,
+ * O(1) cycle lookup, and only one byte touched per visited RAM word.
+ *
+ * The table is 2 MiB / 4 = 524288 bytes. It is cleared only when the
+ * 8-bit generation wraps (once every 255 linked-list transfers).
  */
-#define FM_DMA2_VISIT_WORDS (((PSX_RAM_SIZE / 4u) + 31u) / 32u)
-static uint32_t g_dma2_visit_bits[FM_DMA2_VISIT_WORDS];
+#define FM_DMA2_VISIT_SLOTS (PSX_RAM_SIZE / 4u)
+static uint8_t g_dma2_visit_epoch[FM_DMA2_VISIT_SLOTS];
+static uint8_t g_dma2_visit_generation = 1u;
+static uint32_t g_dma2_visit_wrap_clears = 0u;
 
 static uint32_t g_dma2_cycle_abort_count = 0;
 static uint32_t g_dma2_last_cycle_addr = 0;
 static uint32_t g_dma2_max_nodes = 0;
 static uint32_t g_dma2_max_words = 0;
+
+static uint32_t g_dma2_last_empty_ot_nodes = 0u;
+static uint32_t g_dma2_max_empty_ot_nodes = 0u;
+
+static uint32_t g_dma2_linked_last_ms = 0u;
+static uint32_t g_dma2_linked_max_ms = 0u;
+static uint64_t g_dma2_linked_total_ms = 0u;
+static uint32_t g_dma2_linked_over20 = 0u;
+static uint32_t g_dma2_linked_over33 = 0u;
+
+/*
+ * B121 - collapse canonical empty ordering-table runs.
+ * These nodes carry no GP0 words and simply point to addr-4.
+ */
+static uint32_t g_dma2_empty_fast_runs = 0u;
+static uint64_t g_dma2_empty_fast_nodes = 0u;
+static uint32_t g_dma2_empty_fast_last = 0u;
+static uint32_t g_dma2_empty_fast_max = 0u;
+
+/*
+ * B135.54 - provenance of the five 52x60 hand sprites.
+ * We recognize the exact GP0 packet shape produced by FUN_80084978:
+ *   E1, 64, XY, UV/CLUT, WH
+ * and only keep packets at the five live hand X positions / Y=162.
+ */
+static uint32_t g_b13554_hand_total_hits = 0u;
+static uint32_t g_b13554_hand_last_list_hits = 0u;
+static uint32_t g_b13554_hand_last_addr = 0u;
+static uint32_t g_b13554_hand_last_node_ordinal = 0u;
+static uint32_t g_b13554_hand_after_payloads = 0u;
+static uint32_t g_b13554_hand_cmd0 = 0u;
+static uint32_t g_b13554_hand_cmd1 = 0u;
+static uint32_t g_b13554_hand_cmd2 = 0u;
+static uint32_t g_b13554_hand_cmd3 = 0u;
+static uint32_t g_b13554_hand_cmd4 = 0u;
 
 static uint32_t g_dma6_transfer_count = 0;
 static uint64_t g_dma6_word_count = 0;
@@ -1140,14 +1186,12 @@ static uint32_t fm_dma_ram_read_word(
         return 0;
     }
 
-    return
-        (uint32_t)g_ram[offset + 0]
-        |
-        ((uint32_t)g_ram[offset + 1] << 8)
-        |
-        ((uint32_t)g_ram[offset + 2] << 16)
-        |
-        ((uint32_t)g_ram[offset + 3] << 24);
+    /*
+     * B120: alias-safe native 32-bit load after -O3.
+     */
+    uint32_t value;
+    memcpy(&value, g_ram + offset, sizeof(value));
+    return value;
 }
 
 
@@ -1173,29 +1217,10 @@ static void fm_dma_ram_write_word(
         return;
     }
 
-    g_ram[offset + 0] =
-        (uint8_t)value;
-
-    g_ram[offset + 1] =
-        (uint8_t)(
-            value
-            >>
-            8
-        );
-
-    g_ram[offset + 2] =
-        (uint8_t)(
-            value
-            >>
-            16
-        );
-
-    g_ram[offset + 3] =
-        (uint8_t)(
-            value
-            >>
-            24
-        );
+    /*
+     * B120: alias-safe native 32-bit store after -O3.
+     */
+    memcpy(g_ram + offset, &value, sizeof(value));
 }
 
 
@@ -1352,8 +1377,80 @@ static void fm_dma2_complete(void)
  * 0x00FFFFFF est la valeur de fin la plus classique.
  */
 
+static void fm_dma2_linked_profile_finish(uint64_t start_ms)
+{
+#if FM_PERF_PROFILE
+    /*
+     * B135.29 - coarse linked-list timing.
+     *
+     * Time the whole DMA2 list once, rather than timing individual GP0
+     * commands. This keeps diagnostic overhead negligible while measuring
+     * exactly the combined cost we care about here:
+     *   OT traversal + GP0 parsing + software rasterization.
+     */
+    uint32_t elapsed_ms =
+        (uint32_t)(osGetTime() - start_ms);
+
+    g_dma2_linked_last_ms =
+        elapsed_ms;
+
+    g_dma2_linked_total_ms +=
+        elapsed_ms;
+
+    if (elapsed_ms > g_dma2_linked_max_ms)
+    {
+        g_dma2_linked_max_ms =
+            elapsed_ms;
+    }
+
+    if (elapsed_ms > 20u)
+    {
+        ++g_dma2_linked_over20;
+    }
+
+    if (elapsed_ms > 33u)
+    {
+        ++g_dma2_linked_over33;
+    }
+
+    if (g_dma2_last_empty_ot_nodes > g_dma2_max_empty_ot_nodes)
+    {
+        g_dma2_max_empty_ot_nodes = g_dma2_last_empty_ot_nodes;
+    }
+#else
+    (void)start_ms;
+#endif
+}
+
+
 static int fm_dma2_linked_list(void)
 {
+    uint64_t b120_start_ms = 0u;
+
+#if FM_PERF_PROFILE
+    b120_start_ms = osGetTime();
+
+    /*
+     * B135.32: GHOT/GHOT2 must describe THIS linked list.  The previous
+     * cumulative profile mixed boot/menu/map traffic and made one-time
+     * sprites look like current frame hotspots.
+     */
+    fm_gpu_b13532_profile_reset();
+#endif
+
+    /*
+     * Skipped canonical ranges are remembered so a later malformed link
+     * back into one of them is still detected as a cycle.
+     */
+    uint32_t b121_skip_lo[16];
+    uint32_t b121_skip_hi[16];
+    uint32_t b121_skip_ranges = 0u;
+
+#if FM_PERF_PROFILE
+    uint32_t b13554_hand_list_hits = 0u;
+    int b13554_hand_seen = 0;
+#endif
+
     uint32_t addr =
         g_dma2_madr
         &
@@ -1372,6 +1469,9 @@ static int fm_dma2_linked_list(void)
     g_dma2_last_words =
         0;
 
+    g_dma2_last_empty_ot_nodes =
+        0;
+
     g_dma2_last_first_header =
         fm_dma_ram_read_word(
             addr
@@ -1380,15 +1480,21 @@ static int fm_dma2_linked_list(void)
     ++g_dma2_linked_transfer_count;
 
     /*
-     * 64 KiB clear once per DMA2 list is bounded and dramatically cheaper
-     * than accidentally walking/rasterizing tens of thousands of repeated
-     * nodes. Valid OTs are unaffected.
+     * B120: advance the visit generation instead of clearing 64 KiB.
      */
-    memset(
-        g_dma2_visit_bits,
-        0,
-        sizeof(g_dma2_visit_bits)
-    );
+    ++g_dma2_visit_generation;
+
+    if (g_dma2_visit_generation == 0u)
+    {
+        memset(
+            g_dma2_visit_epoch,
+            0,
+            sizeof(g_dma2_visit_epoch)
+        );
+
+        g_dma2_visit_generation = 1u;
+        ++g_dma2_visit_wrap_clears;
+    }
 
 
     for (
@@ -1397,11 +1503,42 @@ static int fm_dma2_linked_list(void)
         ++node
     )
     {
-        uint32_t visit_index = addr >> 2;
-        uint32_t visit_word = visit_index >> 5;
-        uint32_t visit_mask = 1u << (visit_index & 31u);
+        for (uint32_t r = 0u; r < b121_skip_ranges; ++r)
+        {
+            if (
+                addr >= b121_skip_lo[r]
+                &&
+                addr <= b121_skip_hi[r]
+            )
+            {
+                ++g_dma2_cycle_abort_count;
+                g_dma2_last_cycle_addr = addr;
 
-        if (g_dma2_visit_bits[visit_word] & visit_mask)
+                if (g_dma2_last_nodes > g_dma2_max_nodes)
+                {
+                    g_dma2_max_nodes = g_dma2_last_nodes;
+                }
+
+                if (g_dma2_last_words > g_dma2_max_words)
+                {
+                    g_dma2_max_words = g_dma2_last_words;
+                }
+
+                fm_dma2_linked_profile_finish(
+                    b120_start_ms
+                );
+
+                return 1;
+            }
+        }
+
+        uint32_t visit_index = addr >> 2;
+
+        if (
+            g_dma2_visit_epoch[visit_index]
+            ==
+            g_dma2_visit_generation
+        )
         {
             ++g_dma2_cycle_abort_count;
             g_dma2_last_cycle_addr = addr;
@@ -1416,15 +1553,15 @@ static int fm_dma2_linked_list(void)
                 g_dma2_max_words = g_dma2_last_words;
             }
 
-            /*
-             * A cyclic GPU linked list is invalid. Complete the emulated DMA
-             * after the unique prefix instead of leaving CHCR busy forever.
-             * This changes only corrupted-list behavior.
-             */
+            fm_dma2_linked_profile_finish(
+                b120_start_ms
+            );
+
             return 1;
         }
 
-        g_dma2_visit_bits[visit_word] |= visit_mask;
+        g_dma2_visit_epoch[visit_index] =
+            g_dma2_visit_generation;
 
         uint32_t header =
             fm_dma_ram_read_word(
@@ -1444,6 +1581,196 @@ static int fm_dma2_linked_list(void)
             header
             &
             0x00FFFFFFu;
+
+        if (
+            count == 0u
+            &&
+            next
+            ==
+            ((addr - 4u) & 0x00FFFFFFu)
+        )
+        {
+            ++g_dma2_last_empty_ot_nodes;
+
+            /*
+             * B121 fast path.
+             *
+             * Once an empty OT bucket points exactly to addr-4, consume
+             * the following identical buckets in a tight loop. They have
+             * no GPU payload, so there is no observable GPU work to do.
+             *
+             * We leave the first non-canonical node for the normal loop,
+             * preserving packet ordering and terminator handling exactly.
+             */
+            if (b121_skip_ranges < 16u)
+            {
+                uint32_t scan_addr =
+                    next
+                    &
+                    0x001FFFFCu;
+
+                uint32_t first_skipped =
+                    scan_addr;
+
+                uint32_t last_skipped =
+                    scan_addr;
+
+                uint32_t extra =
+                    0u;
+
+                while (
+                    (node + 1u + extra) < 65536u
+                )
+                {
+                    uint32_t scan_header =
+                        fm_dma_ram_read_word(
+                            scan_addr
+                        );
+
+                    uint32_t scan_count =
+                        scan_header
+                        >>
+                        24;
+
+                    uint32_t scan_next =
+                        scan_header
+                        &
+                        0x00FFFFFFu;
+
+                    if (
+                        scan_count != 0u
+                        ||
+                        scan_next
+                        !=
+                        ((scan_addr - 4u) & 0x00FFFFFFu)
+                    )
+                    {
+                        break;
+                    }
+
+                    last_skipped =
+                        scan_addr;
+
+                    ++extra;
+
+                    scan_addr =
+                        scan_next
+                        &
+                        0x001FFFFCu;
+                }
+
+                if (extra != 0u)
+                {
+                    b121_skip_lo[b121_skip_ranges] =
+                        last_skipped;
+
+                    b121_skip_hi[b121_skip_ranges] =
+                        first_skipped;
+
+                    ++b121_skip_ranges;
+
+                    g_dma2_last_nodes +=
+                        extra;
+
+                    g_dma2_last_empty_ot_nodes +=
+                        extra;
+
+                    ++g_dma2_empty_fast_runs;
+
+                    g_dma2_empty_fast_nodes +=
+                        extra;
+
+                    g_dma2_empty_fast_last =
+                        extra;
+
+                    if (extra > g_dma2_empty_fast_max)
+                    {
+                        g_dma2_empty_fast_max =
+                            extra;
+                    }
+
+                    node +=
+                        extra;
+
+                    addr =
+                        scan_addr;
+
+                    g_dma2_madr =
+                        addr;
+
+                    continue;
+                }
+            }
+        }
+
+#if FM_PERF_PROFILE
+        int b13554_is_hand_packet = 0;
+
+        if (count >= 5u)
+        {
+            uint32_t c0 = fm_dma_ram_read_word((addr + 4u)  & 0x001FFFFCu);
+            uint32_t c1 = fm_dma_ram_read_word((addr + 8u)  & 0x001FFFFCu);
+            uint32_t c2 = fm_dma_ram_read_word((addr + 12u) & 0x001FFFFCu);
+            uint32_t c3 = fm_dma_ram_read_word((addr + 16u) & 0x001FFFFCu);
+            uint32_t c4 = fm_dma_ram_read_word((addr + 20u) & 0x001FFFFCu);
+
+            int x = (int16_t)(c2 & 0xFFFFu);
+            int y = (int16_t)(c2 >> 16);
+
+            (void)x;
+            (void)y;
+
+            /*
+             * B135.55: 80084978 can emit opcodes 64..67 depending on
+             * raw-texture / semi-transparency flags.  B135.54 only accepted
+             * exactly 64 and also assumed zero draw offset, so a valid hand
+             * packet could be missed.  Match the invariant shape instead:
+             * E1 + textured rectangle family 64..67 + 52x60.
+             */
+            if (
+                (c0 >> 24) == 0xE1u
+                &&
+                ((c1 >> 24) & 0xFCu) == 0x64u
+                &&
+                c4 == 0x003C0034u
+            )
+            {
+                b13554_is_hand_packet = 1;
+                b13554_hand_seen = 1;
+                ++b13554_hand_list_hits;
+                ++g_b13554_hand_total_hits;
+
+                g_b13554_hand_last_list_hits =
+                    b13554_hand_list_hits;
+
+                g_b13554_hand_last_addr =
+                    addr;
+
+                g_b13554_hand_last_node_ordinal =
+                    g_dma2_last_nodes;
+
+                g_b13554_hand_after_payloads =
+                    0u;
+
+                g_b13554_hand_cmd0 = c0;
+                g_b13554_hand_cmd1 = c1;
+                g_b13554_hand_cmd2 = c2;
+                g_b13554_hand_cmd3 = c3;
+                g_b13554_hand_cmd4 = c4;
+            }
+        }
+
+        if (
+            count != 0u
+            &&
+            b13554_hand_seen
+            &&
+            !b13554_is_hand_packet
+        )
+        {
+            ++g_b13554_hand_after_payloads;
+        }
+#endif
 
         uint32_t command_addr =
             (
@@ -1508,6 +1835,10 @@ static int fm_dma2_linked_list(void)
                 g_dma2_max_words = g_dma2_last_words;
             }
 
+            fm_dma2_linked_profile_finish(
+                b120_start_ms
+            );
+
             return 1;
         }
 
@@ -1537,6 +1868,10 @@ static int fm_dma2_linked_list(void)
 
     ++g_dma2_cycle_abort_count;
     g_dma2_last_cycle_addr = addr;
+
+    fm_dma2_linked_profile_finish(
+        b120_start_ms
+    );
 
     return 1;
 }
@@ -2582,10 +2917,16 @@ void fm_memory_init(
         0;
 
     memset(
-        g_dma2_visit_bits,
+        g_dma2_visit_epoch,
         0,
-        sizeof(g_dma2_visit_bits)
+        sizeof(g_dma2_visit_epoch)
     );
+
+    g_dma2_visit_generation =
+        1u;
+
+    g_dma2_visit_wrap_clears =
+        0u;
 
     g_dma2_cycle_abort_count =
         0;
@@ -2598,6 +2939,50 @@ void fm_memory_init(
 
     g_dma2_max_words =
         0;
+
+    g_dma2_last_empty_ot_nodes =
+        0u;
+
+    g_dma2_max_empty_ot_nodes =
+        0u;
+
+    g_dma2_linked_last_ms =
+        0u;
+
+    g_dma2_linked_max_ms =
+        0u;
+
+    g_dma2_linked_total_ms =
+        0u;
+
+    g_dma2_linked_over20 =
+        0u;
+
+    g_dma2_linked_over33 =
+        0u;
+
+    g_dma2_empty_fast_runs =
+        0u;
+
+    g_dma2_empty_fast_nodes =
+        0u;
+
+    g_dma2_empty_fast_last =
+        0u;
+
+    g_dma2_empty_fast_max =
+        0u;
+
+    g_b13554_hand_total_hits = 0u;
+    g_b13554_hand_last_list_hits = 0u;
+    g_b13554_hand_last_addr = 0u;
+    g_b13554_hand_last_node_ordinal = 0u;
+    g_b13554_hand_after_payloads = 0u;
+    g_b13554_hand_cmd0 = 0u;
+    g_b13554_hand_cmd1 = 0u;
+    g_b13554_hand_cmd2 = 0u;
+    g_b13554_hand_cmd3 = 0u;
+    g_b13554_hand_cmd4 = 0u;
 
     g_dma6_transfer_count =
         0;
@@ -4227,6 +4612,72 @@ void fm_memory_dma_debug(
     out->dma2_max_words =
         g_dma2_max_words;
 
+    out->dma2_visit_wrap_clears =
+        g_dma2_visit_wrap_clears;
+
+    out->dma2_last_empty_ot_nodes =
+        g_dma2_last_empty_ot_nodes;
+
+    out->dma2_max_empty_ot_nodes =
+        g_dma2_max_empty_ot_nodes;
+
+    out->dma2_linked_last_ms =
+        g_dma2_linked_last_ms;
+
+    out->dma2_linked_max_ms =
+        g_dma2_linked_max_ms;
+
+    out->dma2_linked_total_ms =
+        g_dma2_linked_total_ms;
+
+    out->dma2_linked_over20 =
+        g_dma2_linked_over20;
+
+    out->dma2_linked_over33 =
+        g_dma2_linked_over33;
+
+    out->dma2_empty_fast_runs =
+        g_dma2_empty_fast_runs;
+
+    out->dma2_empty_fast_nodes =
+        g_dma2_empty_fast_nodes;
+
+    out->dma2_empty_fast_last =
+        g_dma2_empty_fast_last;
+
+    out->dma2_empty_fast_max =
+        g_dma2_empty_fast_max;
+
+    out->b13554_hand_total_hits =
+        g_b13554_hand_total_hits;
+
+    out->b13554_hand_last_list_hits =
+        g_b13554_hand_last_list_hits;
+
+    out->b13554_hand_last_addr =
+        g_b13554_hand_last_addr;
+
+    out->b13554_hand_last_node_ordinal =
+        g_b13554_hand_last_node_ordinal;
+
+    out->b13554_hand_after_payloads =
+        g_b13554_hand_after_payloads;
+
+    out->b13554_hand_cmd0 =
+        g_b13554_hand_cmd0;
+
+    out->b13554_hand_cmd1 =
+        g_b13554_hand_cmd1;
+
+    out->b13554_hand_cmd2 =
+        g_b13554_hand_cmd2;
+
+    out->b13554_hand_cmd3 =
+        g_b13554_hand_cmd3;
+
+    out->b13554_hand_cmd4 =
+        g_b13554_hand_cmd4;
+
 
     out->dma6_transfer_count =
         g_dma6_transfer_count;
@@ -4262,4 +4713,102 @@ unsigned fm_memory_unmapped_count(void)
 {
     return
         g_unmapped_count;
+}
+
+
+/*
+ * ============================================================
+ * B135 - quick-state MMIO
+ * ============================================================
+ */
+void fm_memory_quick_save(
+    FMMemoryQuickState *out
+)
+{
+    if (!out)
+    {
+        return;
+    }
+
+    memset(out, 0, sizeof(*out));
+
+    memcpy(
+        out->scratch,
+        g_scratch,
+        sizeof(g_scratch)
+    );
+
+    out->i_stat = g_i_stat;
+    out->i_mask = g_i_mask;
+
+    for (unsigned i = 0u; i < PSX_TIMER_COUNT; ++i)
+    {
+        out->timers[i].count = g_timers[i].count;
+        out->timers[i].mode = g_timers[i].mode;
+        out->timers[i].target = g_timers[i].target;
+        out->timers[i].irq_fired_once = g_timers[i].irq_fired_once;
+    }
+
+    out->dma2_madr = g_dma2_madr;
+    out->dma2_bcr = g_dma2_bcr;
+    out->dma2_chcr = g_dma2_chcr;
+
+    out->dma6_madr = g_dma6_madr;
+    out->dma6_bcr = g_dma6_bcr;
+    out->dma6_chcr = g_dma6_chcr;
+
+    out->dma_dpcr = g_dma_dpcr;
+    out->dma_dicr = g_dma_dicr;
+}
+
+
+void fm_memory_quick_load(
+    const FMMemoryQuickState *in
+)
+{
+    if (!in)
+    {
+        return;
+    }
+
+    memcpy(
+        g_scratch,
+        in->scratch,
+        sizeof(g_scratch)
+    );
+
+    g_i_stat = in->i_stat;
+    g_i_mask = in->i_mask;
+
+    for (unsigned i = 0u; i < PSX_TIMER_COUNT; ++i)
+    {
+        g_timers[i].count = in->timers[i].count;
+        g_timers[i].mode = in->timers[i].mode;
+        g_timers[i].target = in->timers[i].target;
+        g_timers[i].irq_fired_once = in->timers[i].irq_fired_once;
+    }
+
+    g_dma2_madr = in->dma2_madr;
+    g_dma2_bcr = in->dma2_bcr;
+    g_dma2_chcr = in->dma2_chcr;
+
+    g_dma6_madr = in->dma6_madr;
+    g_dma6_bcr = in->dma6_bcr;
+    g_dma6_chcr = in->dma6_chcr;
+
+    g_dma_dpcr = in->dma_dpcr;
+    g_dma_dicr = in->dma_dicr;
+
+    /*
+     * La table de detection de boucle DMA est purement host/debug.
+     * Repartir d'une generation propre evite de reutiliser des marques
+     * qui appartiennent au run precedent.
+     */
+    memset(
+        g_dma2_visit_epoch,
+        0,
+        sizeof(g_dma2_visit_epoch)
+    );
+
+    g_dma2_visit_generation = 1u;
 }

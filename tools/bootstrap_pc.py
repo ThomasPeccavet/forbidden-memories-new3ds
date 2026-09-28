@@ -84,6 +84,53 @@ SEEDS = [
 
 
     # --------------------------------------------------------
+    # B135.20 - Pharaoh map hot resident entries / continuations
+    #
+    # B135.19 measured ~1.9M interpreted MIPS instructions per
+    # 120 host loops in 0x800342B0..0x80035AC8.  These addresses
+    # are reached as computed/internal continuations, so ordinary
+    # direct-JAL discovery does not make them dispatcher entries.
+    #
+    # Force them into the static recompiler.  The generator knows
+    # how to turn valid mid-function seeds into CPS continuations
+    # or split pieces while preserving fall-through.
+    # --------------------------------------------------------
+
+    0x800342B0,
+    0x80034A14,
+    0x80034BE4,
+    0x80034C74,
+    0x80035794,
+    0x80035988,
+
+    # B135.28 - B135.27 proved 0x80034D7C is an interior alias whose
+    # host FUN_80034D30 was never present in the generated resident set.
+    # Seed the real host entry first; then the existing interior-alias pass
+    # can attach 0x80034D7C to that generated host function.
+    0x80034D30,
+    0x80034D7C,
+
+    # B135.22 - hot CPS continuation in FUN_8008A0D8.
+    #
+    # The verified PC runtime repeatedly shows $ra=0x8008A1C0 while the
+    # Pharaoh-map callback loop is active.  On 3DS B135.21 also lands on
+    # CPU=8008A1C0 while the scheduler still spends ~38 ms in a slice.
+    # Expose that interior return continuation to the static dispatcher.
+    0x8008A1C0,
+
+    # B135.23 - next hot exits reported by CHAIN3.
+    #
+    # 0x80057B80 is the hot loop continuation inside FUN_8005721C after
+    # the model/primitive callback returns.
+    #
+    # 0x80089DA8 is the special primitive callback stub/sentinel used by
+    # several primitive dispatch tables and was by far the hottest CHAIN3
+    # exit on B135.22.
+    0x80057B80,
+    0x80089DA8,
+
+
+    # --------------------------------------------------------
     # libapi / interruptions
     #
     # Une partie de ces fonctions est atteinte par pointeurs

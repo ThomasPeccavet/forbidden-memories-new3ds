@@ -6,6 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef FM_PERF_PROFILE
+#define FM_PERF_PROFILE 0
+#endif
+
 #include "fm_platform.h"
 #include "fm_cpu.h"
 #include "fm_memory.h"
@@ -25,6 +29,9 @@ extern void fm_gpu_last_fill_info(
 /* B42 - active/desactive le vieux hack de preservation du background. */
 extern void fm_gpu_b42_set_preserve_background_clears(int enabled);
 extern int fm_gpu_b42_get_preserve_background_clears(void);
+
+/* Generated PSXRecomp dispatch introspection (B135.27 diagnostic). */
+extern int psx_game_is_function_entry(uint32_t addr);
 
 
 /*
@@ -1771,6 +1778,323 @@ static uint32_t g_b86_present_dirty = 0u;
 static uint32_t g_b86_present_count = 0u;
 static uint32_t g_b86_skipped_presents = 0u;
 
+/*
+ * ============================================================
+ * B131 - dirty-frame pacing
+ * ============================================================
+ *
+ * B130 showed far more host presents than real menu draws. Re-presenting
+ * the same latched PS1 image wastes RGB555 conversion + cache flush + swap
+ * and can worsen frame pacing. B131 swaps only when a new image has been
+ * latched; otherwise the current frontbuffer simply remains visible.
+ */
+static uint32_t g_b131_swap_count = 0u;
+static uint32_t g_b131_skip_count = 0u;
+static uint32_t g_b131_dirty_present_count = 0u;
+
+/*
+ * ============================================================
+ * B135.7 - VSync-boundary latch for DIRECT-2DF gameplay
+ * ============================================================
+ *
+ * 8002DF60 is the game's persistent main state-machine loop; it is not
+ * a normal once-per-frame function. The old B85/B131 rule waited for the
+ * artificial DIRECT-2DF sentinel before latching a new host frame. On the
+ * Palace map that sentinel is reached only rarely, so Azahar reports ~1-2
+ * App FPS even though the guest itself keeps running near full speed.
+ *
+ * A VSync wait is the natural stable boundary: by the time the game asks
+ * for the next VBlank, all GP0 work submitted since the previous latch is
+ * already in software VRAM. Latch once there when GP0 actually changed.
+ */
+static uint64_t g_b1357_last_latched_gp0 = 0u;
+static uint32_t g_b1357_vsync_latches = 0u;
+static uint32_t g_b1357_display_latches = 0u;
+
+/*
+ * B135.41 - stable VSync latch for non-DIRECT-2DF 2D/gameplay screens.
+ * Dialogue/duel traces showed GP0 activity and VSync completions while
+ * swap stayed at zero because the presenter only latched on GP1(05) flips.
+ */
+static uint32_t g_b13541_2d_vsync_latches = 0u;
+
+/*
+ * B135.44 - when GP1(05) stops flipping but the guest keeps drawing into
+ * the opposite 320-wide framebuffer, present that completed draw buffer
+ * at VSync.  This is presenter-only: guest GPU state is not modified.
+ */
+static uint32_t g_b13544_follow_drawbuf = 0u;
+static uint32_t g_b13544_last_draw_x = 0u;
+
+/*
+ * B135.76 - B135.44 only tracked the X page and, worse, queried
+ * fm_gpu_b127_perf_snapshot() for draw-area fields that function never fills.
+ * Keep the last real draw page selected from E3/E4 for compact diagnostics.
+ */
+static uint32_t g_b13576_last_draw_y = 0u;
+
+/*
+ * B135.78 - conservative stale-GP1 arbitration.
+ * GP1 remains authoritative on real display changes. Only a stale display
+ * may temporarily follow the opposite draw page, and only when sampled VRAM
+ * proves that page changed while the displayed page stayed unchanged.
+ */
+static uint32_t g_b13578_page_hash[4] = {0u,0u,0u,0u};
+static uint32_t g_b13578_follow_draw = 0u;
+static uint32_t g_b13578_keep_gp1 = 0u;
+static uint32_t g_b13578_last_pick = 0u; /* 0=GP1, 1=draw */
+static uint32_t g_b13578_last_current_nz = 0u;
+static uint32_t g_b13578_last_draw_nz = 0u;
+
+static unsigned b13578_page_index(unsigned x, unsigned y)
+{
+    return (y >= 256u ? 2u : 0u) + (x >= 320u ? 1u : 0u);
+}
+
+static void b13578_sample_page(
+    const uint16_t *vram,
+    unsigned x,
+    unsigned y,
+    uint32_t *hash_out,
+    uint32_t *nz_out
+)
+{
+    uint32_t hash = 2166136261u;
+    uint32_t nz = 0u;
+
+    /*
+     * 1/8 x 1/8 sample: only 1200 texels for a 320x240 page.
+     * This runs only at a completed stale-GP1 VSync.
+     */
+    for (unsigned py = 0u; py < 240u; py += 8u)
+    {
+        const uint16_t *row =
+            vram
+            +
+            ((y + py) & 511u) * 1024u
+            +
+            x;
+
+        for (unsigned px = 0u; px < 320u; px += 8u)
+        {
+            uint16_t value = row[px];
+
+            if ((value & 0x7FFFu) != 0u)
+            {
+                ++nz;
+            }
+
+            hash ^= (uint32_t)value;
+            hash *= 16777619u;
+        }
+    }
+
+    if (hash_out) *hash_out = hash;
+    if (nz_out) *nz_out = nz;
+}
+
+/*
+ * B135.8 - one-loop pulse emitted when the VSync HLE actually RETURNS.
+ * B135.7 looked at g_vsync_wait_active during presentation, but that flag is
+ * cleared inside the HLE before main.c reaches the latch stage. Therefore
+ * VSL stayed at zero even though gameplay was synchronizing correctly.
+ */
+static uint32_t g_b1358_vsync_completed = 0u;
+static uint32_t g_b1358_vsync_completions = 0u;
+
+/*
+ * B135.9 - compact performance deltas over the 120-loop debug interval.
+ * These counters are deliberately host-side and are not part of quick-state.
+ */
+static uint32_t g_b1359_prev_swap = 0u;
+static uint32_t g_b1359_prev_vsc = 0u;
+static uint64_t g_b1359_prev_gp0 = 0u;
+static uint64_t g_b13513_prev_pixels = 0u;
+
+/*
+ * B135.40 - duel/dialogue 2D-layer probe.
+ * Track textured sprites/quads and sampled occupancy of the two 320-wide
+ * framebuffer pages so we can tell "not drawn" from "drawn on other page".
+ */
+static uint32_t g_b13540_prev_rect = 0u;
+static uint32_t g_b13540_prev_quad = 0u;
+static uint32_t g_b13540_prev_2c = 0u;
+static uint32_t g_b13540_prev_3a = 0u;
+
+/*
+ * B135.47 - prove whether PutDispEnv / GP1(05) is still being issued.
+ */
+static uint32_t g_b13547_prev_e3 = 0u;
+static uint32_t g_b13547_prev_e4 = 0u;
+static uint32_t g_b13547_prev_e5 = 0u;
+static uint32_t g_b13547_prev_05 = 0u;
+
+/* B135.19 - interval counters for the continuous map interpreter. */
+static uint64_t g_b13519_prev_region_chunks = 0u;
+static uint64_t g_b13519_prev_region_instructions = 0u;
+
+/*
+ * B135.14 - resident dispatch chaining for the Pharaoh map renderer
+ * 800342B0..80034D2F.
+ */
+static uint32_t g_b13514_chain_entries = 0u;
+static uint64_t g_b13514_chain_dispatches = 0u;
+static uint32_t g_b13514_chain_max = 0u;
+
+/*
+ * B135.16 - sampled heavy hitters for the PC that immediately BREAKS the
+ * chain. B135.15 still reports max=1, so the next PC after almost every
+ * map dispatch lives outside our two chained regions.
+ *
+ * Sample only 1/16 exits to keep the diagnostic overhead negligible.
+ */
+static uint32_t g_b13516_exit_pc[4] = {0u};
+static uint32_t g_b13516_exit_weight[4] = {0u};
+static uint32_t g_b13516_exit_samples = 0u;
+static uint32_t g_b13516_exit_seen = 0u;
+
+/*
+ * B135.17 - fast R3000A block chaining for the resident Pharaoh-map code.
+ *
+ * B135.16 proved the dominant chain exits are 034A14 / 034BE4 / 035988:
+ * all are INSIDE the map region, but they are labels/basic blocks that the
+ * static PSXRecomp dispatcher does not expose as function entries.
+ *
+ * Returning to main.c after every interpreted basic block is therefore pure
+ * overhead. Chain those blocks locally until the PC leaves the map region or
+ * the host 12 ms slice expires.
+ */
+static uint32_t g_b13517_interp_entries = 0u;
+static uint64_t g_b13517_interp_blocks = 0u;
+static uint32_t g_b13517_interp_max = 0u;
+static uint32_t g_b13517_interp_time_yields = 0u;
+
+/*
+ * B135.18 - when a host loop already consumed a full 60 Hz frame budget,
+ * waiting for the NEXT 3DS VBlank only throws away more CPU time.
+ */
+static uint32_t g_b13518_late_vblank_skips = 0u;
+
+/*
+ * B135.19 - total MIPS instructions retired by the continuous resident-map
+ * interpreter. Existing B135.17 "blocks" counter is reused as region chunks.
+ */
+static uint64_t g_b13519_region_instructions = 0u;
+
+/*
+ * B135.25 - profile which internal map continuations still fall back to the
+ * R3000A interpreter.  Weight by retired instructions, not only hit count,
+ * so one rare but very expensive continuation is visible immediately.
+ */
+static uint32_t g_b13525_interp_pc[8] = {0u};
+static uint32_t g_b13525_interp_hits[8] = {0u};
+static uint64_t g_b13525_interp_ins[8] = {0u};
+
+static void b13525_note_interp_entry(
+    uint32_t pc,
+    uint64_t instructions
+)
+{
+    pc &= 0x1FFFFFFFu;
+
+    unsigned empty = 8u;
+    unsigned lightest = 0u;
+
+    for (unsigned i = 0u; i < 8u; ++i)
+    {
+        if (g_b13525_interp_pc[i] == pc)
+        {
+            ++g_b13525_interp_hits[i];
+            g_b13525_interp_ins[i] += instructions;
+            return;
+        }
+
+        if (g_b13525_interp_pc[i] == 0u && empty == 8u)
+        {
+            empty = i;
+        }
+
+        if (g_b13525_interp_ins[i] < g_b13525_interp_ins[lightest])
+        {
+            lightest = i;
+        }
+    }
+
+    unsigned slot = empty != 8u ? empty : lightest;
+
+    g_b13525_interp_pc[slot] = pc;
+    g_b13525_interp_hits[slot] = 1u;
+    g_b13525_interp_ins[slot] = instructions;
+}
+
+
+static int b13517_is_map_interp_pc(uint32_t pc)
+{
+    uint32_t phys = pc & 0x1FFFFFFFu;
+
+    /*
+     * 34D30 is a real compiled function entry. Hand it back to the native
+     * dispatcher instead of interpreting the whole function from its entry.
+     * Internal labels inside it (e.g. 35988) remain eligible.
+     */
+    if (phys == 0x00034D30u)
+    {
+        return 0;
+    }
+
+    return
+        phys >= 0x000342B0u
+        &&
+        phys < 0x00035AC8u;
+}
+
+
+static void b13516_note_chain_exit(uint32_t pc)
+{
+    ++g_b13516_exit_seen;
+
+    if ((g_b13516_exit_seen & 15u) != 0u)
+    {
+        return;
+    }
+
+    ++g_b13516_exit_samples;
+
+    pc &= 0x1FFFFFFFu;
+
+    for (unsigned i = 0u; i < 4u; ++i)
+    {
+        if (
+            g_b13516_exit_weight[i] != 0u
+            &&
+            g_b13516_exit_pc[i] == pc
+        )
+        {
+            ++g_b13516_exit_weight[i];
+            return;
+        }
+    }
+
+    for (unsigned i = 0u; i < 4u; ++i)
+    {
+        if (g_b13516_exit_weight[i] == 0u)
+        {
+            g_b13516_exit_pc[i] = pc;
+            g_b13516_exit_weight[i] = 1u;
+            return;
+        }
+    }
+
+    /*
+     * Misra-Gries: preserve the recurring destinations without a large
+     * hash table in the hot scheduler.
+     */
+    for (unsigned i = 0u; i < 4u; ++i)
+    {
+        --g_b13516_exit_weight[i];
+    }
+}
+
 
 /*
  * ============================================================
@@ -1926,7 +2250,14 @@ static uint32_t g_b105_render_ms = 0u;
 static uint32_t g_b105_vblank_ms = 0u;
 static uint32_t g_b105_work_ms = 0u;
 static uint32_t g_b105_loop_ms = 0u;
-static uint32_t g_b105_probe_budget = 64000u;
+/*
+ * B135.21 - B135.20 moved most Pharaoh-map work from the interpreter to
+ * native generated ARM code. A 64K checkpoint quantum can now keep a single
+ * fm_runtime_probe() alive for ~40 ms before main.c gets a chance to enforce
+ * the 12 ms host slice. Use an 8K quantum so the outer scheduler can recover
+ * control roughly every ~5 ms on the measured map workload.
+ */
+static uint32_t g_b105_probe_budget = 8192u;
 static uint32_t g_b105_slice_budget_ms = 12u;
 
 static uint32_t g_b106_pre_gfx_ms = 0u;
@@ -2642,6 +2973,1041 @@ static uint32_t g_hit_8111c = 0;
 static uint32_t g_hit_82168 = 0;
 static uint32_t g_hit_8219c = 0;
 
+/*
+ * B135.51 - exact duel hand callback chain.
+ * FUN_80032824 creates two list-6 (CC) objects whose draw callback is
+ * FUN_80031B58, one for each framebuffer.  Track the setup, CC walker
+ * and callback entries to see where that chain stops on 3DS.
+ */
+static uint32_t g_b13551_hit_32824 = 0u;
+static uint32_t g_b13551_hit_41048 = 0u;
+static uint32_t g_b13551_hit_31b58 = 0u;
+static uint32_t g_b13551_hit_31948 = 0u;
+static uint32_t g_b13551_hit_319dc = 0u;
+
+/*
+ * B135.79 - compact dialogue/display-object pipeline probe.
+ * These are entry counters only; no VRAM scan and no per-pixel work.
+ */
+static uint32_t g_b13579_hit_408bc = 0u;
+static uint32_t g_b13579_hit_40f2c = 0u;
+static uint32_t g_b13579_hit_4110c = 0u;
+static uint32_t g_b13579_hit_4139c = 0u;
+
+static uint32_t g_b13579_prev_40b48 = 0u;
+static uint32_t g_b13579_prev_408bc = 0u;
+static uint32_t g_b13579_prev_40f2c = 0u;
+static uint32_t g_b13579_prev_4110c = 0u;
+static uint32_t g_b13579_prev_4139c = 0u;
+static uint32_t g_b13579_prev_41048 = 0u;
+
+static uint32_t g_b13579_prev_rect = 0u;
+static uint32_t g_b13579_prev_quad = 0u;
+static uint32_t g_b13579_prev_2c = 0u;
+static uint32_t g_b13579_prev_3a = 0u;
+
+/*
+ * B135.80 - prove the C2 function-table / indirect-dispatch link.
+ * 80041674 walks list heads C0..CC through the seven function pointers
+ * stored at 800923DC..800923F4.  C2 is index 1 -> 800923E0 and must
+ * resolve to FUN_800408BC, the routine that consumes DAT_800F11C2.
+ */
+static uint32_t g_b13580_hit_41674 = 0u;
+static uint32_t g_b13580_prev_41674 = 0u;
+
+/* B135.82: preserve the last C2 renderer invocation while its list is live. */
+#if FM_PERF_PROFILE
+static uint32_t g_b13582_active_calls = 0u;
+static uint32_t g_b13582_returned = 0u;
+static uint32_t g_b13582_gp0_words = 0u;
+static uint32_t g_b13582_last_head = 0u;
+static uint32_t g_b13582_last_nodes = 0u;
+static uint32_t g_b13582_last_drawable = 0u;
+static uint32_t g_b13582_last_bad = 0u;
+static uint32_t g_b13582_last_flags = 0u;
+static uint32_t g_b13582_last_callback = 0u;
+static uint32_t g_b13582_last_ra = 0u;
+static uint32_t g_b13582_last_424b8 = 0u;
+static uint32_t g_b13582_last_422c0 = 0u;
+static uint32_t g_b13582_pending = 0u;
+static uint64_t g_b13582_gp0_at_entry = 0u;
+static uint32_t g_b13583_outer_c2_create = 0u;
+static uint32_t g_b13583_outer_remove = 0u;
+static uint32_t g_b13583_last_create_ra = 0u;
+static uint32_t g_b13583_last_create_index = 0u;
+static uint32_t g_b13584_outer_cat2 = 0u;
+static uint32_t g_b13584_outer_draw = 0u;
+static uint32_t g_b13585_outer_cat2_live = 0u;
+static uint32_t g_b13585_outer_cat2_drawable = 0u;
+static uint32_t g_b13585_cat2_flags = 0u;
+static uint32_t g_b13585_cat2_callback = 0u;
+static uint32_t g_b13585_cat2_category = 0u;
+static uint32_t g_b13585_cat2_ra = 0u;
+static uint32_t g_b13585_outer_cat2_create = 0u;
+static uint32_t g_b13585_outer_cat2_remove = 0u;
+#endif
+
+/*
+ * B135.53 - the active CC objects on the duel screen all point to
+ * FUN_80016C20.  FUN_80017E94 is its constructor and FUN_800166A0
+ * is the actual miniature-card renderer called by 80016C20.
+ */
+static uint32_t g_b13553_hit_17e94 = 0u;
+static uint32_t g_b13553_hit_16c20 = 0u;
+static uint32_t g_b13553_hit_166a0 = 0u;
+
+/*
+ * B135.56 - prove the exact path of the 52x60 hand primitive.
+ *
+ * 800166A0 ultimately calls 800424B8.  In mode 1, 800424B8 calls
+ * 80084978, which allocates a packet at DAT_800FF5C4 and links it
+ * directly into a GsOT bucket.  Track those exact packet addresses and
+ * then inspect the source/destination OT around our 80085D98 HLE.
+ */
+#define B13556_HAND_SLOTS 16u
+static uint32_t g_b13556_hit_424b8 = 0u;
+static uint32_t g_b13556_last_424_mode = 0u;
+static uint32_t g_b13556_hit_84978 = 0u;
+static uint32_t g_b13556_hand_84978 = 0u;
+static uint32_t g_b13556_hand_packet[B13556_HAND_SLOTS] = {0u};
+static uint32_t g_b13556_hand_head = 0u;
+static uint32_t g_b13556_last_packet = 0u;
+static uint32_t g_b13556_last_ot = 0u;
+static uint32_t g_b13556_last_bucket = 0u;
+static uint32_t g_b13556_last_prio = 0u;
+static int32_t g_b13556_last_x = 0;
+static int32_t g_b13556_last_y = 0;
+static uint32_t g_b13556_last_ra = 0u;
+
+static uint32_t g_b13556_merge_rel = 0u;
+static uint32_t g_b13556_merge_src_has = 0u;
+static uint32_t g_b13556_merge_dst_has = 0u;
+static uint32_t g_b13556_last_src_has = 0u;
+static uint32_t g_b13556_last_dst_has = 0u;
+static uint32_t g_b13556_last_src_steps = 0u;
+static uint32_t g_b13556_last_dst_steps = 0u;
+
+static int b13556_chain_contains_hand(
+    CPUState *cpu,
+    uint32_t start_tag,
+    uint32_t *steps_out
+)
+{
+    if (steps_out)
+    {
+        *steps_out = 0u;
+    }
+
+    if (!cpu || start_tag == 0u)
+    {
+        return 0;
+    }
+
+    uint32_t node = start_tag;
+
+    for (uint32_t step = 0u; step < 8192u; ++step)
+    {
+        uint32_t phys = node & 0x1FFFFFFFu;
+
+        if (steps_out)
+        {
+            *steps_out = step + 1u;
+        }
+
+        if (phys >= 0x00200000u || (phys & 3u) != 0u)
+        {
+            return 0;
+        }
+
+        for (uint32_t i = 0u; i < B13556_HAND_SLOTS; ++i)
+        {
+            if (
+                g_b13556_hand_packet[i] != 0u
+                &&
+                g_b13556_hand_packet[i] == phys
+            )
+            {
+                return 1;
+            }
+        }
+
+        uint32_t header =
+            cpu->read_word(0x80000000u | phys);
+
+        uint32_t next =
+            header & 0x00FFFFFFu;
+
+        if (next & 0x00800000u)
+        {
+            return 0;
+        }
+
+        node =
+            0x80000000u | next;
+    }
+
+    return 0;
+}
+
+/*
+ * B135.57 - recognize the actual 52x60 hand packet by its GP0 payload,
+ * independently of packet address / frame / double-buffer selection.
+ */
+static uint32_t g_b13557_src_calls = 0u;
+static uint32_t g_b13557_src_has = 0u;
+static uint32_t g_b13557_dst_has = 0u;
+static uint32_t g_b13557_draw_calls = 0u;
+static uint32_t g_b13557_draw_has = 0u;
+
+static uint32_t g_b13557_last_src = 0u;
+static uint32_t g_b13557_last_dst = 0u;
+static uint32_t g_b13557_last_draw_tag = 0u;
+static uint32_t g_b13557_last_shape_packet = 0u;
+static uint32_t g_b13557_last_src_steps = 0u;
+static uint32_t g_b13557_last_dst_steps = 0u;
+static uint32_t g_b13557_last_draw_steps = 0u;
+
+static int b13557_chain_has_hand_shape(
+    CPUState *cpu,
+    uint32_t start_tag,
+    uint32_t *steps_out,
+    uint32_t *packet_out
+)
+{
+    if (steps_out) *steps_out = 0u;
+    if (packet_out) *packet_out = 0u;
+
+    if (!cpu || start_tag == 0u)
+    {
+        return 0;
+    }
+
+    uint32_t node = start_tag;
+
+    for (uint32_t step = 0u; step < 8192u; ++step)
+    {
+        uint32_t phys = node & 0x1FFFFFFFu;
+
+        if (steps_out) *steps_out = step + 1u;
+
+        if (phys >= 0x00200000u || (phys & 3u) != 0u)
+        {
+            return 0;
+        }
+
+        uint32_t guest = 0x80000000u | phys;
+        uint32_t header = cpu->read_word(guest);
+        uint32_t count = header >> 24;
+
+        if (count >= 5u)
+        {
+            uint32_t c0 = cpu->read_word(guest + 4u);
+            uint32_t c1 = cpu->read_word(guest + 8u);
+            uint32_t c4 = cpu->read_word(guest + 20u);
+
+            if (
+                (c0 >> 24) == 0xE1u
+                &&
+                ((c1 >> 24) & 0xFCu) == 0x64u
+                &&
+                c4 == 0x003C0034u
+            )
+            {
+                if (packet_out) *packet_out = guest;
+                return 1;
+            }
+        }
+
+        uint32_t next = header & 0x00FFFFFFu;
+
+        if (next & 0x00800000u)
+        {
+            return 0;
+        }
+
+        node = 0x80000000u | next;
+    }
+
+    return 0;
+}
+
+/*
+ * B135.58 - packet lifetime and exact OT reachability.
+ *
+ * B135.57 proves that 80084978 is called for the hand but the source OT
+ * chain scan does not see a 52x60 packet. Track the two frame-buffer hand
+ * OTs independently, verify the packet immediately after 80084978 returns,
+ * then check whether the source tag can still reach its bucket/packet just
+ * before GsSortOt.
+ */
+typedef struct B13558HandSlot
+{
+    uint32_t ot;
+    uint32_t packet;
+    uint32_t bucket;
+    uint32_t pending;
+    uint32_t ret_hits;
+    uint32_t shape_ok;
+    uint32_t bucket_ok;
+    uint32_t words[6];
+} B13558HandSlot;
+
+static B13558HandSlot g_b13558_hand[2] =
+{
+    {0x800E5FD4u,0u,0u,0u,0u,0u,0u,{0u,0u,0u,0u,0u,0u}},
+    {0x800EB134u,0u,0u,0u,0u,0u,0u,{0u,0u,0u,0u,0u,0u}}
+};
+
+static uint32_t g_b13558_merge_samples = 0u;
+static uint32_t g_b13558_pre_shape = 0u;
+static uint32_t g_b13558_pre_bucket_reach = 0u;
+static uint32_t g_b13558_pre_packet_reach = 0u;
+static uint32_t g_b13558_post_shape = 0u;
+
+static uint32_t g_b13558_last_len = 0u;
+static uint32_t g_b13558_last_org = 0u;
+static uint32_t g_b13558_last_off = 0u;
+static uint32_t g_b13558_last_point = 0u;
+static uint32_t g_b13558_last_tag = 0u;
+static uint32_t g_b13558_last_bucket_word = 0u;
+static uint32_t g_b13558_last_packet_header = 0u;
+static uint32_t g_b13558_last_steps_bucket = 0u;
+static uint32_t g_b13558_last_steps_packet = 0u;
+static uint32_t g_b13558_last_stop = 0u;
+static uint32_t g_b13558_last_stop_header = 0u;
+
+static int b13558_chain_reaches(
+    CPUState *cpu,
+    uint32_t start_tag,
+    uint32_t target,
+    uint32_t *steps_out,
+    uint32_t *stop_out,
+    uint32_t *header_out
+)
+{
+    if (steps_out) *steps_out = 0u;
+    if (stop_out) *stop_out = 0u;
+    if (header_out) *header_out = 0u;
+
+    if (!cpu || start_tag == 0u || target == 0u)
+    {
+        return 0;
+    }
+
+    uint32_t target_phys = target & 0x1FFFFFu;
+    uint32_t node = start_tag;
+
+    for (uint32_t step = 0u; step < 8192u; ++step)
+    {
+        uint32_t phys = node & 0x1FFFFFu;
+
+        if (steps_out) *steps_out = step + 1u;
+
+        if (phys >= 0x00200000u || (phys & 3u) != 0u)
+        {
+            if (stop_out) *stop_out = node;
+            return 0;
+        }
+
+        uint32_t guest = 0x80000000u | phys;
+        uint32_t header = cpu->read_word(guest);
+
+        if (phys == target_phys)
+        {
+            if (stop_out) *stop_out = guest;
+            if (header_out) *header_out = header;
+            return 1;
+        }
+
+        uint32_t next = header & 0x00FFFFFFu;
+
+        if (next & 0x00800000u)
+        {
+            if (stop_out) *stop_out = guest;
+            if (header_out) *header_out = header;
+            return 0;
+        }
+
+        node = 0x80000000u | next;
+    }
+
+    if (stop_out) *stop_out = node;
+    return 0;
+}
+
+/*
+ * B135.59 - compact lifecycle event ring.
+ *
+ * The B135.58 result proved that every 52x60 hand packet and its OT
+ * bucket are valid immediately after 80084978 returns, but both are zero
+ * by the time the hand OT reaches GsSortOt.  Record the exact ordering of
+ * the frame finalizer, sort, DrawOTag, allocator switch and ClearOTagR.
+ */
+#define B13559_EVT_MAX 32u
+
+typedef struct B13559Event
+{
+    uint32_t seq;
+    uint32_t type;
+    uint32_t a;
+    uint32_t b;
+} B13559Event;
+
+static B13559Event g_b13559_evt[B13559_EVT_MAX];
+static uint32_t g_b13559_evt_head = 0u;
+static uint32_t g_b13559_evt_seq = 0u;
+
+static void b13559_log(
+    uint32_t type,
+    uint32_t a,
+    uint32_t b
+)
+{
+    B13559Event *e =
+        &g_b13559_evt[
+            g_b13559_evt_head % B13559_EVT_MAX
+        ];
+
+    e->seq = ++g_b13559_evt_seq;
+    e->type = type;
+    e->a = a;
+    e->b = b;
+
+    ++g_b13559_evt_head;
+}
+
+/*
+ * B135.60 - narrow the exact moment where the live hand packet dies.
+ *
+ * Stages:
+ *   0 = immediately after 80084978 returns for a hand packet
+ *   1 = entry 80012D60 (frame finalizer)
+ *   2 = 80012DE4, immediately after ResetGraph(1)
+ *   3 = 80012E04, immediately after the optional 80035EB0 path
+ *   4 = HLE entry for the hand GsSortOt, before any OT repair
+ */
+typedef struct B13560Stage
+{
+    uint32_t hits;
+    uint32_t base;
+    uint32_t src_ot;
+    uint32_t packet;
+    uint32_t bucket;
+    uint32_t packet_header;
+    uint32_t bucket_word;
+    uint32_t allocator;
+    uint32_t tag;
+    uint32_t reach_packet;
+    uint32_t reach_bucket;
+} B13560Stage;
+
+static B13560Stage g_b13560_stage[5];
+
+static void b13560_snapshot(
+    CPUState *cpu,
+    unsigned stage
+)
+{
+    if (!cpu || stage >= 5u)
+    {
+        return;
+    }
+
+    uint32_t base =
+        cpu->read_word(0x8009C414u);
+
+    B13558HandSlot *hs = NULL;
+
+    if (base == 0x800E0EB0u)
+    {
+        hs = &g_b13558_hand[0];
+    }
+    else if (base == 0x800E6010u)
+    {
+        hs = &g_b13558_hand[1];
+    }
+
+    if (!hs)
+    {
+        return;
+    }
+
+    B13560Stage *st =
+        &g_b13560_stage[stage];
+
+    ++st->hits;
+    st->base = base;
+    st->src_ot = hs->ot;
+    st->packet = hs->packet;
+    st->bucket = hs->bucket;
+    st->allocator =
+        cpu->read_word(0x800FF5C4u);
+    st->tag =
+        cpu->read_word(hs->ot + 0x10u);
+
+    st->packet_header =
+        hs->packet != 0u
+            ? cpu->read_word(hs->packet)
+            : 0u;
+
+    st->bucket_word =
+        hs->bucket != 0u
+            ? cpu->read_word(hs->bucket)
+            : 0u;
+
+    st->reach_packet = 0u;
+    st->reach_bucket = 0u;
+
+    if (st->tag != 0u)
+    {
+        if (
+            hs->packet != 0u
+            &&
+            b13558_chain_reaches(
+                cpu,
+                st->tag,
+                hs->packet,
+                NULL,
+                NULL,
+                NULL
+            )
+        )
+        {
+            st->reach_packet = 1u;
+        }
+
+        if (
+            hs->bucket != 0u
+            &&
+            b13558_chain_reaches(
+                cpu,
+                st->tag,
+                hs->bucket,
+                NULL,
+                NULL,
+                NULL
+            )
+        )
+        {
+            st->reach_bucket = 1u;
+        }
+    }
+}
+
+/*
+ * B135.61 - correlate H -> finalizer -> ResetGraph return -> GsSortOt
+ * for the SAME hand generation and the SAME framebuffer.
+ */
+typedef struct B13561Life
+{
+    uint32_t base;
+    uint32_t src_ot;
+
+    uint32_t hand_gen;
+    uint32_t consumed_gen;
+
+    uint32_t packet;
+    uint32_t bucket;
+
+    uint32_t f_seen;
+    uint32_t f_alive;
+
+    uint32_t r_seen;
+    uint32_t r_alive;
+
+    uint32_t s_seen;
+    uint32_t s_alive;
+    uint32_t s_dead;
+
+    uint32_t last_s_packet_header;
+    uint32_t last_s_bucket_word;
+    uint32_t last_s_reach_bucket;
+    uint32_t last_s_reach_packet;
+} B13561Life;
+
+static B13561Life g_b13561_life[2] =
+{
+    {
+        0x800E0EB0u,
+        0x800E5FD4u,
+        0u,0u,0u,0u,
+        0u,0u,0u,0u,0u,0u,0u,
+        0u,0u,0u,0u
+    },
+    {
+        0x800E6010u,
+        0x800EB134u,
+        0u,0u,0u,0u,
+        0u,0u,0u,0u,0u,0u,0u,
+        0u,0u,0u,0u
+    }
+};
+
+static B13561Life *b13561_by_base(
+    uint32_t base
+)
+{
+    if (base == g_b13561_life[0].base)
+    {
+        return &g_b13561_life[0];
+    }
+
+    if (base == g_b13561_life[1].base)
+    {
+        return &g_b13561_life[1];
+    }
+
+    return NULL;
+}
+
+static B13561Life *b13561_by_src(
+    uint32_t src_ot
+)
+{
+    if (src_ot == g_b13561_life[0].src_ot)
+    {
+        return &g_b13561_life[0];
+    }
+
+    if (src_ot == g_b13561_life[1].src_ot)
+    {
+        return &g_b13561_life[1];
+    }
+
+    return NULL;
+}
+
+static int b13561_packet_alive(
+    CPUState *cpu,
+    B13561Life *lf,
+    uint32_t *header_out,
+    uint32_t *bucket_out
+)
+{
+    if (header_out) *header_out = 0u;
+    if (bucket_out) *bucket_out = 0u;
+
+    if (!cpu || !lf || lf->packet == 0u || lf->bucket == 0u)
+    {
+        return 0;
+    }
+
+    uint32_t h =
+        cpu->read_word(lf->packet);
+
+    uint32_t bw =
+        cpu->read_word(lf->bucket);
+
+    if (header_out) *header_out = h;
+    if (bucket_out) *bucket_out = bw;
+
+    if (
+        (h >> 24) != 5u
+        ||
+        (
+            (bw & 0x00FFFFFFu)
+            !=
+            (lf->packet & 0x00FFFFFFu)
+        )
+    )
+    {
+        return 0;
+    }
+
+    uint32_t c0 =
+        cpu->read_word(lf->packet + 4u);
+
+    uint32_t c1 =
+        cpu->read_word(lf->packet + 8u);
+
+    uint32_t c4 =
+        cpu->read_word(lf->packet + 20u);
+
+    return
+        (
+            (c0 >> 24) == 0xE1u
+            &&
+            ((c1 >> 24) & 0xFCu) == 0x64u
+            &&
+            c4 == 0x003C0034u
+        );
+}
+
+static void b13561_checkpoint_base(
+    CPUState *cpu,
+    int after_reset
+)
+{
+    if (!cpu)
+    {
+        return;
+    }
+
+    B13561Life *lf =
+        b13561_by_base(
+            cpu->read_word(0x8009C414u)
+        );
+
+    if (
+        !lf
+        ||
+        lf->hand_gen == 0u
+        ||
+        lf->hand_gen == lf->consumed_gen
+    )
+    {
+        return;
+    }
+
+    if (after_reset)
+    {
+        ++lf->r_seen;
+
+        if (b13561_packet_alive(cpu, lf, NULL, NULL))
+        {
+            ++lf->r_alive;
+        }
+    }
+    else
+    {
+        ++lf->f_seen;
+
+        if (b13561_packet_alive(cpu, lf, NULL, NULL))
+        {
+            ++lf->f_alive;
+        }
+    }
+}
+
+/*
+ * B135.62 - freeze the exact packet generation selected at finalizer entry.
+ *
+ * B135.61 still followed a mutable "latest hand packet" pointer.  If a new
+ * hand packet is emitted before the corresponding GsSortOt checkpoint, the
+ * diagnostic can compare different generations.  Freeze live -> frame at F,
+ * then inspect that exact packet at R and S.
+ */
+typedef struct B13562FrameLife
+{
+    uint32_t base;
+    uint32_t src_phys;
+
+    uint32_t live_gen;
+    uint32_t live_packet;
+    uint32_t live_bucket;
+
+    uint32_t frame_gen;
+    uint32_t frame_packet;
+    uint32_t frame_bucket;
+
+    uint32_t f_seen;
+    uint32_t f_shape;
+    uint32_t f_reach_b;
+    uint32_t f_reach_p;
+
+    uint32_t r_seen;
+    uint32_t r_shape;
+    uint32_t r_reach_b;
+    uint32_t r_reach_p;
+
+    uint32_t s_seen;
+    uint32_t s_shape;
+    uint32_t s_reach_b;
+    uint32_t s_reach_p;
+
+    uint32_t last_ph;
+    uint32_t last_bw;
+    uint32_t last_tag;
+    uint32_t last_src_raw;
+    uint32_t last_dst_raw;
+} B13562FrameLife;
+
+static B13562FrameLife g_b13562[2] =
+{
+    {
+        0x800E0EB0u, 0x000E5FD4u,
+        0u,0u,0u, 0u,0u,0u,
+        0u,0u,0u,0u, 0u,0u,0u,0u,
+        0u,0u,0u,0u, 0u,0u,0u,0u,0u
+    },
+    {
+        0x800E6010u, 0x000EB134u,
+        0u,0u,0u, 0u,0u,0u,
+        0u,0u,0u,0u, 0u,0u,0u,0u,
+        0u,0u,0u,0u, 0u,0u,0u,0u,0u
+    }
+};
+
+static B13562FrameLife *b13562_by_base(
+    uint32_t base
+)
+{
+    uint32_t phys = base & 0x1FFFFFFFu;
+
+    for (unsigned i = 0u; i < 2u; ++i)
+    {
+        if (
+            (g_b13562[i].base & 0x1FFFFFFFu)
+            == phys
+        )
+        {
+            return &g_b13562[i];
+        }
+    }
+
+    return NULL;
+}
+
+static B13562FrameLife *b13562_by_src(
+    uint32_t src
+)
+{
+    uint32_t phys = src & 0x1FFFFFFFu;
+
+    for (unsigned i = 0u; i < 2u; ++i)
+    {
+        if (g_b13562[i].src_phys == phys)
+        {
+            return &g_b13562[i];
+        }
+    }
+
+    return NULL;
+}
+
+static int b13562_packet_shape(
+    CPUState *cpu,
+    uint32_t packet,
+    uint32_t *header_out
+)
+{
+    if (header_out) *header_out = 0u;
+
+    if (!cpu || packet == 0u)
+    {
+        return 0;
+    }
+
+    uint32_t h = cpu->read_word(packet);
+
+    if (header_out) *header_out = h;
+
+    if ((h >> 24) != 5u)
+    {
+        return 0;
+    }
+
+    uint32_t c0 = cpu->read_word(packet + 4u);
+    uint32_t c1 = cpu->read_word(packet + 8u);
+    uint32_t c4 = cpu->read_word(packet + 20u);
+
+    return
+        (
+            (c0 >> 24) == 0xE1u
+            &&
+            ((c1 >> 24) & 0xFCu) == 0x64u
+            &&
+            c4 == 0x003C0034u
+        );
+}
+
+static void b13562_reach(
+    CPUState *cpu,
+    uint32_t src_ot,
+    uint32_t packet,
+    uint32_t bucket,
+    uint32_t *rb,
+    uint32_t *rp,
+    uint32_t *tag_out
+)
+{
+    if (rb) *rb = 0u;
+    if (rp) *rp = 0u;
+    if (tag_out) *tag_out = 0u;
+
+    if (!cpu || src_ot == 0u)
+    {
+        return;
+    }
+
+    uint32_t tag = cpu->read_word(src_ot + 0x10u);
+
+    if (tag_out) *tag_out = tag;
+
+    if (
+        rb
+        &&
+        bucket != 0u
+        &&
+        b13558_chain_reaches(
+            cpu, tag, bucket, NULL, NULL, NULL
+        )
+    )
+    {
+        *rb = 1u;
+    }
+
+    if (
+        rp
+        &&
+        packet != 0u
+        &&
+        b13558_chain_reaches(
+            cpu, tag, packet, NULL, NULL, NULL
+        )
+    )
+    {
+        *rp = 1u;
+    }
+}
+
+/*
+ * B135.63 - correlate each newly generated hand anchor with the NEXT
+ * first-layer GsSortOt call from FUN_80012D60 (RA=80012E44).
+ *
+ * Also detect whether the packet allocator reuses the exact packet address
+ * before that sort.  This distinguishes:
+ *   - allocator reuse / packet overwrite
+ *   - OT disconnect with intact packet
+ *   - healthy packet reaching the sort
+ */
+typedef struct B13563Corr
+{
+    uint32_t src_phys;
+
+    uint32_t gen;
+    uint32_t pending;
+    uint32_t ready;
+
+    uint32_t packet;
+    uint32_t bucket;
+    uint32_t hand_count_at_create;
+
+    uint32_t ret_ok;
+
+    uint32_t reuse_before_sort;
+    uint32_t reuse_ra;
+    int32_t reuse_x;
+    int32_t reuse_y;
+    uint32_t reuse_w;
+    uint32_t reuse_h;
+    uint32_t reuse_packet;
+
+    uint32_t corr_sorts;
+    uint32_t corr_good;
+    uint32_t corr_bad;
+    uint32_t sort_without_new;
+
+    uint32_t sort_shape;
+    uint32_t sort_reach_b;
+    uint32_t sort_reach_p;
+
+    uint32_t sort_ph;
+    uint32_t sort_bw;
+    uint32_t sort_tag;
+    uint32_t sort_alloc;
+    uint32_t sort_ra;
+    uint32_t hand_delta;
+} B13563Corr;
+
+static B13563Corr g_b13563[2] =
+{
+    {
+        0x000E5FD4u,
+        0u,0u,0u, 0u,0u,0u,
+        0u,
+        0u,0u,0,0,0u,0u,0u,
+        0u,0u,0u,0u,
+        0u,0u,0u,
+        0u,0u,0u,0u,0u,0u
+    },
+    {
+        0x000EB134u,
+        0u,0u,0u, 0u,0u,0u,
+        0u,
+        0u,0u,0,0,0u,0u,0u,
+        0u,0u,0u,0u,
+        0u,0u,0u,
+        0u,0u,0u,0u,0u,0u
+    }
+};
+
+static B13563Corr *b13563_by_src(
+    uint32_t src
+)
+{
+    uint32_t phys = src & 0x1FFFFFFFu;
+
+    for (unsigned i = 0u; i < 2u; ++i)
+    {
+        if (g_b13563[i].src_phys == phys)
+        {
+            return &g_b13563[i];
+        }
+    }
+
+    return NULL;
+}
+
+/*
+ * B135.64 - recover a missing first-layer GsSortOt.
+ *
+ * B135.63 showed a stable pattern once the duel hand exists:
+ * hand packets keep being generated, but the expected first sort
+ * (base+0x5124 -> base+0x5110) no longer appears before later layer
+ * sorts continue.  If the first layer really was skipped, its hand
+ * packet OT is cleared on the next buffer recycle and never reaches DMA.
+ *
+ * At the SECOND layer sort (base+0x5138), detect whether the current
+ * hand generation has already had ANY first-layer sort.  If not, and
+ * the hand shape is still reachable in the first-layer OT, splice that
+ * source into the destination with the already-verified C GsSortOt
+ * before continuing with the normal second-layer merge.
+ */
+static uint32_t g_b13564_first_calls[2] = {0u,0u};
+static uint32_t g_b13564_second_calls[2] = {0u,0u};
+static uint32_t g_b13564_third_calls[2] = {0u,0u};
+static uint32_t g_b13564_last_first_gen[2] = {0u,0u};
+
+static uint32_t g_b13564_bridge_attempt[2] = {0u,0u};
+static uint32_t g_b13564_bridge_shape[2] = {0u,0u};
+static uint32_t g_b13564_bridge_ok[2] = {0u,0u};
+static uint32_t g_b13564_bridge_fail[2] = {0u,0u};
+
+static uint32_t g_b13564_last_hand_src = 0u;
+static uint32_t g_b13564_last_dst = 0u;
+static uint32_t g_b13564_last_shape_packet = 0u;
+static int32_t g_b13564_last_code = 0;
+
+/*
+ * B135.66 - nested/direct generated GsSortOt HLE.
+ *
+ * B135.65 proved generated 80085D98 entries continue far beyond the
+ * top-level main.c HLE count.  The runtime shim now escapes at the
+ * generated entry checkpoint before the native body runs; main.c then
+ * performs the verified C GsSortOt splice and resumes at the guest RA.
+ */
+static uint32_t g_b13566_traps = 0u;
+static uint32_t g_b13566_ok = 0u;
+static uint32_t g_b13566_fail = 0u;
+static uint32_t g_b13566_hand_traps = 0u;
+static uint32_t g_b13566_hand_src_has = 0u;
+static uint32_t g_b13566_hand_dst_has = 0u;
+static uint32_t g_b13566_last_src = 0u;
+static uint32_t g_b13566_last_dst = 0u;
+static uint32_t g_b13566_last_ra = 0u;
+static int32_t g_b13566_last_code = 0;
+
+/*
+ * B135.68 - which live OT does the first hand card actually target?
+ * Count only the x=14,y=162 anchor so one increment == one hand build.
+ */
+static uint32_t g_b13568_target_slot[4] = {0u,0u,0u,0u};
+static uint32_t g_b13568_target_other = 0u;
+static uint32_t g_b13568_last_target_ot = 0u;
+static uint32_t g_b13568_last_target_base = 0u;
+static uint32_t g_b13568_last_target_ptr[4] = {0u,0u,0u,0u};
+
 static uint32_t g_ra_8111c = 0;
 static uint32_t g_ra_82168 = 0;
 static uint32_t g_ra_8219c = 0;
@@ -2872,6 +4238,16 @@ static void fm_trace_dispatch(
     uint32_t phys
 )
 {
+#if FM_PERF_PROFILE
+    fm_runtime_text_trace_outer(cpu, phys);
+    if (g_b13582_pending && dispatch_address == g_b13582_last_ra)
+    {
+        ++g_b13582_returned;
+        g_b13582_gp0_words =
+            (uint32_t)(fm_gpu_gp0_count() - g_b13582_gp0_at_entry);
+        g_b13582_pending = 0u;
+    }
+#endif
     if (phys != g_trace_last_phys)
     {
         g_trace_last_phys =
@@ -2887,6 +4263,580 @@ static void fm_trace_dispatch(
 
     switch (phys)
     {
+        case 0x00012D60u:
+            b13560_snapshot(cpu, 1u);
+            b13561_checkpoint_base(cpu, 0);
+
+            if (cpu)
+            {
+                B13562FrameLife *f62 =
+                    b13562_by_base(
+                        cpu->read_word(0x8009C414u)
+                    );
+
+                if (f62 && f62->live_gen != 0u)
+                {
+                    f62->frame_gen = f62->live_gen;
+                    f62->frame_packet = f62->live_packet;
+                    f62->frame_bucket = f62->live_bucket;
+                    ++f62->f_seen;
+
+                    if (
+                        b13562_packet_shape(
+                            cpu,
+                            f62->frame_packet,
+                            &f62->last_ph
+                        )
+                    )
+                    {
+                        ++f62->f_shape;
+                    }
+
+                    if (f62->frame_bucket != 0u)
+                    {
+                        f62->last_bw =
+                            cpu->read_word(f62->frame_bucket);
+                    }
+
+                    b13562_reach(
+                        cpu,
+                        f62->base + 0x5124u,
+                        f62->frame_packet,
+                        f62->frame_bucket,
+                        &f62->f_reach_b,
+                        &f62->f_reach_p,
+                        &f62->last_tag
+                    );
+                }
+            }
+            if (cpu)
+            {
+                b13559_log(
+                    (uint32_t)'F',
+                    cpu->read_byte(0x8009C332u),
+                    cpu->read_word(0x8009C414u)
+                );
+            }
+            break;
+
+        case 0x00012DE4u:
+            b13560_snapshot(cpu, 2u);
+            b13561_checkpoint_base(cpu, 1);
+
+            if (cpu)
+            {
+                B13562FrameLife *f62 =
+                    b13562_by_base(
+                        cpu->read_word(0x8009C414u)
+                    );
+
+                if (f62 && f62->frame_gen != 0u)
+                {
+                    ++f62->r_seen;
+
+                    if (
+                        b13562_packet_shape(
+                            cpu,
+                            f62->frame_packet,
+                            &f62->last_ph
+                        )
+                    )
+                    {
+                        ++f62->r_shape;
+                    }
+
+                    if (f62->frame_bucket != 0u)
+                    {
+                        f62->last_bw =
+                            cpu->read_word(f62->frame_bucket);
+                    }
+
+                    uint32_t rb = 0u, rp = 0u, tag = 0u;
+
+                    b13562_reach(
+                        cpu,
+                        f62->base + 0x5124u,
+                        f62->frame_packet,
+                        f62->frame_bucket,
+                        &rb,
+                        &rp,
+                        &tag
+                    );
+
+                    f62->r_reach_b += rb;
+                    f62->r_reach_p += rp;
+                    f62->last_tag = tag;
+                }
+            }
+            break;
+
+        case 0x00012E04u:
+            b13560_snapshot(cpu, 3u);
+            break;
+
+        case 0x00085D98u:
+            if (cpu)
+            {
+                b13559_log(
+                    (uint32_t)'S',
+                    cpu->gpr[4],
+                    cpu->gpr[5]
+                );
+            }
+            break;
+
+        case 0x00085D08u:
+            if (cpu)
+            {
+                b13559_log(
+                    (uint32_t)'D',
+                    cpu->gpr[4],
+                    0u
+                );
+            }
+            break;
+
+        case 0x00086248u:
+            if (cpu)
+            {
+                b13559_log(
+                    (uint32_t)'A',
+                    cpu->gpr[4],
+                    cpu->read_byte(0x8009C332u)
+                );
+            }
+            break;
+
+        case 0x00085D38u:
+            if (cpu)
+            {
+                b13559_log(
+                    (uint32_t)'I',
+                    cpu->gpr[6],
+                    cpu->read_byte(0x8009C332u)
+                );
+            }
+            break;
+
+        case 0x00080150u:
+            if (cpu)
+            {
+                b13559_log(
+                    (uint32_t)'C',
+                    cpu->gpr[4],
+                    cpu->gpr[5]
+                );
+            }
+            break;
+
+        case 0x000424B8u:
+            ++g_b13556_hit_424b8;
+#if FM_PERF_PROFILE
+            if (g_b13582_pending) ++g_b13582_last_424b8;
+#endif
+            if (cpu)
+            {
+                g_b13556_last_424_mode =
+                    cpu->gpr[7] >> 16;
+            }
+            break;
+
+        case 0x00084978u:
+            ++g_b13556_hit_84978;
+
+            if (cpu)
+            {
+                /*
+                 * B135.63: before this call writes anything, DAT_800FF5C4
+                 * is the packet address that is about to be allocated.
+                 * If it equals a still-pending hand packet, that packet is
+                 * being reused before its expected GsSortOt.
+                 */
+                uint32_t alloc_now =
+                    cpu->read_word(0x800FF5C4u);
+
+                for (unsigned ci = 0u; ci < 2u; ++ci)
+                {
+                    B13563Corr *c63 =
+                        &g_b13563[ci];
+
+                    if (
+                        c63->pending
+                        &&
+                        c63->ready
+                        &&
+                        c63->packet != 0u
+                        &&
+                        (
+                            (alloc_now & 0x1FFFFFFFu)
+                            ==
+                            (c63->packet & 0x1FFFFFFFu)
+                        )
+                    )
+                    {
+                        uint32_t d63 = cpu->gpr[4];
+
+                        ++c63->reuse_before_sort;
+                        c63->reuse_ra = cpu->gpr[31];
+                        c63->reuse_x =
+                            (int16_t)cpu->read_half(d63 + 4u);
+                        c63->reuse_y =
+                            (int16_t)cpu->read_half(d63 + 6u);
+                        c63->reuse_w =
+                            cpu->read_half(d63 + 8u);
+                        c63->reuse_h =
+                            cpu->read_half(d63 + 10u);
+                        c63->reuse_packet = alloc_now;
+                    }
+                }
+                uint32_t d = cpu->gpr[4];
+                int32_t x = (int16_t)cpu->read_half(d + 4u);
+                int32_t y = (int16_t)cpu->read_half(d + 6u);
+                uint32_t w = cpu->read_half(d + 8u);
+                uint32_t h = cpu->read_half(d + 10u);
+
+                if (w == 52u && h == 60u)
+                {
+                    uint32_t packet =
+                        cpu->read_word(0x800FF5C4u);
+
+                    uint32_t ot =
+                        cpu->gpr[5];
+
+                    uint32_t prio =
+                        cpu->gpr[6] & 0xFFFFu;
+
+                    uint32_t org =
+                        cpu->read_word(ot + 4u);
+
+                    int32_t offset =
+                        (int32_t)cpu->read_word(ot + 8u);
+
+                    uint32_t bucket =
+                        org
+                        +
+                        (
+                            (
+                                (uint32_t)(
+                                    (int32_t)prio - offset
+                                )
+                            )
+                            << 2
+                        );
+
+                    ++g_b13556_hand_84978;
+                    g_b13556_last_packet = packet;
+                    g_b13556_last_ot = ot;
+                    g_b13556_last_bucket = bucket;
+                    g_b13556_last_prio = prio;
+                    g_b13556_last_x = x;
+                    g_b13556_last_y = y;
+                    g_b13556_last_ra = cpu->gpr[31];
+
+                    g_b13556_hand_packet[
+                        g_b13556_hand_head % B13556_HAND_SLOTS
+                    ] =
+                        packet & 0x1FFFFFFFu;
+
+                    ++g_b13556_hand_head;
+
+                    /*
+                     * One H event per five-card group is enough to expose the
+                     * ordering without flooding the ring.
+                     */
+                    if (x == 14 && y == 162)
+                    {
+                        g_b13568_last_target_ot = ot;
+                        g_b13568_last_target_base =
+                            cpu->read_word(0x8009C414u);
+
+                        int matched68 = 0;
+
+                        for (unsigned ti = 0u; ti < 4u; ++ti)
+                        {
+                            uint32_t tp =
+                                cpu->read_word(
+                                    0x8009C858u + ti * 4u
+                                );
+
+                            g_b13568_last_target_ptr[ti] = tp;
+
+                            if (
+                                (tp & 0x1FFFFFFFu)
+                                ==
+                                (ot & 0x1FFFFFFFu)
+                            )
+                            {
+                                ++g_b13568_target_slot[ti];
+                                matched68 = 1;
+                                break;
+                            }
+                        }
+
+                        if (!matched68)
+                        {
+                            ++g_b13568_target_other;
+                        }
+
+                        b13559_log(
+                            (uint32_t)'H',
+                            ot,
+                            packet
+                        );
+
+                        B13561Life *lf =
+                            b13561_by_src(ot);
+
+                        if (lf)
+                        {
+                            ++lf->hand_gen;
+                            lf->packet = packet;
+                            lf->bucket = bucket;
+                        }
+
+                        B13562FrameLife *f62 =
+                            b13562_by_src(ot);
+
+                        if (f62)
+                        {
+                            ++f62->live_gen;
+                            f62->live_packet = packet;
+                            f62->live_bucket = bucket;
+                        }
+
+                        B13563Corr *c63 =
+                            b13563_by_src(ot);
+
+                        if (c63)
+                        {
+                            ++c63->gen;
+                            c63->pending = 1u;
+                            c63->ready = 0u;
+                            c63->packet = packet;
+                            c63->bucket = bucket;
+                            c63->hand_count_at_create =
+                                g_b13556_hand_84978;
+                            c63->reuse_before_sort = 0u;
+                            c63->reuse_ra = 0u;
+                            c63->reuse_x = 0;
+                            c63->reuse_y = 0;
+                            c63->reuse_w = 0u;
+                            c63->reuse_h = 0u;
+                            c63->reuse_packet = 0u;
+                        }
+                    }
+
+                    for (uint32_t si = 0u; si < 2u; ++si)
+                    {
+                        if (g_b13558_hand[si].ot == ot)
+                        {
+                            g_b13558_hand[si].packet = packet;
+                            g_b13558_hand[si].bucket = bucket;
+                            g_b13558_hand[si].pending = 1u;
+                            break;
+                        }
+                    }
+                }
+            }
+            break;
+
+        case 0x00042538u:
+            if (cpu)
+            {
+                for (uint32_t si = 0u; si < 2u; ++si)
+                {
+                    B13558HandSlot *hs = &g_b13558_hand[si];
+
+                    if (!hs->pending || hs->packet == 0u)
+                    {
+                        continue;
+                    }
+
+                    hs->pending = 0u;
+                    ++hs->ret_hits;
+
+                    for (uint32_t wi = 0u; wi < 6u; ++wi)
+                    {
+                        hs->words[wi] =
+                            cpu->read_word(hs->packet + wi * 4u);
+                    }
+
+                    if (
+                        (hs->words[0] >> 24) == 5u
+                        &&
+                        (hs->words[1] >> 24) == 0xE1u
+                        &&
+                        ((hs->words[2] >> 24) & 0xFCu) == 0x64u
+                        &&
+                        hs->words[5] == 0x003C0034u
+                    )
+                    {
+                        ++hs->shape_ok;
+                    }
+
+                    uint32_t bw = cpu->read_word(hs->bucket);
+
+                    if (
+                        (bw & 0x00FFFFFFu)
+                        ==
+                        (hs->packet & 0x00FFFFFFu)
+                    )
+                    {
+                        ++hs->bucket_ok;
+                    }
+                }
+            }
+            if (cpu)
+            {
+                for (unsigned ci = 0u; ci < 2u; ++ci)
+                {
+                    B13563Corr *c63 =
+                        &g_b13563[ci];
+
+                    if (
+                        c63->pending
+                        &&
+                        !c63->ready
+                        &&
+                        c63->packet != 0u
+                    )
+                    {
+                        uint32_t h63 =
+                            cpu->read_word(c63->packet);
+
+                        if (
+                            (h63 >> 24) == 5u
+                            &&
+                            (cpu->read_word(c63->packet + 4u) >> 24)
+                                == 0xE1u
+                            &&
+                            (
+                                (
+                                    cpu->read_word(c63->packet + 8u)
+                                    >> 24
+                                )
+                                &
+                                0xFCu
+                            )
+                                == 0x64u
+                            &&
+                            cpu->read_word(c63->packet + 20u)
+                                == 0x003C0034u
+                        )
+                        {
+                            c63->ready = 1u;
+                            ++c63->ret_ok;
+                        }
+                    }
+                }
+            }
+
+            b13560_snapshot(cpu, 0u);
+            break;
+
+        case 0x00017E94u:
+            ++g_b13553_hit_17e94;
+            break;
+
+        case 0x00016C20u:
+            ++g_b13553_hit_16c20;
+            break;
+
+        case 0x000166A0u:
+            ++g_b13553_hit_166a0;
+            break;
+
+        case 0x00032824u:
+            ++g_b13551_hit_32824;
+            break;
+
+        case 0x000408BCu:
+            ++g_b13579_hit_408bc;
+#if FM_PERF_PROFILE
+            if (cpu)
+            {
+                int head82 = -1;
+                uint32_t nodes82 = 0u, drawable82 = 0u, bad82 = 0u;
+                head82 = (int16_t)cpu->read_half(0x800F11C2u);
+                int idx82 = head82;
+                uint64_t seen82[2] = {0u, 0u};
+                while (idx82 >= 0 && nodes82 < 0x60u)
+                {
+                    if (idx82 >= 0x60 ||
+                        (seen82[(unsigned)idx82 >> 6] &
+                         (1ull << ((unsigned)idx82 & 63u))))
+                    {
+                        ++bad82;
+                        break;
+                    }
+                    seen82[(unsigned)idx82 >> 6] |=
+                        1ull << ((unsigned)idx82 & 63u);
+                    uint32_t node82 =
+                        0x800F1210u + (uint32_t)idx82 * 0x70u;
+                    if ((cpu->read_byte(node82 + 8u) & 0xC0u) == 0xC0u)
+                        ++drawable82;
+                    ++nodes82;
+                    idx82 = (int16_t)cpu->read_half(node82 + 2u);
+                }
+                if (idx82 >= 0 && nodes82 == 0x60u) ++bad82;
+                if (head82 >= 0 && head82 < 0x60)
+                {
+                    uint32_t obj82 = 0x800F1210u + (uint32_t)head82 * 0x70u;
+                    ++g_b13582_active_calls;
+                    g_b13582_last_head = (uint32_t)head82;
+                    g_b13582_last_nodes = nodes82;
+                    g_b13582_last_drawable = drawable82;
+                    g_b13582_last_bad = bad82;
+                    g_b13582_last_flags = cpu->read_byte(obj82 + 8u);
+                    g_b13582_last_callback = cpu->read_word(obj82 + 0x24u);
+                    g_b13582_last_ra = cpu->gpr[31];
+                    g_b13582_last_424b8 = 0u;
+                    g_b13582_last_422c0 = 0u;
+                    g_b13582_gp0_at_entry = fm_gpu_gp0_count();
+                    g_b13582_pending = 1u;
+                }
+            }
+#endif
+            break;
+
+        case 0x000422C0u:
+#if FM_PERF_PROFILE
+            if (g_b13582_pending) ++g_b13582_last_422c0;
+#endif
+            break;
+
+        case 0x00041674u:
+            ++g_b13580_hit_41674;
+            break;
+
+        case 0x00040F2Cu:
+            ++g_b13579_hit_40f2c;
+            break;
+
+        case 0x0004110Cu:
+            ++g_b13579_hit_4110c;
+            break;
+
+        case 0x0004139Cu:
+            ++g_b13579_hit_4139c;
+            break;
+
+        case 0x00041048u:
+            ++g_b13551_hit_41048;
+            break;
+
+        case 0x00031B58u:
+            ++g_b13551_hit_31b58;
+            break;
+
+        case 0x00031948u:
+            ++g_b13551_hit_31948;
+            break;
+
+        case 0x000319DCu:
+            ++g_b13551_hit_319dc;
+            break;
+
         case 0x00012A44u:
             ++g_hit_startup;
             break;
@@ -2945,6 +4895,9 @@ static void fm_trace_dispatch(
          */
         case 0x000418C0u:
             ++g_b52_418c0_hits;
+#if FM_PERF_PROFILE
+            ++g_b13584_outer_draw;
+#endif
             if (cpu)
             {
                 g_b52_ra = cpu->gpr[31];
@@ -3276,6 +5229,37 @@ static void fm_trace_dispatch(
             if (cpu)
             {
                 g_b78_drawotag_last_a0 = cpu->gpr[4];
+
+                b13559_log(
+                    (uint32_t)'G',
+                    cpu->gpr[4],
+                    0u
+                );
+
+                uint32_t draw_tag = cpu->gpr[4];
+                uint32_t tag0 = cpu->read_word(0x800E5FC0u + 0x10u);
+                uint32_t tag1 = cpu->read_word(0x800EB120u + 0x10u);
+
+                if (draw_tag == tag0 || draw_tag == tag1)
+                {
+                    ++g_b13557_draw_calls;
+                    g_b13557_last_draw_tag = draw_tag;
+
+                    uint32_t shape_packet = 0u;
+
+                    if (
+                        b13557_chain_has_hand_shape(
+                            cpu,
+                            draw_tag,
+                            &g_b13557_last_draw_steps,
+                            &shape_packet
+                        )
+                    )
+                    {
+                        ++g_b13557_draw_has;
+                        g_b13557_last_shape_packet = shape_packet;
+                    }
+                }
             }
             break;
 
@@ -3313,6 +5297,26 @@ static void fm_trace_dispatch(
         case 0x000403D0u:
             ++g_b49_fn_403d0;
             if (cpu) g_b49_ra_403d0 = cpu->gpr[31];
+#if FM_PERF_PROFILE
+            if (cpu && cpu->gpr[5] == 2u)
+                ++g_b13585_outer_cat2_create;
+            if (cpu && cpu->gpr[5] == 1u)
+            {
+                ++g_b13583_outer_c2_create;
+                g_b13583_last_create_index = cpu->gpr[4];
+                g_b13583_last_create_ra = cpu->gpr[31];
+            }
+#endif
+            break;
+
+        case 0x00040530u:
+#if FM_PERF_PROFILE
+            ++g_b13583_outer_remove;
+            if (cpu && (cpu->gpr[4] & 0x1FFFFFFFu) >= 0x000F1210u &&
+                (cpu->gpr[4] & 0x1FFFFFFFu) < 0x000F3C10u &&
+                cpu->read_half(cpu->gpr[4] + 0x1Eu) == 2u)
+                ++g_b13585_outer_cat2_remove;
+#endif
             break;
 
         case 0x00042BD8u:
@@ -4009,6 +6013,24 @@ static void fm_trace_dispatch(
          */
         case 0x00040B48u:
             ++g_b72_hit_40b48;
+#if FM_PERF_PROFILE
+            ++g_b13584_outer_cat2;
+            if (cpu)
+            {
+                int head85 = (int16_t)cpu->read_half(0x800F11C4u);
+                g_b13585_cat2_ra = cpu->gpr[31];
+                if (head85 >= 0 && head85 < 0x60)
+                {
+                    uint32_t obj85 = 0x800F1210u + (uint32_t)head85 * 0x70u;
+                    ++g_b13585_outer_cat2_live;
+                    g_b13585_cat2_flags = cpu->read_half(obj85 + 8u);
+                    g_b13585_cat2_callback = cpu->read_word(obj85 + 0x24u);
+                    g_b13585_cat2_category = cpu->read_half(obj85 + 0x1Eu);
+                    if ((g_b13585_cat2_flags & 0xC0u) == 0xC0u)
+                        ++g_b13585_outer_cat2_drawable;
+                }
+            }
+#endif
             if (cpu)
             {
                 g_b72_last_40b48_ra = cpu->gpr[31];
@@ -9136,6 +11158,446 @@ static int fm_b93_hle_800917f8(
 }
 
 
+
+/*
+ * ============================================================
+ * B135 - quick-state de debug persistant
+ * ============================================================
+ *
+ * Objectif : atteindre Simon une seule fois, sauvegarder l'etat sur SD,
+ * puis le recharger directement apres chaque nouveau build.
+ *
+ * Raccourcis :
+ *   SELECT + X : sauvegarde
+ *   SELECT + Y : recharge et reprend l'execution
+ *
+ * Le snapshot ne serialise jamais les pointeurs de fonctions CPU.
+ */
+#define FM_B135_QS_MAGIC       0x35333142u /* "B135" little-endian */
+#define FM_B135_QS_VERSION     2u
+#define FM_B135_QS_RAM_SIZE    (2u * 1024u * 1024u)
+#define FM_B135_QS_VRAM_WORDS  (1024u * 512u)
+#define FM_B135_QS_PATH        "sdmc:/3ds/fm-new3ds/quickstate-b135.bin"
+
+typedef struct FMB135CpuQuickState
+{
+    uint32_t gpr[32];
+    uint32_t pc;
+    uint32_t hi;
+    uint32_t lo;
+    uint32_t cop0[32];
+    uint32_t gte_data[32];
+    uint32_t gte_ctrl[32];
+
+    uint64_t muldiv_ts_done;
+    uint64_t gte_ts_done;
+
+    uint8_t read_absorb[33];
+    uint8_t read_absorb_which;
+    uint8_t read_fudge;
+    uint8_t ld_which_t;
+    uint32_t ld_absorb;
+} FMB135CpuQuickState;
+
+typedef struct FMB135QuickStateHeader
+{
+    uint32_t magic;
+    uint32_t version;
+    uint32_t header_size;
+    uint32_t ram_size;
+    uint32_t vram_words;
+
+    uint32_t frame;
+    uint32_t last_dispatch_address;
+
+    uint32_t direct2df_active;
+    uint32_t menu_bridge_active;
+    uint32_t str_intro_skip_pending;
+    uint32_t native_video;
+
+    uint32_t guest_frames;
+    uint32_t last_latched_guest_frame;
+
+    FMB135CpuQuickState cpu;
+    FMMemoryQuickState memory;
+    FMGpuQuickState gpu;
+    FMRuntimeQuickState runtime;
+} FMB135QuickStateHeader;
+
+static int32_t g_b135_qs_last_result = 0;
+static uint32_t g_b135_qs_save_count = 0u;
+static uint32_t g_b135_qs_load_count = 0u;
+
+
+static void fm_b135_cpu_quick_save(
+    FMB135CpuQuickState *out,
+    const CPUState *cpu
+)
+{
+    memset(out, 0, sizeof(*out));
+
+    memcpy(out->gpr, cpu->gpr, sizeof(out->gpr));
+    out->pc = cpu->pc;
+    out->hi = cpu->hi;
+    out->lo = cpu->lo;
+    memcpy(out->cop0, cpu->cop0, sizeof(out->cop0));
+    memcpy(out->gte_data, cpu->gte_data, sizeof(out->gte_data));
+    memcpy(out->gte_ctrl, cpu->gte_ctrl, sizeof(out->gte_ctrl));
+
+    out->muldiv_ts_done = cpu->muldiv_ts_done;
+    out->gte_ts_done = cpu->gte_ts_done;
+
+    memcpy(out->read_absorb, cpu->read_absorb, sizeof(out->read_absorb));
+    out->read_absorb_which = cpu->read_absorb_which;
+    out->read_fudge = cpu->read_fudge;
+    out->ld_which_t = cpu->ld_which_t;
+    out->ld_absorb = cpu->ld_absorb;
+}
+
+
+static void fm_b135_cpu_quick_load(
+    CPUState *cpu,
+    const FMB135CpuQuickState *in
+)
+{
+    memcpy(cpu->gpr, in->gpr, sizeof(in->gpr));
+    cpu->pc = in->pc;
+    cpu->hi = in->hi;
+    cpu->lo = in->lo;
+    memcpy(cpu->cop0, in->cop0, sizeof(in->cop0));
+    memcpy(cpu->gte_data, in->gte_data, sizeof(in->gte_data));
+    memcpy(cpu->gte_ctrl, in->gte_ctrl, sizeof(in->gte_ctrl));
+
+    cpu->muldiv_ts_done = in->muldiv_ts_done;
+    cpu->gte_ts_done = in->gte_ts_done;
+
+    memcpy(cpu->read_absorb, in->read_absorb, sizeof(in->read_absorb));
+    cpu->read_absorb_which = in->read_absorb_which;
+    cpu->read_fudge = in->read_fudge;
+    cpu->ld_which_t = in->ld_which_t;
+    cpu->ld_absorb = in->ld_absorb;
+
+    cpu->gpr[0] = 0u;
+}
+
+
+static int fm_b135_quick_save(
+    CPUState *cpu,
+    const uint8_t *ram,
+    const uint16_t *vram,
+    uint32_t frame,
+    uint32_t last_dispatch_address
+)
+{
+    if (!cpu || !ram || !vram)
+    {
+        return -1;
+    }
+
+    FMB135QuickStateHeader state;
+    memset(&state, 0, sizeof(state));
+
+    state.magic = FM_B135_QS_MAGIC;
+    state.version = FM_B135_QS_VERSION;
+    state.header_size = (uint32_t)sizeof(state);
+    state.ram_size = FM_B135_QS_RAM_SIZE;
+    state.vram_words = FM_B135_QS_VRAM_WORDS;
+
+    state.frame = frame;
+    state.last_dispatch_address = last_dispatch_address;
+
+    state.direct2df_active = g_direct2df_active;
+    state.menu_bridge_active = g_b102_menu_bridge_active;
+    state.str_intro_skip_pending = g_str_intro_skip_pending;
+    state.native_video = (uint32_t)g_b42_native_video;
+
+    state.guest_frames = g_b85_guest_frames;
+    state.last_latched_guest_frame = g_b85_last_latched_guest_frame;
+
+    fm_b135_cpu_quick_save(
+        &state.cpu,
+        cpu
+    );
+
+    fm_memory_quick_save(
+        &state.memory
+    );
+
+    fm_gpu_quick_save(
+        &state.gpu
+    );
+
+    fm_runtime_quick_save(
+        &state.runtime
+    );
+
+    FILE *fp = fopen(FM_B135_QS_PATH, "wb");
+
+    if (!fp)
+    {
+        return -2;
+    }
+
+    int ok =
+        fwrite(&state, sizeof(state), 1u, fp) == 1u
+        &&
+        fwrite(ram, FM_B135_QS_RAM_SIZE, 1u, fp) == 1u
+        &&
+        fwrite(
+            vram,
+            sizeof(uint16_t) * FM_B135_QS_VRAM_WORDS,
+            1u,
+            fp
+        ) == 1u;
+
+    if (fclose(fp) != 0)
+    {
+        ok = 0;
+    }
+
+    return ok ? 0 : -3;
+}
+
+
+static int fm_b135_quick_load(
+    CPUState *cpu,
+    uint8_t *ram,
+    uint16_t *vram,
+    unsigned *frame,
+    uint32_t *last_dispatch_address
+)
+{
+    if (!cpu || !ram || !vram || !frame || !last_dispatch_address)
+    {
+        return -1;
+    }
+
+    FILE *fp = fopen(FM_B135_QS_PATH, "rb");
+
+    if (!fp)
+    {
+        return -2;
+    }
+
+    const long expected_size =
+        (long)sizeof(FMB135QuickStateHeader)
+        +
+        (long)FM_B135_QS_RAM_SIZE
+        +
+        (long)(sizeof(uint16_t) * FM_B135_QS_VRAM_WORDS);
+
+    if (
+        fseek(fp, 0, SEEK_END) != 0
+        ||
+        ftell(fp) != expected_size
+        ||
+        fseek(fp, 0, SEEK_SET) != 0
+    )
+    {
+        fclose(fp);
+        return -3;
+    }
+
+    FMB135QuickStateHeader state;
+
+    if (
+        fread(&state, sizeof(state), 1u, fp) != 1u
+        ||
+        state.magic != FM_B135_QS_MAGIC
+        ||
+        state.version != FM_B135_QS_VERSION
+        ||
+        state.header_size != sizeof(state)
+        ||
+        state.ram_size != FM_B135_QS_RAM_SIZE
+        ||
+        state.vram_words != FM_B135_QS_VRAM_WORDS
+    )
+    {
+        fclose(fp);
+        return -4;
+    }
+
+    if (
+        fread(ram, FM_B135_QS_RAM_SIZE, 1u, fp) != 1u
+        ||
+        fread(
+            vram,
+            sizeof(uint16_t) * FM_B135_QS_VRAM_WORDS,
+            1u,
+            fp
+        ) != 1u
+    )
+    {
+        fclose(fp);
+        return -5;
+    }
+
+    fclose(fp);
+
+    fm_memory_quick_load(
+        &state.memory
+    );
+
+    fm_gpu_quick_load(
+        &state.gpu
+    );
+
+    fm_runtime_quick_load(
+        &state.runtime
+    );
+
+    fm_b135_cpu_quick_load(
+        cpu,
+        &state.cpu
+    );
+
+    *frame = state.frame;
+    *last_dispatch_address = state.last_dispatch_address;
+
+    g_direct2df_active = state.direct2df_active ? 1u : 0u;
+    g_b102_menu_bridge_active = state.menu_bridge_active ? 1u : 0u;
+    g_str_intro_skip_pending = state.str_intro_skip_pending;
+    g_b42_native_video = state.native_video ? 1 : 0;
+
+    g_b85_guest_frames = state.guest_frames;
+    g_b85_last_latched_guest_frame = state.last_latched_guest_frame;
+
+    /*
+     * Un snapshot est pris entre deux tranches host : aucune attente HLE
+     * ne doit rester armee apres un redemarrage de l'application.
+     */
+    g_vsync_wait_active = 0u;
+    g_vsync_wait_until_frame = 0u;
+    g_b108_vsync_sync_valid = 0u;
+
+    /*
+     * Forcer un nouveau latch/present depuis la VRAM restauree.
+     */
+    g_b84_latch_valid = 0u;
+    g_b86_present_dirty = 1u;
+
+    g_b65_stop_code = 0u;
+    g_b65_stop_pc = 0u;
+    g_b65_stop_ra = 0u;
+    g_b65_stop_detail = 0u;
+
+    return 0;
+}
+
+/*
+ * ============================================================
+ * B135.49 - duel display-object list probe
+ * ============================================================
+ *
+ * The GPU paths, GP1 display environment and the exact guest GsSortOt
+ * have now all been validated while the duel hand is still missing.
+ * Move one level upstream: Forbidden Memories keeps up to 0x60 display
+ * objects at 0x800F1210, stride 0x70, and seven linked-list heads at
+ * 0x800F11C0..0x800F11CC.  The known renderer routines
+ * 80040B48/40F2C/4110C/4139C/41048 walk those exact lists.
+ *
+ * This helper is read-only and bounded.  It tells us whether the card
+ * objects exist in the guest object system before they ever reach GP0.
+ */
+static void b13549_obj_list_probe(
+    CPUState *cpu,
+    uint32_t head_addr,
+    int *head_out,
+    uint32_t *nodes_out,
+    uint32_t *drawable_out,
+    uint32_t *bad_out,
+    uint32_t *ot_mask_out
+)
+{
+    int head = -1;
+    uint32_t nodes = 0u;
+    uint32_t drawable = 0u;
+    uint32_t bad = 0u;
+    uint32_t ot_mask = 0u;
+
+    if (cpu)
+    {
+        head =
+            (int16_t)cpu->read_half(head_addr);
+
+        int idx = head;
+
+        uint64_t seen_lo = 0u;
+        uint64_t seen_hi = 0u;
+
+        while (idx >= 0 && nodes < 0x60u)
+        {
+            if (idx >= 0x60)
+            {
+                ++bad;
+                break;
+            }
+
+            uint64_t bit =
+                1ull << ((unsigned)idx & 63u);
+
+            uint64_t *seen =
+                idx < 64
+                    ? &seen_lo
+                    : &seen_hi;
+
+            if ((*seen & bit) != 0u)
+            {
+                ++bad;
+                break;
+            }
+
+            *seen |= bit;
+
+            uint32_t obj =
+                0x800F1210u
+                +
+                (uint32_t)idx * 0x70u;
+
+            uint32_t flags_word =
+                cpu->read_word(obj + 0x08u);
+
+            uint8_t flags =
+                (uint8_t)(flags_word & 0xFFu);
+
+            if ((flags & 0xC0u) == 0xC0u)
+            {
+                ++drawable;
+            }
+
+            uint32_t ot_word =
+                cpu->read_word(obj + 0x14u);
+
+            uint8_t ot_index =
+                (uint8_t)((ot_word >> 24) & 0xFFu);
+
+            if (ot_index < 32u)
+            {
+                ot_mask |=
+                    1u << ot_index;
+            }
+
+            ++nodes;
+
+            idx =
+                (int16_t)cpu->read_half(obj + 0x02u);
+        }
+
+        if (nodes >= 0x60u && idx >= 0)
+        {
+            ++bad;
+        }
+    }
+
+    if (head_out) *head_out = head;
+    if (nodes_out) *nodes_out = nodes;
+    if (drawable_out) *drawable_out = drawable;
+    if (bad_out) *bad_out = bad;
+    if (ot_mask_out) *ot_mask_out = ot_mask;
+}
+
+
 int main(void)
 {
     gfxInitDefault();
@@ -9320,6 +11782,11 @@ int main(void)
             2 * 1024 * 1024
         );
 
+        fm_interp_bind_ram(
+            ram,
+            2u * 1024u * 1024u
+        );
+
         fm_cpu_init(
             entry
         );
@@ -9413,6 +11880,8 @@ int main(void)
     while (aptMainLoop())
     {
         uint64_t b105_loop_start_ms = osGetTime();
+
+        int b131_presented_this_loop = 0;
 
         /*
          * B93 : le vieux maximum B91 masquait les hotspots recurrents
@@ -9904,6 +12373,11 @@ int main(void)
                     2 * 1024 * 1024
                 );
 
+                fm_interp_bind_ram(
+                    ram,
+                    2u * 1024u * 1024u
+                );
+
                 fm_cpu_init(
                     entry
                 );
@@ -9930,6 +12404,98 @@ int main(void)
 
             probe_ran = 0;
             interp_ran = 0;
+        }
+
+
+        /*
+         * ====================================================
+         * B135 - QUICK-STATE SELECT+X / SELECT+Y
+         * ====================================================
+         */
+        int b135_qs_chord = 0;
+
+        if (
+            (held & KEY_SELECT)
+            &&
+            (down & KEY_X)
+            &&
+            cpu
+            &&
+            memory_status == 0
+        )
+        {
+            b135_qs_chord = 1;
+
+            g_b135_qs_last_result =
+                fm_b135_quick_save(
+                    cpu,
+                    ram,
+                    vram,
+                    frame,
+                    last_dispatch_address
+                );
+
+            if (g_b135_qs_last_result == 0)
+            {
+                ++g_b135_qs_save_count;
+            }
+        }
+
+        if (
+            (held & KEY_SELECT)
+            &&
+            (down & KEY_Y)
+            &&
+            cpu
+            &&
+            memory_status == 0
+        )
+        {
+            b135_qs_chord = 1;
+
+            /*
+             * Nettoyer d'abord l'etat HLE host. Le quick-load restaure
+             * ensuite les quelques flags de phase qui doivent survivre.
+             */
+            fm_cd_hle_reset();
+
+            g_b135_qs_last_result =
+                fm_b135_quick_load(
+                    cpu,
+                    ram,
+                    vram,
+                    &frame,
+                    &last_dispatch_address
+                );
+
+            if (g_b135_qs_last_result == 0)
+            {
+                ++g_b135_qs_load_count;
+
+                game_running = 1;
+                probe_ran = 1;
+                interp_ran = 0;
+                static_miss = 0;
+
+                low_jump_from = 0u;
+                low_jump_target = 0u;
+                low_jump_ra = 0u;
+                low_jump_t1 = 0u;
+                low_jump_opcode = 0u;
+
+                memset(&probe, 0, sizeof(probe));
+                memset(&interp, 0, sizeof(interp));
+
+                old_pad = 0u;
+            }
+        }
+
+        /*
+         * Ne jamais transmettre la combinaison de debug au pad PS1.
+         */
+        if (b135_qs_chord)
+        {
+            psx_pressed = 0u;
         }
 
 
@@ -10547,8 +13113,12 @@ int main(void)
                     dispatch_address
                     & 0x1FFFFFFFu;
 
-                /* B91 : mesurer le cout reel du handoff courant. */
+                /*
+                 * B130: diagnostic handoff timer is disabled in release.
+                 */
+#if !defined(NDEBUG)
                 uint64_t b91_handoff_start_ms = osGetTime();
+#endif
 
 
                 /*
@@ -11687,6 +14257,14 @@ int main(void)
 
                     g_vsync_wait_until_frame =
                         0;
+
+                    /*
+                     * B135.8: pulse survives until the presentation stage of
+                     * this same host loop. This is the real stable guest-frame
+                     * boundary that B135.7 was trying to observe.
+                     */
+                    g_b1358_vsync_completed = 1u;
+                    ++g_b1358_vsync_completions;
 
 
                     static_miss =
@@ -12900,6 +15478,404 @@ int main(void)
                     uint32_t dst_ot = cpu->gpr[5];
                     uint32_t native_result = dst_ot;
 
+                    /*
+                     * B135.64 - classify the three layer sources by physical
+                     * address, independent of KSEG alias / caller RA.
+                     */
+                    {
+                        uint32_t sp64 = src_ot & 0x1FFFFFFFu;
+                        int bi64 = -1;
+                        int layer64 = 0;
+
+                        if (sp64 == 0x000E5FD4u)
+                        {
+                            bi64 = 0; layer64 = 1;
+                        }
+                        else if (sp64 == 0x000E5FE8u)
+                        {
+                            bi64 = 0; layer64 = 2;
+                        }
+                        else if (sp64 == 0x000E5FFCu)
+                        {
+                            bi64 = 0; layer64 = 3;
+                        }
+                        else if (sp64 == 0x000EB134u)
+                        {
+                            bi64 = 1; layer64 = 1;
+                        }
+                        else if (sp64 == 0x000EB148u)
+                        {
+                            bi64 = 1; layer64 = 2;
+                        }
+                        else if (sp64 == 0x000EB15Cu)
+                        {
+                            bi64 = 1; layer64 = 3;
+                        }
+
+                        if (bi64 >= 0)
+                        {
+                            B13563Corr *c64 =
+                                &g_b13563[(unsigned)bi64];
+
+                            if (layer64 == 1)
+                            {
+                                ++g_b13564_first_calls[bi64];
+
+                                /*
+                                 * Any real first-layer call counts, regardless
+                                 * of the RA seen by the dispatcher.
+                                 */
+                                g_b13564_last_first_gen[bi64] =
+                                    c64->gen;
+                            }
+                            else if (layer64 == 2)
+                            {
+                                ++g_b13564_second_calls[bi64];
+
+                                if (
+                                    c64->gen != 0u
+                                    &&
+                                    c64->ready
+                                    &&
+                                    g_b13564_last_first_gen[bi64]
+                                        != c64->gen
+                                )
+                                {
+                                    ++g_b13564_bridge_attempt[bi64];
+
+                                    uint32_t hand_src =
+                                        bi64 == 0
+                                            ? 0x800E5FD4u
+                                            : 0x800EB134u;
+
+                                    uint32_t shape_packet = 0u;
+                                    uint32_t hand_tag =
+                                        cpu->read_word(
+                                            hand_src + 0x10u
+                                        );
+
+                                    g_b13564_last_hand_src =
+                                        hand_src;
+                                    g_b13564_last_dst =
+                                        dst_ot;
+                                    g_b13564_last_shape_packet =
+                                        0u;
+
+                                    if (
+                                        b13557_chain_has_hand_shape(
+                                            cpu,
+                                            hand_tag,
+                                            NULL,
+                                            &shape_packet
+                                        )
+                                    )
+                                    {
+                                        ++g_b13564_bridge_shape[bi64];
+                                        g_b13564_last_shape_packet =
+                                            shape_packet;
+
+                                        /*
+                                         * Same narrow sentinel repair already
+                                         * used by the normal HLE path.
+                                         */
+                                        fm_repair_ot_sentinel(
+                                            cpu,
+                                            hand_src
+                                        );
+
+                                        fm_repair_ot_sentinel(
+                                            cpu,
+                                            dst_ot
+                                        );
+
+                                        uint32_t bridge_result =
+                                            dst_ot;
+
+                                        int bridge_ok =
+                                            fm_try_c_gssortot(
+                                                cpu,
+                                                hand_src,
+                                                dst_ot,
+                                                &bridge_result
+                                            );
+
+                                        if (bridge_ok)
+                                        {
+                                            ++g_b13564_bridge_ok[bi64];
+                                            g_b13564_last_first_gen[bi64] =
+                                                c64->gen;
+                                            g_b13564_last_code = 1;
+                                        }
+                                        else
+                                        {
+                                            ++g_b13564_bridge_fail[bi64];
+                                            g_b13564_last_code =
+                                                g_b119_csort_last_code;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        g_b13564_last_code = -100;
+                                    }
+                                }
+                            }
+                            else if (layer64 == 3)
+                            {
+                                ++g_b13564_third_calls[bi64];
+                            }
+                        }
+                    }
+
+                    {
+                        B13562FrameLife *f62 =
+                            b13562_by_src(src_ot);
+
+                        if (f62)
+                        {
+                            ++f62->s_seen;
+                            f62->last_src_raw = src_ot;
+                            f62->last_dst_raw = dst_ot;
+
+                            if (
+                                b13562_packet_shape(
+                                    cpu,
+                                    f62->frame_packet,
+                                    &f62->last_ph
+                                )
+                            )
+                            {
+                                ++f62->s_shape;
+                            }
+
+                            if (f62->frame_bucket != 0u)
+                            {
+                                f62->last_bw =
+                                    cpu->read_word(
+                                        f62->frame_bucket
+                                    );
+                            }
+
+                            uint32_t rb = 0u, rp = 0u, tag = 0u;
+
+                            b13562_reach(
+                                cpu,
+                                src_ot,
+                                f62->frame_packet,
+                                f62->frame_bucket,
+                                &rb,
+                                &rp,
+                                &tag
+                            );
+
+                            f62->s_reach_b += rb;
+                            f62->s_reach_p += rp;
+                            f62->last_tag = tag;
+                        }
+                    }
+
+                    /*
+                     * B135.63: only the FIRST layer sort from FUN_80012D60.
+                     * Callsite 80012E3C returns to 80012E44.
+                     */
+                    if (
+                        (cpu->gpr[31] & 0x1FFFFFFFu)
+                        == 0x00012E44u
+                    )
+                    {
+                        B13563Corr *c63 =
+                            b13563_by_src(src_ot);
+
+                        if (c63)
+                        {
+                            c63->sort_ra = cpu->gpr[31];
+
+                            if (c63->pending)
+                            {
+                                ++c63->corr_sorts;
+
+                                c63->sort_shape = 0u;
+                                c63->sort_reach_b = 0u;
+                                c63->sort_reach_p = 0u;
+                                c63->sort_ph = 0u;
+                                c63->sort_bw = 0u;
+                                c63->sort_tag =
+                                    cpu->read_word(src_ot + 0x10u);
+                                c63->sort_alloc =
+                                    cpu->read_word(0x800FF5C4u);
+
+                                if (c63->packet != 0u)
+                                {
+                                    c63->sort_ph =
+                                        cpu->read_word(c63->packet);
+
+                                    if (
+                                        b13562_packet_shape(
+                                            cpu,
+                                            c63->packet,
+                                            NULL
+                                        )
+                                    )
+                                    {
+                                        c63->sort_shape = 1u;
+                                    }
+                                }
+
+                                if (c63->bucket != 0u)
+                                {
+                                    c63->sort_bw =
+                                        cpu->read_word(c63->bucket);
+
+                                    if (
+                                        b13558_chain_reaches(
+                                            cpu,
+                                            c63->sort_tag,
+                                            c63->bucket,
+                                            NULL,
+                                            NULL,
+                                            NULL
+                                        )
+                                    )
+                                    {
+                                        c63->sort_reach_b = 1u;
+                                    }
+                                }
+
+                                if (
+                                    c63->packet != 0u
+                                    &&
+                                    b13558_chain_reaches(
+                                        cpu,
+                                        c63->sort_tag,
+                                        c63->packet,
+                                        NULL,
+                                        NULL,
+                                        NULL
+                                    )
+                                )
+                                {
+                                    c63->sort_reach_p = 1u;
+                                }
+
+                                c63->hand_delta =
+                                    g_b13556_hand_84978
+                                    -
+                                    c63->hand_count_at_create;
+
+                                if (
+                                    c63->sort_shape
+                                    &&
+                                    c63->sort_reach_p
+                                )
+                                {
+                                    ++c63->corr_good;
+                                }
+                                else
+                                {
+                                    ++c63->corr_bad;
+                                }
+
+                                c63->pending = 0u;
+                                c63->ready = 0u;
+                            }
+                            else
+                            {
+                                ++c63->sort_without_new;
+                            }
+                        }
+                    }
+
+                    b13559_log(
+                        (uint32_t)'S',
+                        src_ot,
+                        dst_ot
+                    );
+
+                    if (
+                        src_ot == 0x800E5FD4u
+                        ||
+                        src_ot == 0x800EB134u
+                    )
+                    {
+                        b13560_snapshot(cpu, 4u);
+
+                        B13561Life *lf =
+                            b13561_by_src(src_ot);
+
+                        if (
+                            lf
+                            &&
+                            lf->hand_gen != 0u
+                            &&
+                            lf->hand_gen != lf->consumed_gen
+                        )
+                        {
+                            ++lf->s_seen;
+
+                            uint32_t ph = 0u;
+                            uint32_t bw = 0u;
+
+                            int alive =
+                                b13561_packet_alive(
+                                    cpu,
+                                    lf,
+                                    &ph,
+                                    &bw
+                                );
+
+                            lf->last_s_packet_header = ph;
+                            lf->last_s_bucket_word = bw;
+                            lf->last_s_reach_bucket = 0u;
+                            lf->last_s_reach_packet = 0u;
+
+                            uint32_t tag =
+                                cpu->read_word(src_ot + 0x10u);
+
+                            if (
+                                lf->bucket != 0u
+                                &&
+                                b13558_chain_reaches(
+                                    cpu,
+                                    tag,
+                                    lf->bucket,
+                                    NULL,
+                                    NULL,
+                                    NULL
+                                )
+                            )
+                            {
+                                lf->last_s_reach_bucket = 1u;
+                            }
+
+                            if (
+                                lf->packet != 0u
+                                &&
+                                b13558_chain_reaches(
+                                    cpu,
+                                    tag,
+                                    lf->packet,
+                                    NULL,
+                                    NULL,
+                                    NULL
+                                )
+                            )
+                            {
+                                lf->last_s_reach_packet = 1u;
+                            }
+
+                            if (alive)
+                            {
+                                ++lf->s_alive;
+                            }
+                            else
+                            {
+                                ++lf->s_dead;
+                            }
+
+                            lf->consumed_gen =
+                                lf->hand_gen;
+                        }
+                    }
+
                     ++g_hle_85d98_calls;
                     g_hle_85d98_last_src = src_ot;
                     g_hle_85d98_last_dst = dst_ot;
@@ -12929,42 +15905,202 @@ int main(void)
                      * de src->org, ce qui explique les boucles de GsSortOt.
                      */
                     /*
-                     * B115: time repair, early submission and merge separately.
-                     * No rendering behavior is changed in this build.
+                     * B130 PERF CLEAN:
+                     * keep the corrected OT repair and verified C GsSortOt,
+                     * but do not time every phase.
                      */
-                    uint64_t b115_t0 = osGetTime();
+                    /*
+                     * B135.58 - inspect the hand source BEFORE any repair.
+                     */
+                    B13558HandSlot *b13558_hs = NULL;
+
+                    for (uint32_t si = 0u; si < 2u; ++si)
+                    {
+                        if (g_b13558_hand[si].ot == src_ot)
+                        {
+                            b13558_hs = &g_b13558_hand[si];
+                            break;
+                        }
+                    }
+
+                    if (b13558_hs)
+                    {
+                        ++g_b13558_merge_samples;
+
+                        g_b13558_last_len =
+                            cpu->read_word(src_ot + 0u);
+                        g_b13558_last_org =
+                            cpu->read_word(src_ot + 4u);
+                        g_b13558_last_off =
+                            cpu->read_word(src_ot + 8u);
+                        g_b13558_last_point =
+                            cpu->read_word(src_ot + 12u);
+                        g_b13558_last_tag =
+                            cpu->read_word(src_ot + 16u);
+
+                        if (b13558_hs->bucket != 0u)
+                        {
+                            g_b13558_last_bucket_word =
+                                cpu->read_word(b13558_hs->bucket);
+                        }
+
+                        if (b13558_hs->packet != 0u)
+                        {
+                            g_b13558_last_packet_header =
+                                cpu->read_word(b13558_hs->packet);
+                        }
+
+                        uint32_t shape_packet = 0u;
+
+                        if (
+                            b13557_chain_has_hand_shape(
+                                cpu,
+                                g_b13558_last_tag,
+                                NULL,
+                                &shape_packet
+                            )
+                        )
+                        {
+                            ++g_b13558_pre_shape;
+                        }
+
+                        uint32_t stop = 0u;
+                        uint32_t stop_header = 0u;
+
+                        if (
+                            b13558_chain_reaches(
+                                cpu,
+                                g_b13558_last_tag,
+                                b13558_hs->bucket,
+                                &g_b13558_last_steps_bucket,
+                                &stop,
+                                &stop_header
+                            )
+                        )
+                        {
+                            ++g_b13558_pre_bucket_reach;
+                        }
+
+                        g_b13558_last_stop = stop;
+                        g_b13558_last_stop_header = stop_header;
+
+                        if (
+                            b13558_chain_reaches(
+                                cpu,
+                                g_b13558_last_tag,
+                                b13558_hs->packet,
+                                &g_b13558_last_steps_packet,
+                                NULL,
+                                NULL
+                            )
+                        )
+                        {
+                            ++g_b13558_pre_packet_reach;
+                        }
+                    }
 
                     fm_repair_ot_sentinel(cpu, src_ot);
                     fm_repair_ot_sentinel(cpu, dst_ot);
 
-                    uint64_t b115_t1 = osGetTime();
+                    if (b13558_hs)
+                    {
+                        uint32_t post_shape_packet = 0u;
 
-                    uint32_t b115_nodes = 0u;
-                    uint32_t b115_packets = 0u;
-                    uint32_t b115_words = 0u;
-                    uint32_t b115_draw = 0u;
-                    uint32_t b115_env = 0u;
-                    uint32_t b115_other = 0u;
+                        if (
+                            b13557_chain_has_hand_shape(
+                                cpu,
+                                cpu->read_word(src_ot + 16u),
+                                NULL,
+                                &post_shape_packet
+                            )
+                        )
+                        {
+                            ++g_b13558_post_shape;
+                        }
+                    }
 
                     /*
-                     * B117 - NORMAL OT PATH TEST
-                     *
-                     * Do NOT submit the source OT here. GsSortOt must splice
-                     * it into the destination and the existing
-                     * GsDrawOt/DrawOTag -> DMA2 path must be the single place
-                     * that reaches GP0.
-                     *
-                     * This is intentionally the only behavioral difference
-                     * from B116. If visuals remain complete while the long
-                     * P phase disappears, the direct source submission was
-                     * redundant and expensive.
+                     * B135.56 - only scan when this GsSortOt consumes the
+                     * same GsOT that most recently received a 52x60 hand
+                     * packet.  This keeps the diagnostic cheap.
                      */
-                    uint64_t b115_t2 = osGetTime();
+                    int b13556_rel =
+                        (
+                            g_b13556_last_ot != 0u
+                            &&
+                            src_ot == g_b13556_last_ot
+                        );
 
-                    int b119_sort_code = 2;
+                    if (b13556_rel)
+                    {
+                        ++g_b13556_merge_rel;
 
+                        g_b13556_last_src_has =
+                            b13556_chain_contains_hand(
+                                cpu,
+                                g_hle_85d98_src_tag,
+                                &g_b13556_last_src_steps
+                            )
+                                ? 1u
+                                : 0u;
+
+                        if (g_b13556_last_src_has)
+                        {
+                            ++g_b13556_merge_src_has;
+                        }
+                    }
+
+                    /*
+                     * B135.57 - source layer +0x5124 of the two frame
+                     * workspaces is exactly where the verified duel puts the
+                     * 52x60 hand packets:
+                     *   page 0: 800E5FD4
+                     *   page 1: 800EB134
+                     */
+                    int b13557_hand_src =
+                        (
+                            src_ot == 0x800E5FD4u
+                            ||
+                            src_ot == 0x800EB134u
+                        );
+
+                    if (b13557_hand_src)
+                    {
+                        ++g_b13557_src_calls;
+                        g_b13557_last_src = src_ot;
+                        g_b13557_last_dst = dst_ot;
+
+                        uint32_t src_shape_packet = 0u;
+
+                        if (
+                            b13557_chain_has_hand_shape(
+                                cpu,
+                                cpu->read_word(src_ot + 0x10u),
+                                &g_b13557_last_src_steps,
+                                &src_shape_packet
+                            )
+                        )
+                        {
+                            ++g_b13557_src_has;
+                            g_b13557_last_shape_packet =
+                                src_shape_packet;
+                        }
+                    }
+
+                    /*
+                     * B135.48 fidelity test:
+                     *
+                     * The first-duel reference is known-good on the PC runtime,
+                     * while 3DS is missing foreground dialogue/hand layers.
+                     * Primitive renderers and GP1(05) have now been ruled out.
+                     *
+                     * Execute the ORIGINAL guest GsSortOt first so the exact
+                     * Psy-Q ordering-table splice logic is used.  Keep the
+                     * B119 C translation only as a fallback if the guest
+                     * routine still encounters a malformed/cyclic OT.
+                     */
                     int b115_native_ok =
-                        fm_try_c_gssortot(
+                        fm_try_native_gssortot(
                             cpu,
                             src_ot,
                             dst_ot,
@@ -12974,45 +16110,49 @@ int main(void)
                     if (!b115_native_ok)
                     {
                         b115_native_ok =
-                            fm_try_native_gssortot(
+                            fm_try_c_gssortot(
                                 cpu,
                                 src_ot,
                                 dst_ot,
                                 &native_result
                             );
-
-                        b119_sort_code =
-                            b115_native_ok
-                                ? 1
-                                : g_sort_native_last_code;
                     }
 
-                    uint64_t b115_t3 = osGetTime();
+                    if (b13556_rel)
+                    {
+                        g_b13556_last_dst_has =
+                            b13556_chain_contains_hand(
+                                cpu,
+                                g_hle_85d98_dst_tag,
+                                &g_b13556_last_dst_steps
+                            )
+                                ? 1u
+                                : 0u;
 
-                    uint32_t b115_repair_ms =
-                        (uint32_t)(b115_t1 - b115_t0);
+                        if (g_b13556_last_dst_has)
+                        {
+                            ++g_b13556_merge_dst_has;
+                        }
+                    }
 
-                    uint32_t b115_submit_ms =
-                        (uint32_t)(b115_t2 - b115_t1);
+                    if (b13557_hand_src)
+                    {
+                        uint32_t dst_shape_packet = 0u;
 
-                    uint32_t b115_merge_ms =
-                        (uint32_t)(b115_t3 - b115_t2);
-
-                    b115_record_sort(
-                        b115_t3,
-                        b115_repair_ms,
-                        b115_submit_ms,
-                        b115_merge_ms,
-                        src_ot,
-                        dst_ot,
-                        b115_nodes,
-                        b115_packets,
-                        b115_words,
-                        b115_draw,
-                        b115_env,
-                        b115_other,
-                        b119_sort_code
-                    );
+                        if (
+                            b13557_chain_has_hand_shape(
+                                cpu,
+                                cpu->read_word(dst_ot + 0x10u),
+                                &g_b13557_last_dst_steps,
+                                &dst_shape_packet
+                            )
+                        )
+                        {
+                            ++g_b13557_dst_has;
+                            g_b13557_last_shape_packet =
+                                dst_shape_packet;
+                        }
+                    }
 
                     if (b115_native_ok)
                     {
@@ -13191,6 +16331,7 @@ int main(void)
                         ++g_b91_fast_block_cap;
                     }
 
+#if !defined(NDEBUG)
                     {
                         uint32_t b91_handoff_ms =
                             (uint32_t)(osGetTime() - b91_handoff_start_ms);
@@ -13201,6 +16342,7 @@ int main(void)
                             g_b91_slow_handoff_pc = dispatch_address;
                         }
                     }
+#endif
 
                     if (!game_running)
                     {
@@ -13286,24 +16428,102 @@ int main(void)
                  * Le profiler complet reste disponible dans un build
                  * sans NDEBUG.
                  */
-#if defined(NDEBUG)
-                probe =
-                    fm_runtime_probe(
-                        cpu,
-                        dispatch_address,
-                        g_b105_probe_budget
+                uint32_t b13514_chain_count = 0u;
+                int b13514_chain_region =
+                    (
+                        phys >= 0x000342B0u
+                        &&
+                        phys < 0x00035AC8u
+                    )
+                    ||
+                    (
+                        phys >= 0x0004D260u
+                        &&
+                        phys < 0x0004D5B8u
+                    )
+                    ||
+                    (
+                        phys >= 0x00089D60u
+                        &&
+                        phys < 0x0008A204u
+                    )
+                    ||
+                    (
+                        phys >= 0x0005721Cu
+                        &&
+                        phys < 0x00058860u
                     );
-#else
-                {
-                    uint64_t b110_probe_start_tick =
-                        svcGetSystemTick();
 
+#if defined(NDEBUG)
+                if (b13514_chain_region)
+                {
+                    probe =
+                        fm_runtime_probe_chain(
+                            cpu,
+                            dispatch_address,
+                            g_b105_probe_budget,
+                            0x000342B0u,
+                            0x00035AC8u,
+                            0x0004D260u,
+                            0x0004D5B8u,
+                            0x00089D60u,
+                            0x0008A204u,
+                            0x0005721Cu,
+                            0x00058860u,
+                            /*
+                             * B135.24 - B135.23 reached chains as deep as
+                             * 123 dispatches and a single host slice grew to
+                             * ~39 ms.  Bound the native chain so main.c gets
+                             * frequent chances to enforce the 12 ms scheduler
+                             * budget while still amortizing setjmp/dispatcher
+                             * overhead versus the old max=4 behavior.
+                             */
+                            16u,
+                            &b13514_chain_count
+                        );
+                }
+                else
+                {
                     probe =
                         fm_runtime_probe(
                             cpu,
                             dispatch_address,
                             g_b105_probe_budget
                         );
+                }
+#else
+                {
+                    uint64_t b110_probe_start_tick =
+                        svcGetSystemTick();
+
+                    if (b13514_chain_region)
+                    {
+                        probe =
+                            fm_runtime_probe_chain(
+                                cpu,
+                                dispatch_address,
+                                g_b105_probe_budget,
+                                0x000342B0u,
+                                0x00035AC8u,
+                                0x0004D260u,
+                                0x0004D5B8u,
+                                0x00089D60u,
+                                0x0008A204u,
+                                0x0005721Cu,
+                                0x00058860u,
+                                16u,
+                                &b13514_chain_count
+                            );
+                    }
+                    else
+                    {
+                        probe =
+                            fm_runtime_probe(
+                                cpu,
+                                dispatch_address,
+                                g_b105_probe_budget
+                            );
+                    }
 
                     uint64_t b110_probe_ticks =
                         svcGetSystemTick()
@@ -13325,8 +16545,33 @@ int main(void)
                 }
 #endif
 
+                if (b13514_chain_count != 0u)
+                {
+                    ++g_b13514_chain_entries;
+                    g_b13514_chain_dispatches +=
+                        b13514_chain_count;
+
+                    if (b13514_chain_count > g_b13514_chain_max)
+                    {
+                        g_b13514_chain_max =
+                            b13514_chain_count;
+                    }
+
+                    if (
+                        probe.reason == FM_STOP_RETURNED
+                        &&
+                        probe.pc != 0u
+                    )
+                    {
+                        b13516_note_chain_exit(
+                            probe.pc
+                        );
+                    }
+                }
+
                 probe_ran = 1;
 
+#if !defined(NDEBUG)
                 {
                     uint32_t b91_handoff_ms =
                         (uint32_t)(osGetTime() - b91_handoff_start_ms);
@@ -13337,6 +16582,7 @@ int main(void)
                         g_b91_slow_handoff_pc = dispatch_address;
                     }
                 }
+#endif
 
 
                 /*
@@ -13355,6 +16601,115 @@ int main(void)
                      */
                     static_miss = 0;
                     ++g_b85_probe_budget_continues;
+                    continue;
+                }
+
+
+                /*
+                 * ============================================
+                 * B135.66 - nested generated GsSortOt HLE
+                 * ============================================
+                 *
+                 * psx_check_interrupts_dispatch_entry() escaped from a
+                 * direct ARM->ARM compiled call to 80085D98 before its body
+                 * executed.  Service the exact call here, then return to the
+                 * original guest RA as the real function would.
+                 */
+                if (
+                    probe.reason
+                    == FM_STOP_GSSORTOT_HLE
+                )
+                {
+                    uint32_t src_ot = cpu->gpr[4];
+                    uint32_t dst_ot = cpu->gpr[5];
+                    uint32_t result_v0 = dst_ot;
+
+                    ++g_b13566_traps;
+                    g_b13566_last_src = src_ot;
+                    g_b13566_last_dst = dst_ot;
+                    g_b13566_last_ra = cpu->gpr[31];
+
+                    uint32_t sp66 =
+                        src_ot & 0x1FFFFFFFu;
+
+                    int hand66 =
+                        (
+                            sp66 == 0x000E5FD4u
+                            ||
+                            sp66 == 0x000EB134u
+                        );
+
+                    if (hand66)
+                    {
+                        ++g_b13566_hand_traps;
+
+                        uint32_t shape66 = 0u;
+
+                        if (
+                            b13557_chain_has_hand_shape(
+                                cpu,
+                                cpu->read_word(src_ot + 0x10u),
+                                NULL,
+                                &shape66
+                            )
+                        )
+                        {
+                            ++g_b13566_hand_src_has;
+                        }
+                    }
+
+                    fm_repair_ot_sentinel(cpu, src_ot);
+                    fm_repair_ot_sentinel(cpu, dst_ot);
+
+                    int ok66 =
+                        fm_try_c_gssortot(
+                            cpu,
+                            src_ot,
+                            dst_ot,
+                            &result_v0
+                        );
+
+                    if (ok66)
+                    {
+                        ++g_b13566_ok;
+                        g_b13566_last_code = 1;
+
+                        if (hand66)
+                        {
+                            uint32_t dst_shape66 = 0u;
+
+                            if (
+                                b13557_chain_has_hand_shape(
+                                    cpu,
+                                    cpu->read_word(dst_ot + 0x10u),
+                                    NULL,
+                                    &dst_shape66
+                                )
+                            )
+                            {
+                                ++g_b13566_hand_dst_has;
+                            }
+                        }
+
+                        cpu->gpr[2] = result_v0;
+                    }
+                    else
+                    {
+                        ++g_b13566_fail;
+                        g_b13566_last_code =
+                            g_b119_csort_last_code;
+
+                        /*
+                         * Preserve the guest ABI even on a diagnostic
+                         * failure; the top-level HLE uses dst_ot likewise.
+                         */
+                        cpu->gpr[2] = dst_ot;
+                    }
+
+                    cpu->pc = cpu->gpr[31];
+                    cpu->gpr[0] = 0u;
+
+                    static_miss = 0;
                     continue;
                 }
 
@@ -13411,41 +16766,149 @@ int main(void)
                      * par cet interpreteur. 128 instructions/frame etait
                      * la principale cause du ralenti massif.
                      */
-                    interp =
-                        fm_interp_run_block(
-                            cpu,
-                            g_direct2df_active
-                                ? 8192u
-                                : 8192u
+                    /*
+                     * B135.17:
+                     * The hot map PCs reported by B135.16 are internal
+                     * labels unknown to psx_dispatch_game_compiled(). Run
+                     * consecutive R3000A basic blocks here instead of
+                     * bouncing through main.c hundreds of times per slice.
+                     */
+                    if (b13517_is_map_interp_pc(cpu->pc))
+                    {
+                        uint32_t b13519_chunks = 0u;
+                        int b13517_time_yield = 0;
+                        uint32_t b13525_entry_pc =
+                            cpu->pc & 0x1FFFFFFFu;
+                        uint64_t b13525_entry_instructions = 0u;
+
+                        ++g_b13517_interp_entries;
+
+                        /*
+                         * B135.19:
+                         * Execute across internal MIPS branch boundaries inside
+                         * fm_interp.c. A 256-instruction chunk amortizes the
+                         * block-return/dispatcher overhead while still letting
+                         * main.c enforce the host slice. B135.75 raises the
+                         * chunk from 256 to 2048 instructions while reducing
+                         * the outer limit from 256 to 32, preserving the same
+                         * 65536-instruction ceiling but cutting dispatcher/
+                         * clock-check overhead by up to 8x.
+                         */
+                        while (
+                            game_running
+                            &&
+                            b13517_is_map_interp_pc(cpu->pc)
+                            &&
+                            b13519_chunks < 32u
+                        )
+                        {
+                            interp =
+                                fm_interp_run_region(
+                                    cpu,
+                                    2048u,
+                                    0x000342B0u,
+                                    0x00035AC8u,
+                                    0x00034D30u
+                                );
+
+                            interp_ran = 1;
+                            ++b13519_chunks;
+                            ++g_b13517_interp_blocks;
+                            g_b13519_region_instructions +=
+                                interp.instructions;
+                            b13525_entry_instructions +=
+                                interp.instructions;
+
+                            if (
+                                interp.reason
+                                ==
+                                FM_INTERP_BUDGET
+                            )
+                            {
+                                ++g_b84_budget_continues;
+
+                                if (
+                                    (osGetTime() - b16_slice_start_ms)
+                                        >= g_b105_slice_budget_ms
+                                )
+                                {
+                                    b13517_time_yield = 1;
+                                    ++g_b13517_interp_time_yields;
+                                    break;
+                                }
+
+                                continue;
+                            }
+
+                            /*
+                             * BLOCK_DONE now means the chained interpreter
+                             * deliberately reached a PC outside the region or
+                             * the native 0x34D30 entry. Give it back to the
+                             * normal dispatcher immediately.
+                             */
+                            break;
+                        }
+
+                        if (b13519_chunks > g_b13517_interp_max)
+                        {
+                            g_b13517_interp_max = b13519_chunks;
+                        }
+
+                        b13525_note_interp_entry(
+                            b13525_entry_pc,
+                            b13525_entry_instructions
                         );
 
-                    interp_ran = 1;
+                        if (b13517_time_yield)
+                        {
+                            static_miss = 0;
+                            ++g_b84_budget_yields;
+                            break;
+                        }
 
-                    if (
-                        interp.reason
-                        == FM_INTERP_BLOCK_DONE
-                    )
-                    {
-                        static_miss = 0;
-                        continue;
+                        if (
+                            interp.reason == FM_INTERP_BLOCK_DONE
+                            ||
+                            interp.reason == FM_INTERP_BUDGET
+                        )
+                        {
+                            static_miss = 0;
+                            continue;
+                        }
                     }
-
-                    if (
-                        interp.reason
-                        == FM_INTERP_BUDGET
-                    )
+                    else
                     {
-                        /*
-                         * B84 : le PC de l'interpreteur est deja avance.
-                         * Reprendre une nouvelle tranche au lieu d'attendre
-                         * obligatoirement la frame 3DS suivante.
-                         *
-                         * La garde 12 ms au debut du handoff empeche toute
-                         * monopolisation du thread.
-                         */
-                        static_miss = 0;
-                        ++g_b84_budget_continues;
-                        continue;
+                        interp =
+                            fm_interp_run_block(
+                                cpu,
+                                8192u
+                            );
+
+                        interp_ran = 1;
+
+                        if (
+                            interp.reason
+                            == FM_INTERP_BLOCK_DONE
+                        )
+                        {
+                            static_miss = 0;
+                            continue;
+                        }
+
+                        if (
+                            interp.reason
+                            == FM_INTERP_BUDGET
+                        )
+                        {
+                            /*
+                             * B84 : le PC de l'interpreteur est deja avance.
+                             * Reprendre une nouvelle tranche au lieu d'attendre
+                             * obligatoirement la frame 3DS suivante.
+                             */
+                            static_miss = 0;
+                            ++g_b84_budget_continues;
+                            continue;
+                        }
                     }
 
                     /*
@@ -13468,7 +16931,11 @@ int main(void)
                 g_b65_stop_code = 5u;
                 g_b65_stop_pc = probe.pc;
                 g_b65_stop_ra = cpu ? cpu->gpr[31] : 0u;
-                g_b65_stop_detail = (uint32_t)probe.reason;
+                /*
+                 * B135 : conserver le DETAIL reel (commande GTE, syscall,
+                 * etc.) plutot que seulement l'enum du motif.
+                 */
+                g_b65_stop_detail = probe.detail;
 
                 game_running = 0;
                 break;
@@ -13722,9 +17189,17 @@ int main(void)
                 uint32_t p0_hash = 2166136261u;
                 uint32_t p320_hash = 2166136261u;
 
+                /*
+                 * B135.76: sample the CURRENT GP1 Y page.  B98 historically
+                 * sampled y=0 unconditionally, so a valid framebuffer at
+                 * y=256 looked empty after some post-duel transitions.
+                 */
+                unsigned sample_y = current_y;
+
                 for (unsigned py = 0u; py < 240u; py += 4u)
                 {
-                    const uint16_t *row0 = vram + py * 1024u;
+                    unsigned sy = (sample_y + py) & 511u;
+                    const uint16_t *row0 = vram + sy * 1024u;
                     const uint16_t *row320 = row0 + 320u;
 
                     for (unsigned px = 0u; px < 320u; px += 4u)
@@ -13789,112 +17264,283 @@ int main(void)
             }
             else if (g_direct2df_active)
             {
+                int b1357_vsync_boundary =
+                    g_b1358_vsync_completed
+                    &&
+                    b104_gp0 != g_b1357_last_latched_gp0;
+
+                /*
+                 * B135.7:
+                 * - VSync wait = stable end-of-frame boundary for gameplay;
+                 * - GP1 page change is also inherently safe;
+                 * - keep the historical sentinel path as a fallback.
+                 *
+                 * The GP0 comparison is against the LAST LATCH, not merely
+                 * the previous host loop. A complex PS1 frame can span
+                 * several 12 ms scheduler slices before it reaches VSync.
+                 */
                 if (
                     !g_b84_latch_valid
+                    ||
+                    b1357_vsync_boundary
+                    ||
+                    display_changed
                     ||
                     complete_guest_frame
                 )
                 {
                     need_latch = 1;
+
+                    if (b1357_vsync_boundary)
+                    {
+                        ++g_b1357_vsync_latches;
+                    }
+
+                    if (display_changed)
+                    {
+                        ++g_b1357_display_latches;
+                    }
                 }
             }
             else if (display_changed)
             {
-                uint32_t current_nz =
-                    current_x == 320u
-                        ? p320_nz
-                        : p0_nz;
+                /*
+                 * B135.78:
+                 * A real GP1(05) display change is authoritative. Do not let
+                 * B102/B103 replace it with a denser texture/atlas page.
+                 */
+                latch_x = current_x;
+                latch_y = current_y;
+                need_latch = 1;
+                b103_merge = 0;
 
-                uint32_t other_nz =
-                    current_x == 320u
-                        ? p0_nz
-                        : p320_nz;
+                ++g_b102_front_latches;
+                ++g_b103_plain_count;
+                ++g_b13578_keep_gp1;
+                g_b13578_last_pick = 0u;
 
                 /*
-                 * B103 :
-                 * si une page est beaucoup plus dense que l'autre,
-                 * le jeu se retrouve actuellement separe en deux
-                 * "couches" dans notre VRAM :
-                 *
-                 *   dense  = decor / fond
-                 *   sparse = UI / texte / curseur
-                 *
-                 * On reconstruit temporairement l'image complete.
-                 *
-                 * Le seuil 3/4 evite le merge quand les deux pages
-                 * sont de vrais framebuffers complets.
+                 * Seed the sampled hash for the newly displayed page so the
+                 * next stale-VSync decision compares against a real baseline.
                  */
+                {
+                    uint32_t h = 0u;
+                    uint32_t nz = 0u;
+                    unsigned idx =
+                        b13578_page_index(current_x, current_y);
+
+                    b13578_sample_page(
+                        vram,
+                        current_x,
+                        current_y,
+                        &h,
+                        &nz
+                    );
+
+                    g_b13578_page_hash[idx] = h;
+                    g_b13578_last_current_nz = nz;
+                    g_b13578_last_draw_nz = nz;
+                }
+            }
+            else if (
+                g_b1358_vsync_completed
+                &&
+                b104_gp0 != g_b1357_last_latched_gp0
+            )
+            {
+                /*
+                 * B135.44:
+                 *
+                 * B135.43 proved the missing dialogue/cards are really
+                 * rasterized into the OPPOSITE framebuffer:
+                 *
+                 *   dialogue: draw area 0..319   while GP1 displays x=320
+                 *   duel:     draw area 320..639 while GP1 displays x=0
+                 *
+                 * So the renderer is not losing the sprites.  The stale part
+                 * is the missing GP1(05) page flip.  At a completed VSync,
+                 * infer the active draw page from E3/E4 and present that page
+                 * when it is a canonical 320-wide framebuffer.
+                 *
+                 * Do NOT alter guest GP1 state; this only chooses the host
+                 * source used for the stable composite.
+                 */
+                /*
+                 * B135.76:
+                 *
+                 * B135.44 used fm_gpu_b127_perf_snapshot() here, but that
+                 * lightweight performance getter does NOT populate draw_x1,
+                 * draw_y1, draw_x2 or draw_y2.  Since the temporary structure
+                 * was memset to zero, the old code effectively selected X=0
+                 * on every stale-GP1 VSync.
+                 *
+                 * Read the real E3/E4 draw area instead.  This getter is also
+                 * lightweight (register state only; no VRAM scan).
+                 */
+                int draw_x1 = 0;
+                int draw_y1 = 0;
+                int draw_x2 = 0;
+                int draw_y2 = 0;
+
+                fm_gpu_b100_env_get(
+                    NULL, NULL,
+                    &draw_x1, &draw_y1,
+                    &draw_x2, &draw_y2,
+                    NULL, NULL, NULL, NULL,
+                    NULL, NULL, NULL, NULL
+                );
+
+                unsigned draw_page_x = current_x;
+                unsigned draw_page_y = current_y;
+
                 if (
-                    p0_nz >= 512u
+                    draw_x1 >= 320
                     &&
-                    p320_nz >= 64u
+                    draw_x1 <= 639
                     &&
-                    (
-                        p0_nz * 4u < p320_nz * 3u
-                        ||
-                        p320_nz * 4u < p0_nz * 3u
-                    )
+                    draw_x2 >= 320
+                    &&
+                    draw_x2 <= 639
                 )
                 {
-                    if (p0_nz > p320_nz)
-                    {
-                        b103_base_x = 0u;
-                        b103_overlay_x = 320u;
-                        g_b103_last_base_nz = p0_nz;
-                        g_b103_last_overlay_nz = p320_nz;
-                    }
-                    else
-                    {
-                        b103_base_x = 320u;
-                        b103_overlay_x = 0u;
-                        g_b103_last_base_nz = p320_nz;
-                        g_b103_last_overlay_nz = p0_nz;
-                    }
+                    draw_page_x = 320u;
+                }
+                else if (
+                    draw_x1 >= 0
+                    &&
+                    draw_x1 <= 319
+                    &&
+                    draw_x2 >= 0
+                    &&
+                    draw_x2 <= 319
+                )
+                {
+                    draw_page_x = 0u;
+                }
 
-                    b103_merge = 1;
-                    latch_x = b103_base_x;
-                    latch_y = current_y;
-                    need_latch = 1;
+                /*
+                 * The game can also use the lower half of VRAM as a complete
+                 * 320x240 framebuffer.  Follow that draw page exactly like X.
+                 */
+                if (
+                    draw_y1 >= 256
+                    &&
+                    draw_y1 <= 511
+                    &&
+                    draw_y2 >= 256
+                    &&
+                    draw_y2 <= 511
+                )
+                {
+                    draw_page_y = 256u;
+                }
+                else if (
+                    draw_y1 >= 0
+                    &&
+                    draw_y1 <= 255
+                    &&
+                    draw_y2 >= 0
+                    &&
+                    draw_y2 <= 255
+                )
+                {
+                    draw_page_y = 0u;
+                }
 
-                    g_b103_last_base_x = b103_base_x;
-                    g_b103_last_overlay_x = b103_overlay_x;
-                    ++g_b103_merge_count;
+                /*
+                 * B135.78:
+                 * The draw page is a candidate backbuffer, not automatically
+                 * the frontbuffer. Compare sampled page hashes across VSyncs.
+                 */
+                uint32_t current_hash = 0u;
+                uint32_t current_nz = 0u;
+                uint32_t draw_hash = 0u;
+                uint32_t draw_nz = 0u;
+
+                unsigned current_idx =
+                    b13578_page_index(current_x, current_y);
+
+                unsigned draw_idx =
+                    b13578_page_index(draw_page_x, draw_page_y);
+
+                b13578_sample_page(
+                    vram,
+                    current_x,
+                    current_y,
+                    &current_hash,
+                    &current_nz
+                );
+
+                if (
+                    draw_page_x == current_x
+                    &&
+                    draw_page_y == current_y
+                )
+                {
+                    draw_hash = current_hash;
+                    draw_nz = current_nz;
                 }
                 else
                 {
-                    /*
-                     * Vrai double-buffer classique : presenter GP1.
-                     */
+                    b13578_sample_page(
+                        vram,
+                        draw_page_x,
+                        draw_page_y,
+                        &draw_hash,
+                        &draw_nz
+                    );
+                }
+
+                int current_changed =
+                    g_b13578_page_hash[current_idx] != 0u
+                    &&
+                    current_hash != g_b13578_page_hash[current_idx];
+
+                int draw_changed =
+                    g_b13578_page_hash[draw_idx] != 0u
+                    &&
+                    draw_hash != g_b13578_page_hash[draw_idx];
+
+                int distinct_draw_page =
+                    draw_page_x != current_x
+                    ||
+                    draw_page_y != current_y;
+
+                int follow_draw =
+                    distinct_draw_page
+                    &&
+                    !current_changed
+                    &&
+                    draw_changed
+                    &&
+                    draw_nz >= 32u;
+
+                if (follow_draw)
+                {
+                    latch_x = draw_page_x;
+                    latch_y = draw_page_y;
+                    ++g_b13544_follow_drawbuf;
+                    ++g_b13578_follow_draw;
+                    g_b13578_last_pick = 1u;
+                }
+                else
+                {
                     latch_x = current_x;
                     latch_y = current_y;
-
-                    if (current_nz > 64u)
-                    {
-                        need_latch = 1;
-                        ++g_b102_front_latches;
-                    }
-                    else if (other_nz >= 512u)
-                    {
-                        latch_x =
-                            current_x == 320u
-                                ? 0u
-                                : 320u;
-
-                        latch_y = 0u;
-                        need_latch = 1;
-                        ++g_b102_fallback_latches;
-                    }
-                    else if (!g_b84_latch_valid)
-                    {
-                        need_latch = 1;
-                        ++g_b102_front_latches;
-                    }
-
-                    if (need_latch)
-                    {
-                        ++g_b103_plain_count;
-                    }
+                    ++g_b13578_keep_gp1;
+                    g_b13578_last_pick = 0u;
                 }
+
+                need_latch = 1;
+                ++g_b13541_2d_vsync_latches;
+
+                g_b13578_page_hash[current_idx] = current_hash;
+                g_b13578_page_hash[draw_idx] = draw_hash;
+                g_b13578_last_current_nz = current_nz;
+                g_b13578_last_draw_nz = draw_nz;
+
+                g_b13544_last_draw_x = draw_page_x;
+                g_b13576_last_draw_y = draw_page_y;
             }
 
             if (display_changed)
@@ -14017,6 +17663,7 @@ int main(void)
 
                 g_b84_latch_valid = 1u;
                 g_b86_present_dirty = 1u;
+                g_b1357_last_latched_gp0 = b104_gp0;
                 ++g_b84_latch_count;
 
                 if (b104_decode24)
@@ -14027,6 +17674,11 @@ int main(void)
 
             g_b104_last_gp0 = b104_gp0;
             g_b104_last_mode = b104_mode;
+
+            /*
+             * B135.8: VSync completion is an edge, not a level.
+             */
+            g_b1358_vsync_completed = 0u;
         }
 
 
@@ -14072,24 +17724,36 @@ int main(void)
              */
             if (g_b84_latch_valid)
             {
-                fm_present_rgb555(
-                    composite,
-                    320,
-                    crop
-                );
-
+                /*
+                 * B131: only copy/swap when the guest produced a new
+                 * stable image. If nothing changed, keep the current
+                 * 3DS frontbuffer visible and just wait for VBlank.
+                 */
                 if (g_b86_present_dirty)
                 {
-                    g_b86_present_dirty = 0u;
-                }
+                    fm_present_rgb555(
+                        composite,
+                        320,
+                        crop
+                    );
 
-                ++g_b86_present_count;
+                    g_b86_present_dirty = 0u;
+
+                    ++g_b86_present_count;
+                    ++g_b131_dirty_present_count;
+                    b131_presented_this_loop = 1;
+                }
+                else
+                {
+                    ++g_b86_skipped_presents;
+                    ++g_b131_skip_count;
+                }
             }
             else
             {
                 /*
-                 * Avant le premier latch stable, garder le comportement
-                 * historique afin que le boot reste visible.
+                 * Before the first stable latch, keep the historical
+                 * behavior so boot progress remains visible.
                  */
                 fm_present_rgb555(
                     vram + display_y * 1024u + display_x,
@@ -14098,6 +17762,7 @@ int main(void)
                 );
 
                 ++g_b86_present_count;
+                b131_presented_this_loop = 1;
             }
         }
         else if (
@@ -14127,6 +17792,8 @@ int main(void)
                 1024,
                 0
             );
+
+            b131_presented_this_loop = 1;
         }
         else if (
             !g_b42_native_video
@@ -14138,6 +17805,8 @@ int main(void)
                 320,
                 0
             );
+
+            b131_presented_this_loop = 1;
         }
         else if (
             fm_gpu_has_frame()
@@ -14164,6 +17833,8 @@ int main(void)
                 1024,
                 crop
             );
+
+            b131_presented_this_loop = 1;
         }
         else if (show_preview)
         {
@@ -14172,6 +17843,8 @@ int main(void)
                 320,
                 crop
             );
+
+            b131_presented_this_loop = 1;
         }
         else
         {
@@ -14191,6 +17864,8 @@ int main(void)
                 1024,
                 crop
             );
+
+            b131_presented_this_loop = 1;
         }
 
         render_ticks +=
@@ -14257,425 +17932,714 @@ int main(void)
                 fm_gpu_gp0_count();
 
             /*
-             * =================================================
-             * B55 - affichage COMPACT
-             * =================================================
-             *
-             * B54 contenait les bonnes informations, mais elles
-             * etaient poussees hors de l'ecran par les anciennes
-             * lignes de diagnostic. On affiche ici uniquement les
-             * donnees necessaires pour identifier l'opcode qui
-             * bloque 801680F4.
+             * B127: B124/B125/B126 counters previously displayed zeros
+             * because the compact debug path never populated gpu_debug.
+             * Use a lightweight getter that does not scan the whole VRAM.
              */
-            int b100_off_x = 0;
-            int b100_off_y = 0;
-            int b100_area_x1 = 0;
-            int b100_area_y1 = 0;
-            int b100_area_x2 = 0;
-            int b100_area_y2 = 0;
-            uint32_t b100_e3 = 0u;
-            uint32_t b100_e4 = 0u;
-            uint32_t b100_e5 = 0u;
-            uint32_t b100_gp105 = 0u;
-            uint32_t b100_last_e3 = 0u;
-            uint32_t b100_last_e4 = 0u;
-            uint32_t b100_last_e5 = 0u;
-            uint32_t b100_last_gp105 = 0u;
-
-            fm_gpu_b100_env_get(
-                &b100_off_x,
-                &b100_off_y,
-                &b100_area_x1,
-                &b100_area_y1,
-                &b100_area_x2,
-                &b100_area_y2,
-                &b100_e3,
-                &b100_e4,
-                &b100_e5,
-                &b100_gp105,
-                &b100_last_e3,
-                &b100_last_e4,
-                &b100_last_e5,
-                &b100_last_gp105
+            fm_gpu_b127_perf_snapshot(
+                &gpu_debug
             );
 
-            printf("BUILD B119-C-GSSORTOT\n");
+            /*
+             * =================================================
+             * B130 - PERF CLEAN
+             * =================================================
+             */
+            FMDmaDebugStats b130_dma = {0};
+            fm_memory_dma_debug(&b130_dma);
+
+#if FM_PERF_PROFILE
+            printf("BUILD B135.87-BLACK-PROFILE (SAFE B135.71)\n");
+#else
+            printf("BUILD B135.87-BLACK-CLEAN (SAFE B135.71)\n");
+#endif
 
             printf(
-                "RUN:%c CPU:%08lX RA:%08lX F:%lu I:%s\n",
+                "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
                 game_running ? 'Y' : 'N',
-                cpu ? (unsigned long)cpu->pc : 0ul,
-                cpu ? (unsigned long)cpu->gpr[31] : 0ul,
                 (unsigned long)frame,
-                interp_ran
-                    ? fm_interp_stop_name(interp.reason)
-                    : "NONE"
+                cpu ? (unsigned long)cpu->pc : 0ul,
+                (unsigned)fm_memory_read_byte(0x801847C0u)
             );
 
             printf(
-                "SCHED ms:%lu max:%lu hand:%lu sliceY:%lu\n",
+                "QS rc:%ld S/L:%lu/%lu STOP:%lu D:%08lX\n",
+                (long)g_b135_qs_last_result,
+                (unsigned long)g_b135_qs_save_count,
+                (unsigned long)g_b135_qs_load_count,
+                (unsigned long)g_b65_stop_code,
+                (unsigned long)g_b65_stop_detail
+            );
+
+            printf(
+                "LOOP avg/max/>20/>33:%llu/%lu/%lu/%lu ms\n",
+                (unsigned long long)(
+                    g_b110_loop_samples
+                        ? g_b110_loop_sum_ms / g_b110_loop_samples
+                        : 0u
+                ),
+                (unsigned long)g_b110_loop_max_ms,
+                (unsigned long)g_b110_loop_over20,
+                (unsigned long)g_b110_loop_over33
+            );
+
+            printf(
+                "SCHED slice/max:%lu/%lu hand:%lu yields:%lu pb:%lu\n",
                 (unsigned long)g_b16_slice_last_ms,
                 (unsigned long)g_b16_slice_max_ms,
                 (unsigned long)g_b16_last_handoffs,
-                (unsigned long)g_b84_budget_yields
-            );
-
-            printf(
-                "BUDGET native:%lu interp:%lu direct:%lu\n",
-                (unsigned long)g_b85_probe_budget_continues,
-                (unsigned long)g_b84_budget_continues,
-                (unsigned long)g_direct2df_active
-            );
-
-            printf(
-                "B91 E/B:%lu/%lu I:%llu Y/C:%lu/%lu\n",
-                (unsigned long)g_b91_fast_entries,
-                (unsigned long)g_b91_fast_blocks,
-                (unsigned long long)g_b91_fast_instructions,
-                (unsigned long)g_b91_fast_time_yields,
-                (unsigned long)g_b91_fast_block_cap
-            );
-
-            printf(
-                "B91 blk:%lu max:%lu slow:%lu@%08lX out:%lu\n",
-                (unsigned long)g_b91_last_block_ms,
-                (unsigned long)g_b91_max_block_ms,
-                (unsigned long)g_b91_slow_handoff_ms,
-                (unsigned long)g_b91_slow_handoff_pc,
-                (unsigned long)g_b91_fast_exits_resident
-            );
-
-            printf(
-                "B93 HLE917:%lu fb:%lu last/max:%lu/%lu out:%lu\n",
-                (unsigned long)g_b93_917f8_hle_calls,
-                (unsigned long)g_b93_917f8_fallbacks,
-                (unsigned long)g_b93_917f8_last_ms,
-                (unsigned long)g_b93_917f8_max_ms,
-                (unsigned long)g_b93_917f8_last_out
-            );
-
-            printf(
-                "FLIP now:%lu,%lu src:%lu,%lu changes:%lu\n",
-                (unsigned long)fm_gpu_display_x(),
-                (unsigned long)fm_gpu_display_y(),
-                (unsigned long)g_b87_last_source_x,
-                (unsigned long)g_b87_last_source_y,
-                (unsigned long)g_b86_display_changes
-            );
-
-            printf(
-                "B97 P0:%lu/%08lX P320:%lu/%08lX S:%lu\n",
-                (unsigned long)g_b97_p0_nonzero,
-                (unsigned long)g_b97_p0_hash,
-                (unsigned long)g_b97_p320_nonzero,
-                (unsigned long)g_b97_p320_hash,
-                (unsigned long)g_b97_flip_samples
-            );
-
-            printf(
-                "B98 F0:%lu F320:%lu normal:%lu\n",
-                (unsigned long)g_b98_force_p0,
-                (unsigned long)g_b98_force_p320,
-                (unsigned long)g_b98_normal_latch
-            );
-
-            printf(
-                "B100 O:%d,%d A:%d,%d-%d,%d E:%lu/%lu/%lu G:%lu\n",
-                b100_off_x,
-                b100_off_y,
-                b100_area_x1,
-                b100_area_y1,
-                b100_area_x2,
-                b100_area_y2,
-                (unsigned long)b100_e3,
-                (unsigned long)b100_e4,
-                (unsigned long)b100_e5,
-                (unsigned long)b100_gp105
-            );
-
-            printf(
-                "B100 RAW %08lX %08lX %08lX %08lX\n",
-                (unsigned long)b100_last_e3,
-                (unsigned long)b100_last_e4,
-                (unsigned long)b100_last_e5,
-                (unsigned long)b100_last_gp105
-            );
-
-            printf(
-                "B101 OFSDRAW:%lu\n",
-                (unsigned long)fm_gpu_b101_offset_draw_packets()
-            );
-
-            printf(
-                "B102 FRONT/FALL:%lu/%lu MB:%lu/%lu\n",
-                (unsigned long)g_b102_front_latches,
-                (unsigned long)g_b102_fallback_latches,
-                (unsigned long)g_b102_menu_bridge_active,
-                (unsigned long)g_b102_menu_bridge_cleanup
-            );
-
-            printf(
-                "B102 PAD R/H/E/P:%04lX/%04lX/%04lX/%04lX K:%u/%u\n",
-                (unsigned long)(fm_memory_read_word(0x8009C70Cu) & 0xFFFFu),
-                (unsigned long)(fm_memory_read_word(0x8009C710u) & 0xFFFFu),
-                (unsigned long)(fm_memory_read_word(0x8009C72Cu) & 0xFFFFu),
-                (unsigned long)(fm_memory_read_word(0x8009C728u) & 0xFFFFu),
-                (unsigned)fm_memory_read_byte(0x8009C66Cu),
-                (unsigned)fm_memory_read_byte(0x8009C670u)
-            );
-
-            printf(
-                "B103 MIX/P:%lu/%lu X:%lu+%lu NZ:%lu/%lu\n",
-                (unsigned long)g_b103_merge_count,
-                (unsigned long)g_b103_plain_count,
-                (unsigned long)g_b103_last_base_x,
-                (unsigned long)g_b103_last_overlay_x,
-                (unsigned long)g_b103_last_base_nz,
-                (unsigned long)g_b103_last_overlay_nz
-            );
-
-            printf(
-                "B103 NAME h/i/c/p:%lu/%lu/%lu/%08lX\n",
-                (unsigned long)g_b103_name_hits,
-                (unsigned long)g_b103_name_injected,
-                (unsigned long)g_b103_name_cleanups,
-                (unsigned long)g_b103_name_pending_mask
-            );
-
-            printf(
-                "B104 MODE:%02lX 24:%u W:%u L:%lu\n",
-                (unsigned long)fm_gpu_display_mode_raw(),
-                (unsigned)fm_gpu_display_24bit(),
-                (unsigned)fm_gpu_display_width(),
-                (unsigned long)g_b104_rgb24_latches
-            );
-
-            printf(
-                "B104 MDEC R/I/O/IS/OS:%lu/%lu/%lu/%lu/%lu\n",
-                (unsigned long)g_b104_mdec_reset,
-                (unsigned long)g_b104_mdec_in,
-                (unsigned long)g_b104_mdec_out,
-                (unsigned long)g_b104_mdec_in_sync,
-                (unsigned long)g_b104_mdec_out_sync
-            );
-
-            printf(
-                "B105 PERF S/R/V/W/L:%lu/%lu/%lu/%lu/%lu\n",
-                (unsigned long)g_b16_slice_last_ms,
-                (unsigned long)g_b105_render_ms,
-                (unsigned long)g_b105_vblank_ms,
-                (unsigned long)g_b105_work_ms,
-                (unsigned long)g_b105_loop_ms
-            );
-
-            printf(
-                "B105 BUD ms/op:%lu/%lu\n",
-                (unsigned long)g_b105_slice_budget_ms,
+                (unsigned long)g_b84_budget_yields,
                 (unsigned long)g_b105_probe_budget
             );
 
             printf(
-                "B106 PRE/GFX/WAIT:%lu/%lu/%lu\n",
-                (unsigned long)g_b106_pre_gfx_ms,
-                (unsigned long)g_b106_gfx_ms,
-                (unsigned long)g_b106_wait_ms
-            );
-
-            printf(
-                "B108 VS 0/N/I/W:%lu/%lu/%lu/%lu L/T:%lu/%lu\n",
-                (unsigned long)g_b108_vsync_mode0,
-                (unsigned long)g_b108_vsync_modeN,
-                (unsigned long)g_b108_vsync_immediate,
-                (unsigned long)g_b108_vsync_waited,
-                (unsigned long)g_b108_vsync_last_sync_frame,
-                (unsigned long)g_b108_vsync_last_target
-            );
-
-            /*
-             * B111 - cadence guest vs host over the same debug window.
-             * 100 means one completed guest frame per host frame.
-             * A very low value with LOOP ~17 ms proves "slow motion"
-             * rather than a host framerate bottleneck.
-             */
-            g_b111_host_delta =
-                frame - g_b111_prev_host_frame;
-
-            g_b111_guest_delta =
-                g_b85_guest_frames - g_b111_prev_guest_frame;
-
-            g_b111_guest_per_100_host =
-                g_b111_host_delta
-                    ? (g_b111_guest_delta * 100u) / g_b111_host_delta
-                    : 0u;
-
-            printf(
-                "B111 CAD H/G:%lu/%lu ratio:%lu%%\n",
-                (unsigned long)g_b111_host_delta,
-                (unsigned long)g_b111_guest_delta,
-                (unsigned long)g_b111_guest_per_100_host
-            );
-
-            g_b111_prev_host_frame = frame;
-            g_b111_prev_guest_frame = g_b85_guest_frames;
-
-            {
-                B110ProbeStat p0 = {0};
-                B110ProbeStat p1 = {0};
-                B110ProbeStat p2 = {0};
-
-                b110_get_rank(0u, &p0);
-                b110_get_rank(1u, &p1);
-                b110_get_rank(2u, &p2);
-
-                printf(
-                    "B110 LOOP A/M/>20/>33:%lu/%lu/%lu/%lu\n",
-                    (unsigned long)(
-                        g_b110_loop_samples
-                            ? (g_b110_loop_sum_ms / g_b110_loop_samples)
-                            : 0u
-                    ),
-                    (unsigned long)g_b110_loop_max_ms,
-                    (unsigned long)g_b110_loop_over20,
-                    (unsigned long)g_b110_loop_over33
-                );
-
-                printf(
-                    "B110 MAX %luus %08lX>%08lX\n",
-                    (unsigned long)g_b110_probe_max_us,
-                    (unsigned long)g_b110_probe_max_start,
-                    (unsigned long)g_b110_probe_max_end
-                );
-
-                printf(
-                    "B110 P0 %08lX>%08lX h:%lu t:%lluus m:%lu\n",
-                    (unsigned long)p0.start_pc,
-                    (unsigned long)p0.end_pc,
-                    (unsigned long)p0.hits,
-                    (unsigned long long)p0.total_us,
-                    (unsigned long)p0.max_us
-                );
-
-                printf(
-                    "B110 P1 %08lX>%08lX h:%lu t:%lluus m:%lu\n",
-                    (unsigned long)p1.start_pc,
-                    (unsigned long)p1.end_pc,
-                    (unsigned long)p1.hits,
-                    (unsigned long long)p1.total_us,
-                    (unsigned long)p1.max_us
-                );
-
-                printf(
-                    "B110 P2 %08lX>%08lX h:%lu t:%lluus m:%lu\n",
-                    (unsigned long)p2.start_pc,
-                    (unsigned long)p2.end_pc,
-                    (unsigned long)p2.hits,
-                    (unsigned long long)p2.total_us,
-                    (unsigned long)p2.max_us
-                );
-            }
-
-            printf(
-                "DELAY latch/wait:%lu/%lu total:%lu\n",
-                (unsigned long)g_b87_delayed_latches,
-                (unsigned long)g_b87_first_flip_waits,
-                (unsigned long)g_b84_latch_count
-            );
-
-            printf(
-                "PRESENT done/skip/dirty:%lu/%lu/%lu\n",
+                "GPU words:%llu present:%lu draw:%lu\n",
+                (unsigned long long)gpu_debug.gp0_words,
                 (unsigned long)g_b86_present_count,
-                (unsigned long)g_b86_skipped_presents,
-                (unsigned long)g_b86_present_dirty
-            );
-
-            printf(
-                "GFRAME:%lu sentinel:%lu MENU U:%lu draw:%lu\n",
-                (unsigned long)g_b85_guest_frames,
-                (unsigned long)g_b85_sentinel_hits,
-                (unsigned long)g_b73_hit_menu_update,
                 (unsigned long)g_b74_hit_menu_draw_cb
             );
 
             printf(
-                "MENU SEL:%lu D:%lu ENT:%lu DIRECTbad:%lu\n",
-                (unsigned long)fm_memory_read_byte(0x801847C0u),
-                (unsigned long)g_b73_hit_menu_destroy,
-                (unsigned long)g_b75_menu_entrance_bridge,
-                (unsigned long)g_b79_direct_bad
+                "PRES g:%u,%u l:%u,%u d:%lu,%lu p:%lu nz:%lu/%lu\n",
+                fm_gpu_display_x(),
+                fm_gpu_display_y(),
+                g_b84_latch_x,
+                g_b84_latch_y,
+                (unsigned long)g_b13544_last_draw_x,
+                (unsigned long)g_b13576_last_draw_y,
+                (unsigned long)g_b13578_last_pick,
+                (unsigned long)g_b13578_last_current_nz,
+                (unsigned long)g_b13578_last_draw_nz
             );
 
-            printf(
-                "GPU words:%llu DMA2:%lu\n",
-                (unsigned long long)gpu_debug.gp0_words,
-                (unsigned long)g_b78_dma_wait_samples
-            );
+            /*
+             * B135.79 - dialogue pipeline.
+             * Sample guest display-object lists only on this compact debug
+             * refresh.  The helper is bounded to 0x60 nodes/list.
+             */
+            {
+                static const uint32_t heads79[7] =
+                {
+                    0x800F11C0u, 0x800F11C2u,
+                    0x800F11C4u, 0x800F11C6u,
+                    0x800F11C8u, 0x800F11CAu,
+                    0x800F11CCu
+                };
 
-            printf(
-                "B115 1s c:%lu sum R/P/M:%llu/%llu/%llu\n",
-                (unsigned long)g_b115_last_calls,
-                (unsigned long long)g_b115_last_repair_ms,
-                (unsigned long long)g_b115_last_submit_ms,
-                (unsigned long long)g_b115_last_merge_ms
-            );
+                uint32_t nodes79[7] = {0u,0u,0u,0u,0u,0u,0u};
+                uint32_t draw79[7] = {0u,0u,0u,0u,0u,0u,0u};
+                uint32_t total_nodes79 = 0u;
+                uint32_t total_draw79 = 0u;
 
-            printf(
-                "B115 max R/P/M:%lu/%lu/%lu slow:%lu\n",
-                (unsigned long)g_b115_last_repair_max_ms,
-                (unsigned long)g_b115_last_submit_max_ms,
-                (unsigned long)g_b115_last_merge_max_ms,
-                (unsigned long)g_b115_slow_total_ms
-            );
+                for (unsigned i79 = 0u; i79 < 7u; ++i79)
+                {
+                    b13549_obj_list_probe(
+                        cpu,
+                        heads79[i79],
+                        NULL,
+                        &nodes79[i79],
+                        &draw79[i79],
+                        NULL,
+                        NULL
+                    );
 
-            printf(
-                "B115 slow R/P/M:%lu/%lu/%lu N/P/W:%lu/%lu/%lu\n",
-                (unsigned long)g_b115_slow_repair_ms,
-                (unsigned long)g_b115_slow_submit_ms,
-                (unsigned long)g_b115_slow_merge_ms,
-                (unsigned long)g_b115_slow_nodes,
-                (unsigned long)g_b115_slow_packets,
-                (unsigned long)g_b115_slow_words
-            );
+                    total_nodes79 += nodes79[i79];
+                    total_draw79 += draw79[i79];
+                }
 
-            printf(
-                "B115 OT:%08lX>%08lX D/E/O:%lu/%lu/%lu C:%ld\n",
-                (unsigned long)g_b115_slow_src,
-                (unsigned long)g_b115_slow_dst,
-                (unsigned long)g_b115_slow_draw,
-                (unsigned long)g_b115_slow_env,
-                (unsigned long)g_b115_slow_other,
-                (long)g_b115_slow_native_code
-            );
+                printf(
+                    "OBJ79 n:%lu/%lu/%lu/%lu/%lu/%lu/%lu d:%lu/%lu\n",
+                    (unsigned long)nodes79[0],
+                    (unsigned long)nodes79[1],
+                    (unsigned long)nodes79[2],
+                    (unsigned long)nodes79[3],
+                    (unsigned long)nodes79[4],
+                    (unsigned long)nodes79[5],
+                    (unsigned long)nodes79[6],
+                    (unsigned long)total_nodes79,
+                    (unsigned long)total_draw79
+                );
 
-            printf(
-                "B119 Csort c/ok/fb:%lu/%lu/%lu N:%lu/%lu code:%ld\n",
-                (unsigned long)g_b119_csort_calls,
-                (unsigned long)g_b119_csort_ok,
-                (unsigned long)g_b119_csort_fallbacks,
-                (unsigned long)g_b119_csort_last_nodes,
-                (unsigned long)g_b119_csort_max_nodes,
-                (long)g_b119_csort_last_code
-            );
+                /*
+                 * B135.80 - inspect the exact function-pointer slot used for
+                 * list C2.  No mutation: this is a read-only discriminator.
+                 */
+                uint32_t tab_c0 =
+                    cpu ? cpu->read_word(0x800923DCu) : 0u;
+                uint32_t tab_c2 =
+                    cpu ? cpu->read_word(0x800923E0u) : 0u;
+                uint32_t tab_c4 =
+                    cpu ? cpu->read_word(0x800923E4u) : 0u;
+                uint32_t tab_cc =
+                    cpu ? cpu->read_word(0x800923F4u) : 0u;
+
+                int c2_head =
+                    cpu
+                        ? (int16_t)cpu->read_half(0x800F11C2u)
+                        : -1;
+
+                uint32_t d41674 =
+                    g_b13580_hit_41674 - g_b13580_prev_41674;
+
+                printf(
+                    "TAB80 c0/c2/c4/cc:%05lX/%05lX/%05lX/%05lX\n",
+                    (unsigned long)(tab_c0 & 0x1FFFFFu),
+                    (unsigned long)(tab_c2 & 0x1FFFFFu),
+                    (unsigned long)(tab_c4 & 0x1FFFFFu),
+                    (unsigned long)(tab_cc & 0x1FFFFFu)
+                );
+
+                printf(
+                    "C2TAB h:%d ptr:%08lX exp:800408BC ent:%d r416:%lu\n",
+                    c2_head,
+                    (unsigned long)tab_c2,
+                    psx_game_is_function_entry(0x800408BCu),
+                    (unsigned long)d41674
+                );
+
+                uint32_t d40b48 =
+                    g_b72_hit_40b48 - g_b13579_prev_40b48;
+                uint32_t d408bc =
+                    g_b13579_hit_408bc - g_b13579_prev_408bc;
+                uint32_t d40f2c =
+                    g_b13579_hit_40f2c - g_b13579_prev_40f2c;
+                uint32_t d4110c =
+                    g_b13579_hit_4110c - g_b13579_prev_4110c;
+                uint32_t d4139c =
+                    g_b13579_hit_4139c - g_b13579_prev_4139c;
+                uint32_t d41048 =
+                    g_b13551_hit_41048 - g_b13579_prev_41048;
+
+                printf(
+                    "WALK79 b48/8bc/f2c/10c/39c/048:%lu/%lu/%lu/%lu/%lu/%lu\n",
+                    (unsigned long)d40b48,
+                    (unsigned long)d408bc,
+                    (unsigned long)d40f2c,
+                    (unsigned long)d4110c,
+                    (unsigned long)d4139c,
+                    (unsigned long)d41048
+                );
+
+                uint32_t drect79 =
+                    gpu_debug.b124_rect_hits - g_b13579_prev_rect;
+                uint32_t dquad79 =
+                    gpu_debug.b125_texquad_hits - g_b13579_prev_quad;
+                uint32_t d2c79 =
+                    gpu_debug.b126_seen_2c - g_b13579_prev_2c;
+                uint32_t d3a79 =
+                    gpu_debug.b126_seen_3a - g_b13579_prev_3a;
+
+                printf(
+                    "GP2D79 rect/q/2c/3a:%lu/%lu/%lu/%lu\n",
+                    (unsigned long)drect79,
+                    (unsigned long)dquad79,
+                    (unsigned long)d2c79,
+                    (unsigned long)d3a79
+                );
+
+                g_b13580_prev_41674 = g_b13580_hit_41674;
+
+                g_b13579_prev_40b48 = g_b72_hit_40b48;
+                g_b13579_prev_408bc = g_b13579_hit_408bc;
+                g_b13579_prev_40f2c = g_b13579_hit_40f2c;
+                g_b13579_prev_4110c = g_b13579_hit_4110c;
+                g_b13579_prev_4139c = g_b13579_hit_4139c;
+                g_b13579_prev_41048 = g_b13551_hit_41048;
+
+                g_b13579_prev_rect = gpu_debug.b124_rect_hits;
+                g_b13579_prev_quad = gpu_debug.b125_texquad_hits;
+                g_b13579_prev_2c = gpu_debug.b126_seen_2c;
+                g_b13579_prev_3a = gpu_debug.b126_seen_3a;
+            }
 
             {
-                FMDmaDebugStats b118_dma = {0};
-                fm_memory_dma_debug(&b118_dma);
+                uint32_t d_swap =
+                    g_b131_swap_count - g_b1359_prev_swap;
+
+                uint32_t d_vsc =
+                    g_b1358_vsync_completions - g_b1359_prev_vsc;
+
+                uint64_t d_gp0 =
+                    gpu_debug.gp0_words - g_b1359_prev_gp0;
+
+                uint64_t d_pixels =
+                    gpu_debug.b125_pixels - g_b13513_prev_pixels;
+
+                uint64_t d_region_chunks =
+                    g_b13517_interp_blocks
+                    -
+                    g_b13519_prev_region_chunks;
+
+                uint64_t d_region_instructions =
+                    g_b13519_region_instructions
+                    -
+                    g_b13519_prev_region_instructions;
 
                 printf(
-                    "B118 DMA2 LL:%lu last N/W:%lu/%lu max:%lu/%lu\n",
-                    (unsigned long)b118_dma.dma2_linked_transfer_count,
-                    (unsigned long)b118_dma.dma2_last_nodes,
-                    (unsigned long)b118_dma.dma2_last_words,
-                    (unsigned long)b118_dma.dma2_max_nodes,
-                    (unsigned long)b118_dma.dma2_max_words
+                    "PERF pre/rend/vb/gfx/wait:%lu/%lu/%lu/%lu/%lu late:%lu\n",
+                    (unsigned long)g_b106_pre_gfx_ms,
+                    (unsigned long)g_b105_render_ms,
+                    (unsigned long)g_b105_vblank_ms,
+                    (unsigned long)g_b106_gfx_ms,
+                    (unsigned long)g_b106_wait_ms,
+                    (unsigned long)g_b13518_late_vblank_skips
                 );
 
                 printf(
-                    "B118 CYCLE:%lu @%06lX CHCR:%08lX\n",
-                    (unsigned long)b118_dma.dma2_cycle_abort_count,
-                    (unsigned long)b118_dma.dma2_last_cycle_addr,
-                    (unsigned long)b118_dma.dma2_chcr
+                    "D120 swap/vsc/gp0/pix:%lu/%lu/%llu/%llu\n",
+                    (unsigned long)d_swap,
+                    (unsigned long)d_vsc,
+                    (unsigned long long)d_gp0,
+                    (unsigned long long)d_pixels
                 );
+
+                printf(
+                    "D120 rgch/ins:%llu/%llu\n",
+                    (unsigned long long)d_region_chunks,
+                    (unsigned long long)d_region_instructions
+                );
+
+                printf(
+                    "CHAIN4 e/d/m:%lu/%llu/%lu samples:%lu\n",
+                    (unsigned long)g_b13514_chain_entries,
+                    (unsigned long long)g_b13514_chain_dispatches,
+                    (unsigned long)g_b13514_chain_max,
+                    (unsigned long)g_b13516_exit_samples
+                );
+
+                printf(
+                    "IRGN ent/ch/max/y:%lu/%llu/%lu/%lu\n",
+                    (unsigned long)g_b13517_interp_entries,
+                    (unsigned long long)g_b13517_interp_blocks,
+                    (unsigned long)g_b13517_interp_max,
+                    (unsigned long)g_b13517_interp_time_yields
+                );
+
+                printf(
+                    "IRGN ins:%llu\n",
+                    (unsigned long long)g_b13519_region_instructions
+                );
+
+                {
+                    unsigned top1 = 8u;
+                    unsigned top2 = 8u;
+
+                    for (unsigned i = 0u; i < 8u; ++i)
+                    {
+                        if (
+                            g_b13525_interp_pc[i] == 0u
+                            ||
+                            g_b13525_interp_ins[i] == 0u
+                        )
+                        {
+                            continue;
+                        }
+
+                        if (
+                            top1 == 8u
+                            ||
+                            g_b13525_interp_ins[i]
+                                > g_b13525_interp_ins[top1]
+                        )
+                        {
+                            top2 = top1;
+                            top1 = i;
+                        }
+                        else if (
+                            top2 == 8u
+                            ||
+                            g_b13525_interp_ins[i]
+                                > g_b13525_interp_ins[top2]
+                        )
+                        {
+                            top2 = i;
+                        }
+                    }
+
+                    printf(
+                        "IRPC top:%06lX/%lu/%llu %06lX/%lu/%llu\n",
+                        (unsigned long)(
+                            top1 < 8u ? g_b13525_interp_pc[top1] : 0u
+                        ),
+                        (unsigned long)(
+                            top1 < 8u ? g_b13525_interp_hits[top1] : 0u
+                        ),
+                        (unsigned long long)(
+                            top1 < 8u ? g_b13525_interp_ins[top1] : 0u
+                        ),
+                        (unsigned long)(
+                            top2 < 8u ? g_b13525_interp_pc[top2] : 0u
+                        ),
+                        (unsigned long)(
+                            top2 < 8u ? g_b13525_interp_hits[top2] : 0u
+                        ),
+                        (unsigned long long)(
+                            top2 < 8u ? g_b13525_interp_ins[top2] : 0u
+                        )
+                    );
+                }
+
+                printf(
+                    "EXIT top:%06lX/%lu %06lX/%lu\n",
+                    (unsigned long)g_b13516_exit_pc[0],
+                    (unsigned long)g_b13516_exit_weight[0],
+                    (unsigned long)g_b13516_exit_pc[1],
+                    (unsigned long)g_b13516_exit_weight[1]
+                );
+
+                printf(
+                    "ENTRY 34D7C/D30/A14/57B80:%d/%d/%d/%d\n",
+                    psx_game_is_function_entry(0x80034D7Cu),
+                    psx_game_is_function_entry(0x80034D30u),
+                    psx_game_is_function_entry(0x80034A14u),
+                    psx_game_is_function_entry(0x80057B80u)
+                );
+
+                g_b1359_prev_swap = g_b131_swap_count;
+                g_b1359_prev_vsc = g_b1358_vsync_completions;
+                g_b1359_prev_gp0 = gpu_debug.gp0_words;
+                g_b13513_prev_pixels = gpu_debug.b125_pixels;
+                g_b13519_prev_region_chunks = g_b13517_interp_blocks;
+                g_b13519_prev_region_instructions =
+                    g_b13519_region_instructions;
             }
+
+            printf(
+                "PACING swap/dirty/skip:%lu/%lu/%lu VSL:%lu VSC:%lu\n",
+                (unsigned long)g_b131_swap_count,
+                (unsigned long)g_b131_dirty_present_count,
+                (unsigned long)g_b131_skip_count,
+                (unsigned long)g_b1357_vsync_latches,
+                (unsigned long)g_b1358_vsync_completions
+            );
+
+            printf(
+                "FAST rect:%lu quadT/G:%lu/%lu fill:%lu/%lu\n",
+                (unsigned long)gpu_debug.b124_rect_hits,
+                (unsigned long)gpu_debug.b125_texquad_hits,
+                (unsigned long)gpu_debug.b125_gouraud_hits,
+                (unsigned long)gpu_debug.b129_fill_hits,
+                (unsigned long)gpu_debug.b129_fill_fallbacks
+            );
+
+            printf(
+                "SEEN 2C/2E/3A:%lu/%lu/%lu mode:%d/%d/%d\n",
+                (unsigned long)gpu_debug.b126_seen_2c,
+                (unsigned long)gpu_debug.b126_seen_2e,
+                (unsigned long)gpu_debug.b126_seen_3a,
+                gpu_debug.b126_scale,
+                gpu_debug.b126_wide,
+                gpu_debug.b126_filter
+            );
+
+            printf(
+                "FILL px:%llu zero:%llu max:%lu\n",
+                (unsigned long long)gpu_debug.b129_fill_pixels,
+                (unsigned long long)gpu_debug.b129_fill_zero_pixels,
+                (unsigned long)gpu_debug.b129_fill_max_pixels
+            );
+
+            printf(
+                "DMA2 LL:%lu N/W:%lu/%lu ms:%lu/%lu\n",
+                (unsigned long)b130_dma.dma2_linked_transfer_count,
+                (unsigned long)b130_dma.dma2_last_nodes,
+                (unsigned long)b130_dma.dma2_last_words,
+                (unsigned long)b130_dma.dma2_linked_last_ms,
+                (unsigned long)b130_dma.dma2_linked_max_ms
+            );
+
+            printf(
+                "DMA2 >20/33:%lu/%lu cyc:%lu OT:%lu skip:%lu\n",
+                (unsigned long)b130_dma.dma2_linked_over20,
+                (unsigned long)b130_dma.dma2_linked_over33,
+                (unsigned long)b130_dma.dma2_cycle_abort_count,
+                (unsigned long)b130_dma.dma2_last_empty_ot_nodes,
+                (unsigned long)b130_dma.dma2_empty_fast_max
+            );
+
+#if FM_PERF_PROFILE
+            {
+                FMGpuOpcodePerf hot0 = {0};
+                FMGpuOpcodePerf hot1 = {0};
+
+                fm_gpu_b122_rank(0u, &hot0);
+                fm_gpu_b122_rank(1u, &hot1);
+
+                printf(
+                    "GHOT %02X c/t/m:%lu/%llu/%lu\n",
+                    (unsigned)hot0.opcode,
+                    (unsigned long)hot0.calls,
+                    (unsigned long long)hot0.total_us,
+                    (unsigned long)hot0.max_us
+                );
+
+                printf(
+                    "GHOT2 %02X c/t/m:%lu/%llu/%lu\n",
+                    (unsigned)hot1.opcode,
+                    (unsigned long)hot1.calls,
+                    (unsigned long long)hot1.total_us,
+                    (unsigned long)hot1.max_us
+                );
+
+                {
+                    uint64_t g34_setup_us = 0u;
+                    uint64_t g34_raster_us = 0u;
+                    uint64_t g34_fast_pixels = 0u;
+                    uint32_t g34_samples = 0u;
+                    uint32_t g34_calls = 0u;
+                    uint32_t g34_fast_hits = 0u;
+                    uint32_t g34_d0 = 0u;
+                    uint32_t g34_d1 = 0u;
+                    uint32_t g34_d2 = 0u;
+
+                    fm_gpu_b13534_profile(
+                        &g34_setup_us,
+                        &g34_raster_us,
+                        &g34_samples,
+                        &g34_calls,
+                        &g34_fast_hits,
+                        &g34_fast_pixels,
+                        &g34_d0,
+                        &g34_d1,
+                        &g34_d2
+                    );
+
+                    /*
+                     * B135.42 - locate the missing dialogue/card layer.
+                     *
+                     * B135.40/41 proved the presenter is not the root cause:
+                     * at the missing-UI screens both nominal framebuffer pages
+                     * can be empty while the guest still submits textured 2D
+                     * primitives.  Probe all six 320x240 VRAM windows and the
+                     * last large textured rectangle, including its texture
+                     * source/CLUT contents.
+                     */
+                    uint32_t vr6[6] = {0u,0u,0u,0u,0u,0u};
+                    static const unsigned vr6_x[3] = {0u,320u,640u};
+                    static const unsigned vr6_y[2] = {0u,256u};
+
+                    for (unsigned yi = 0u; yi < 2u; ++yi)
+                    {
+                        for (unsigned xi = 0u; xi < 3u; ++xi)
+                        {
+                            uint32_t nz = 0u;
+
+                            for (unsigned py = 0u; py < 240u; py += 4u)
+                            {
+                                const uint16_t *row =
+                                    vram
+                                    +
+                                    (vr6_y[yi] + py) * 1024u
+                                    +
+                                    vr6_x[xi];
+
+                                for (unsigned px = 0u; px < 320u; px += 4u)
+                                {
+                                    if ((row[px] & 0x7FFFu) != 0u)
+                                    {
+                                        ++nz;
+                                    }
+                                }
+                            }
+
+                            vr6[yi * 3u + xi] = nz;
+                        }
+                    }
+
+                    printf(
+                        "VR6 A:%lu/%lu/%lu B:%lu/%lu/%lu\n",
+                        (unsigned long)vr6[0],
+                        (unsigned long)vr6[1],
+                        (unsigned long)vr6[2],
+                        (unsigned long)vr6[3],
+                        (unsigned long)vr6[4],
+                        (unsigned long)vr6[5]
+                    );
+
+                    {
+                        int env_ox = 0, env_oy = 0;
+                        int env_x1 = 0, env_y1 = 0, env_x2 = 0, env_y2 = 0;
+                        uint32_t env_e3 = 0u, env_e4 = 0u, env_e5 = 0u, env_05 = 0u;
+                        uint32_t last_e3 = 0u, last_e4 = 0u, last_e5 = 0u, last_05 = 0u;
+
+                        fm_gpu_b100_env_get(
+                            &env_ox, &env_oy,
+                            &env_x1, &env_y1,
+                            &env_x2, &env_y2,
+                            &env_e3, &env_e4, &env_e5, &env_05,
+                            &last_e3, &last_e4, &last_e5, &last_05
+                        );
+
+                        printf(
+                            "ENV dE3/4/5/05:%lu/%lu/%lu/%lu last05:%08lX\n",
+                            (unsigned long)(env_e3 - g_b13547_prev_e3),
+                            (unsigned long)(env_e4 - g_b13547_prev_e4),
+                            (unsigned long)(env_e5 - g_b13547_prev_e5),
+                            (unsigned long)(env_05 - g_b13547_prev_05),
+                            (unsigned long)last_05
+                        );
+
+                        printf(
+                            "ENV off:%d,%d area:%d,%d-%d,%d\n",
+                            env_ox, env_oy,
+                            env_x1, env_y1, env_x2, env_y2
+                        );
+
+                        printf(
+                            "SORT G ok/f/c:%lu/%lu/%ld C ok/f/c:%lu/%lu/%ld\n",
+                            (unsigned long)g_sort_native_ok,
+                            (unsigned long)g_sort_native_fail,
+                            (long)g_sort_native_last_code,
+                            (unsigned long)g_b119_csort_ok,
+                            (unsigned long)g_b119_csort_fallbacks,
+                            (long)g_b119_csort_last_code
+                        );
+
+                        {
+                            int oh[7] = {-1,-1,-1,-1,-1,-1,-1};
+                            uint32_t on[7] = {0u,0u,0u,0u,0u,0u,0u};
+                            uint32_t od[7] = {0u,0u,0u,0u,0u,0u,0u};
+                            uint32_t ob[7] = {0u,0u,0u,0u,0u,0u,0u};
+                            uint32_t om[7] = {0u,0u,0u,0u,0u,0u,0u};
+
+                            static const uint32_t heads[7] =
+                            {
+                                0x800F11C0u, 0x800F11C2u,
+                                0x800F11C4u, 0x800F11C6u,
+                                0x800F11C8u, 0x800F11CAu,
+                                0x800F11CCu
+                            };
+
+                            for (unsigned oi = 0u; oi < 7u; ++oi)
+                            {
+                                b13549_obj_list_probe(
+                                    cpu,
+                                    heads[oi],
+                                    &oh[oi],
+                                    &on[oi],
+                                    &od[oi],
+                                    &ob[oi],
+                                    &om[oi]
+                                );
+                            }
+
+                            printf(
+                                "OBJ N c0..cc:%lu/%lu/%lu/%lu/%lu/%lu/%lu\n",
+                                (unsigned long)on[0],
+                                (unsigned long)on[1],
+                                (unsigned long)on[2],
+                                (unsigned long)on[3],
+                                (unsigned long)on[4],
+                                (unsigned long)on[5],
+                                (unsigned long)on[6]
+                            );
+
+                            /*
+                             * B135.71 - correlate the live hand with the
+                             * 80012D60 submit gate, and force gate=1 only
+                             * when a valid 52x60 hand is waiting in slot 1.
+                             */
+                            uint32_t h71 = 0u;
+                            uint32_t g0_71 = 0u;
+                            uint32_t g1_71 = 0u;
+                            uint32_t g80_71 = 0u;
+                            uint32_t go_71 = 0u;
+                            uint32_t force71 = 0u;
+                            uint32_t pkt71 = 0u;
+                            uint32_t gb71 = 0u;
+                            uint32_t ga71 = 0u;
+
+                            fm_runtime_b13571_gate(
+                                &h71,
+                                &g0_71,
+                                &g1_71,
+                                &g80_71,
+                                &go_71,
+                                &force71,
+                                &pkt71,
+                                &gb71,
+                                &ga71
+                            );
+
+                            printf(
+                                "CARD c/d:%lu/%lu P849:%lu DMA:%lu\n",
+                                (unsigned long)g_b13553_hit_16c20,
+                                (unsigned long)g_b13553_hit_166a0,
+                                (unsigned long)g_b13556_hand_84978,
+                                (unsigned long)b130_dma.b13554_hand_total_hits
+                            );
+
+                            printf(
+                                "HAND@D60:%lu gate 0/1/80/o:%lu/%lu/%lu/%lu\n",
+                                (unsigned long)h71,
+                                (unsigned long)g0_71,
+                                (unsigned long)g1_71,
+                                (unsigned long)g80_71,
+                                (unsigned long)go_71
+                            );
+
+                            printf(
+                                "FORCE:%lu last gate:%02lX>%02lX pkt:%05lX\n",
+                                (unsigned long)force71,
+                                (unsigned long)(gb71 & 0xFFu),
+                                (unsigned long)(ga71 & 0xFFu),
+                                (unsigned long)(pkt71 & 0xFFFFFu)
+                            );
+
+                            printf(
+                                "SORT G ok/f/c:%lu/%lu/%lu C ok/f/c:%lu/%lu/%lu\n",
+                                (unsigned long)g_sort_native_ok,
+                                (unsigned long)g_sort_native_fail,
+                                (unsigned long)g_sort_native_calls,
+                                (unsigned long)g_b119_csort_ok,
+                                (unsigned long)g_b119_csort_fallbacks,
+                                (unsigned long)g_b119_csort_calls
+                            );
+
+                            printf(
+                                "SUBMIT 4B8:%02X 6A0:%02X base:%05lX slot1:%05lX\n",
+                                (unsigned)cpu->read_byte(0x8009C4B8u),
+                                (unsigned)cpu->read_byte(0x8009C6A0u),
+                                (unsigned long)(
+                                    cpu->read_word(0x8009C414u)
+                                    & 0xFFFFFu
+                                ),
+                                (unsigned long)(
+                                    cpu->read_word(0x8009C85Cu)
+                                    & 0xFFFFFu
+                                )
+                            );
+
+                            printf(
+                                "BASE:%06lX idx:%lu B135.71 force-gate\n",
+                                (unsigned long)(
+                                    cpu->read_word(0x8009C414u)
+                                    & 0x1FFFFFu
+                                ),
+                                (unsigned long)cpu->read_byte(0x8009C332u)
+                            );
+                        }
+
+                        g_b13547_prev_e3 = env_e3;
+                        g_b13547_prev_e4 = env_e4;
+                        g_b13547_prev_e5 = env_e5;
+                        g_b13547_prev_05 = env_05;
+                    }
+
+                    g_b13540_prev_rect =
+                        gpu_debug.b124_rect_hits;
+
+                    g_b13540_prev_quad =
+                        gpu_debug.b125_texquad_hits;
+
+                    g_b13540_prev_2c =
+                        gpu_debug.b126_seen_2c;
+
+                    g_b13540_prev_3a =
+                        gpu_debug.b126_seen_3a;
+                }
+            }
+#endif /* FM_PERF_PROFILE */
 
             /*
              * Les anciens diagnostics restent dans le fichier pour
@@ -15644,6 +19608,125 @@ int main(void)
 
             }
 
+            /* B135.86: keep the actual script/glyph path visible. */
+#if FM_PERF_PROFILE
+            {
+                FMTextTrace t86 = {0};
+                fm_runtime_text_trace_get(&t86);
+                int h86 = cpu ? (int16_t)cpu->read_half(0x800F11CCu) : -1;
+                uint32_t obj86 = (h86 >= 0 && h86 < 0x60)
+                    ? 0x800F1210u + (uint32_t)h86 * 0x70u : 0u;
+                uint32_t glyph_count86 = 0u;
+                if (t86.glyph_write >= 0x800EC390u &&
+                    t86.glyph_write < 0x800F0000u)
+                    glyph_count86 = (t86.glyph_write - 0x800EC390u) / 0x16u;
+                printf("\x1b[H\x1b[2K B135.87 TEXT / BLACK PAGE DIAG\n");
+                printf("\x1b[2K RUN:%u MEM:%d QS rc:%ld S/L:%lu/%lu\n",
+                       (unsigned)game_running, memory_status,
+                       (long)g_b135_qs_last_result,
+                       (unsigned long)g_b135_qs_save_count,
+                       (unsigned long)g_b135_qs_load_count);
+                /* Four canonical PS1 pages, the exact GP1 view, and the
+                 * stable host composite. One pixel per 8x8 block. */
+                uint32_t nz87[6] = {0u, 0u, 0u, 0u, 0u, 0u};
+                unsigned gp1x87 = fm_gpu_display_x();
+                unsigned gp1y87 = fm_gpu_display_y();
+                for (unsigned y87 = 0u; y87 < 240u; y87 += 8u)
+                    for (unsigned x87 = 0u; x87 < 320u; x87 += 8u)
+                    {
+                        for (unsigned page87 = 0u; page87 < 4u; ++page87)
+                        {
+                            unsigned px87 = (page87 & 1u) ? 320u : 0u;
+                            unsigned py87 = (page87 & 2u) ? 256u : 0u;
+                            if ((vram[(py87 + y87) * 1024u + px87 + x87]
+                                 & 0x7FFFu) != 0u)
+                                ++nz87[page87];
+                        }
+                        if (gp1x87 + x87 < 1024u && gp1y87 + y87 < 512u &&
+                            (vram[(gp1y87 + y87) * 1024u + gp1x87 + x87]
+                             & 0x7FFFu) != 0u)
+                            ++nz87[4];
+                        if (g_b84_latch_valid &&
+                            (composite[y87 * 320u + x87] & 0x7FFFu) != 0u)
+                            ++nz87[5];
+                    }
+                printf("\x1b[2K VRAM 0/320 y0:%lu/%lu y256:%lu/%lu\n",
+                       (unsigned long)nz87[0], (unsigned long)nz87[1],
+                       (unsigned long)nz87[2], (unsigned long)nz87[3]);
+                printf("\x1b[2K GP1/composite nz:%lu/%lu latch:%u,%u valid:%lu\n",
+                       (unsigned long)nz87[4], (unsigned long)nz87[5],
+                       g_b84_latch_x, g_b84_latch_y,
+                       (unsigned long)g_b84_latch_valid);
+                printf("\x1b[2K frame:%lu vsync wait:%d target:%lu done:%lu\n",
+                       (unsigned long)frame, g_vsync_wait_active,
+                       (unsigned long)g_vsync_wait_until_frame,
+                       (unsigned long)g_b1358_vsync_completions);
+                printf("\x1b[2K latch/present/skip:%lu/%lu/%lu pick:%lu\n",
+                       (unsigned long)g_b84_latch_count,
+                       (unsigned long)g_b86_present_count,
+                       (unsigned long)g_b86_skipped_presents,
+                       (unsigned long)g_b13578_last_pick);
+                printf("\x1b[2K PC:%08lX RA:%08lX cat6 head:%d\n",
+                       (unsigned long)(cpu ? cpu->pc : 0u),
+                       (unsigned long)(cpu ? cpu->gpr[31] : 0u), h86);
+                printf("\x1b[2K script tick gen/outer:%lu/%lu setup:%lu/%lu\n",
+                       (unsigned long)t86.gen[0], (unsigned long)t86.outer[0],
+                       (unsigned long)t86.gen[1], (unsigned long)t86.outer[1]);
+                printf("\x1b[2K char gen/outer:%lu/%lu last:%08lX\n",
+                       (unsigned long)t86.gen[2], (unsigned long)t86.outer[2],
+                       (unsigned long)t86.last_char);
+                printf("\x1b[2K cat6 walker gen/outer:%lu/%lu draw:%lu/%lu\n",
+                       (unsigned long)t86.gen[3], (unsigned long)t86.outer[3],
+                       (unsigned long)t86.gen[4], (unsigned long)t86.outer[4]);
+                printf("\x1b[2K cat6 create gen/outer:%lu/%lu remove:%lu/%lu\n",
+                       (unsigned long)t86.gen[5], (unsigned long)t86.outer[5],
+                       (unsigned long)t86.gen[6], (unsigned long)t86.outer[6]);
+                printf("\x1b[2K compiled tick/setup/char/walk/draw:%d/%d/%d/%d/%d\n",
+                       psx_game_is_function_entry(0x800393B8u),
+                       psx_game_is_function_entry(0x800391ECu),
+                       psx_game_is_function_entry(0x80036C64u),
+                       psx_game_is_function_entry(0x80041048u),
+                       psx_game_is_function_entry(0x80036298u));
+                printf("\x1b[2K last ctx:%08lX fl/id/state:%04lX/%04lX/%02lX\n",
+                       (unsigned long)t86.script_ctx,
+                       (unsigned long)t86.script_flags,
+                       (unsigned long)t86.script_id,
+                       (unsigned long)t86.script_state);
+                printf("\x1b[2K script ptr/byte:%08lX/%02lX textobj:%08lX\n",
+                       (unsigned long)t86.script_ptr,
+                       (unsigned long)t86.script_next_byte,
+                       (unsigned long)t86.text_object);
+                printf("\x1b[2K glyph write:%08lX rec:%lu draw RA:%08lX\n",
+                       (unsigned long)t86.glyph_write,
+                       (unsigned long)glyph_count86,
+                       (unsigned long)t86.last_render_ra);
+                printf("\x1b[2K obj6 fl/cb4C:%04X/%08lX\n",
+                       obj86 ? cpu->read_half(obj86 + 8u) : 0u,
+                       (unsigned long)(obj86 ? cpu->read_word(obj86 + 0x4Cu) : 0u));
+                printf("\x1b[2K create idx/RA:%lu/%08lX remove idx/fl/RA:%lu/%04lX/%08lX\n",
+                       (unsigned long)t86.last_create_index,
+                       (unsigned long)t86.last_create_ra,
+                       (unsigned long)t86.last_remove_index,
+                       (unsigned long)t86.last_remove_flags,
+                       (unsigned long)t86.last_remove_ra);
+                for (unsigned slot86 = 0; cpu && slot86 < 1u; ++slot86)
+                {
+                    uint32_t ctx86 = 0x800F0850u + slot86 * 100u;
+                    printf("\x1b[2K slot%u fl/id:%04X/%04X state:%02X obj:%08lX glyph:%08lX\n",
+                           slot86, cpu->read_half(ctx86 + 0x34u),
+                           cpu->read_half(ctx86 + 0x36u),
+                           cpu->read_byte(ctx86 + 0x51u),
+                           (unsigned long)cpu->read_word(ctx86 + 0x28u),
+                           (unsigned long)cpu->read_word(ctx86 + 0x20u));
+                }
+                printf("\x1b[2K GP0:%llu rect/quad:%lu/%lu display:%u,%u\n",
+                       (unsigned long long)gpu_debug.gp0_words,
+                       (unsigned long)gpu_debug.b124_rect_hits,
+                       (unsigned long)gpu_debug.b125_texquad_hits,
+                       fm_gpu_display_x(), fm_gpu_display_y());
+            }
+#endif
+
             /*
              * Reset des compteurs de mesure de rendu sans
              * consommer une ligne supplémentaire à l'écran.
@@ -15984,36 +20067,41 @@ int main(void)
             uint64_t b106_gfx_start_ms =
                 osGetTime();
 
-            uint8_t *top_fb =
-                gfxGetFramebuffer(
-                    GFX_TOP,
-                    GFX_LEFT,
-                    NULL,
-                    NULL
-                );
+            if (b131_presented_this_loop)
+            {
+                uint8_t *top_fb =
+                    gfxGetFramebuffer(
+                        GFX_TOP,
+                        GFX_LEFT,
+                        NULL,
+                        NULL
+                    );
 
-            unsigned top_bpp =
-                gspGetBytesPerPixel(
-                    gfxGetScreenFormat(
-                        GFX_TOP
+                unsigned top_bpp =
+                    gspGetBytesPerPixel(
+                        gfxGetScreenFormat(
+                            GFX_TOP
+                        )
+                    );
+
+                GSPGPU_FlushDataCache(
+                    top_fb,
+                    (u32)(
+                        GSP_SCREEN_WIDTH
+                        *
+                        GSP_SCREEN_HEIGHT_TOP
+                        *
+                        top_bpp
                     )
                 );
 
-            GSPGPU_FlushDataCache(
-                top_fb,
-                (u32)(
-                    GSP_SCREEN_WIDTH
-                    *
-                    GSP_SCREEN_HEIGHT_TOP
-                    *
-                    top_bpp
-                )
-            );
+                gfxScreenSwapBuffers(
+                    GFX_TOP,
+                    false
+                );
 
-            gfxScreenSwapBuffers(
-                GFX_TOP,
-                false
-            );
+                ++g_b131_swap_count;
+            }
 
             g_b106_gfx_ms =
                 (uint32_t)(
@@ -16031,17 +20119,31 @@ int main(void)
             );
 
         {
-            uint64_t b106_wait_start_ms =
-                osGetTime();
+            /*
+             * B135.18:
+             * If the guest work already took >= 16 ms, we have missed the
+             * current 60 Hz budget. Do not idle until another VBlank; start
+             * the next guest slice immediately.
+             */
+            if (g_b105_work_ms < 16u)
+            {
+                uint64_t b106_wait_start_ms =
+                    osGetTime();
 
-            gspWaitForVBlank();
+                gspWaitForVBlank();
 
-            g_b106_wait_ms =
-                (uint32_t)(
-                    osGetTime()
-                    -
-                    b106_wait_start_ms
-                );
+                g_b106_wait_ms =
+                    (uint32_t)(
+                        osGetTime()
+                        -
+                        b106_wait_start_ms
+                    );
+            }
+            else
+            {
+                g_b106_wait_ms = 0u;
+                ++g_b13518_late_vblank_skips;
+            }
         }
 
         g_b105_loop_ms =

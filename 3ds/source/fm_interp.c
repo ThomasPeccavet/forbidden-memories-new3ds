@@ -1,6 +1,203 @@
 #include "fm_interp.h"
 
 #include <stdint.h>
+#include <string.h>
+
+/*
+ * B135.1 - le GPF de la scene Simon peut etre repris par le fallback
+ * R3000A apres un stop du code ARM recompile. On reutilise exactement
+ * le meme helper GTE que le chemin natif, mais uniquement pour GPF.
+ */
+extern void gte_execute(
+    CPUState *cpu,
+    uint32_t cmd
+);
+
+extern uint32_t gte_read_data(
+    CPUState *cpu,
+    uint8_t reg
+);
+
+extern uint32_t gte_read_ctrl(
+    CPUState *cpu,
+    uint8_t reg
+);
+
+extern void gte_write_data(
+    CPUState *cpu,
+    uint8_t reg,
+    uint32_t value
+);
+
+extern void gte_write_ctrl(
+    CPUState *cpu,
+    uint8_t reg,
+    uint32_t value
+);
+
+
+/*
+ * ============================================================
+ * B135.18 - direct RAM fast path for the hot fallback interpreter
+ * ============================================================
+ */
+static uint8_t *g_interp_ram = NULL;
+static size_t g_interp_ram_size = 0u;
+
+
+void fm_interp_bind_ram(
+    uint8_t *ram,
+    size_t ram_size
+)
+{
+    g_interp_ram = ram;
+    g_interp_ram_size = ram_size;
+}
+
+
+static inline int interp_ram_offset(
+    uint32_t addr,
+    size_t width,
+    uint32_t *out_offset
+)
+{
+    uint32_t phys =
+        addr
+        &
+        0x1FFFFFFFu;
+
+    if (
+        !g_interp_ram
+        ||
+        phys >= 0x00800000u
+    )
+    {
+        return 0;
+    }
+
+    uint32_t offset =
+        phys
+        &
+        0x001FFFFFu;
+
+    if (
+        width > g_interp_ram_size
+        ||
+        offset > g_interp_ram_size - width
+    )
+    {
+        return 0;
+    }
+
+    *out_offset = offset;
+    return 1;
+}
+
+
+static inline uint8_t interp_read_byte(
+    CPUState *cpu,
+    uint32_t addr
+)
+{
+    uint32_t o;
+
+    if (interp_ram_offset(addr, 1u, &o))
+    {
+        return g_interp_ram[o];
+    }
+
+    return cpu->read_byte(addr);
+}
+
+
+static inline uint16_t interp_read_half(
+    CPUState *cpu,
+    uint32_t addr
+)
+{
+    uint32_t o;
+
+    if (interp_ram_offset(addr, 2u, &o))
+    {
+        uint16_t value;
+        memcpy(&value, g_interp_ram + o, sizeof(value));
+        return value;
+    }
+
+    return cpu->read_half(addr);
+}
+
+
+static inline uint32_t interp_read_word(
+    CPUState *cpu,
+    uint32_t addr
+)
+{
+    uint32_t o;
+
+    if (interp_ram_offset(addr, 4u, &o))
+    {
+        uint32_t value;
+        memcpy(&value, g_interp_ram + o, sizeof(value));
+        return value;
+    }
+
+    return cpu->read_word(addr);
+}
+
+
+static inline void interp_write_byte(
+    CPUState *cpu,
+    uint32_t addr,
+    uint8_t value
+)
+{
+    uint32_t o;
+
+    if (interp_ram_offset(addr, 1u, &o))
+    {
+        g_interp_ram[o] = value;
+        return;
+    }
+
+    cpu->write_byte(addr, value);
+}
+
+
+static inline void interp_write_half(
+    CPUState *cpu,
+    uint32_t addr,
+    uint16_t value
+)
+{
+    uint32_t o;
+
+    if (interp_ram_offset(addr, 2u, &o))
+    {
+        memcpy(g_interp_ram + o, &value, sizeof(value));
+        return;
+    }
+
+    cpu->write_half(addr, value);
+}
+
+
+static inline void interp_write_word(
+    CPUState *cpu,
+    uint32_t addr,
+    uint32_t value
+)
+{
+    uint32_t o;
+
+    if (interp_ram_offset(addr, 4u, &o))
+    {
+        memcpy(g_interp_ram + o, &value, sizeof(value));
+        return;
+    }
+
+    cpu->write_word(addr, value);
+}
 
 
 /*
@@ -53,16 +250,17 @@ static inline void set_reg(
 {
     /*
      * $zero n'est jamais modifiable.
+     *
+     * B135.75: do not rewrite gpr[0] here. The interpreter loop and every
+     * control-flow path already restore $zero after the instruction/delay
+     * slot. Avoiding this duplicate store removes one memory write from the
+     * common ALU/load path.
      */
     if (reg != 0)
     {
         cpu->gpr[reg] =
             value;
     }
-
-
-    cpu->gpr[0] =
-        0;
 }
 
 
@@ -857,7 +1055,7 @@ static int exec_normal(
                 set_reg(
                     cpu,
                     rt,
-                    cpu->gte_data[rd]
+                    gte_read_data(cpu, (uint8_t)rd)
                 );
 
                 return 0;
@@ -872,7 +1070,7 @@ static int exec_normal(
                 set_reg(
                     cpu,
                     rt,
-                    cpu->gte_ctrl[rd]
+                    gte_read_ctrl(cpu, (uint8_t)rd)
                 );
 
                 return 0;
@@ -884,8 +1082,11 @@ static int exec_normal(
              */
             if (cop_rs == 0x04)
             {
-                cpu->gte_data[rd] =
-                    rt_v;
+                gte_write_data(
+                    cpu,
+                    (uint8_t)rd,
+                    rt_v
+                );
 
                 return 0;
             }
@@ -896,8 +1097,11 @@ static int exec_normal(
              */
             if (cop_rs == 0x06)
             {
-                cpu->gte_ctrl[rd] =
-                    rt_v;
+                gte_write_ctrl(
+                    cpu,
+                    (uint8_t)rd,
+                    rt_v
+                );
 
                 return 0;
             }
@@ -905,10 +1109,41 @@ static int exec_normal(
 
             /*
              * Commande GTE.
+             *
+             * B135.1 : la scene Simon atteint GPF (fonction 0x3D)
+             * dans FUN_80088BD8. Le code ARM recompile peut s'arreter
+             * sur cette commande puis reprendre exactement au PC GPF
+             * dans l'interpreteur. Si on renvoie simplement FM_INTERP_GTE,
+             * main.c classe alors l'instruction 0x4B98003D comme STOP:4.
+             *
+             * Executer GPF ici preserve aussi correctement les delay slots,
+             * car exec_normal() reste dans le flot normal de run_block().
+             *
+             * Les autres commandes restent volontairement non supportees :
+             * on veut voir le prochain vrai verrou au lieu de le masquer.
              */
             if (cop_rs >= 0x10)
             {
-                return 3;
+                switch (instruction & 0x3Fu)
+                {
+                    case 0x01u: /* RTPS  */
+                    case 0x06u: /* NCLIP */
+                    case 0x12u: /* MVMVA */
+                    case 0x13u: /* NCDS  */
+                    case 0x2Du: /* AVSZ3 */
+                    case 0x2Eu: /* AVSZ4 */
+                    case 0x30u: /* RTPT  */
+                    case 0x3Du: /* GPF   */
+                        gte_execute(
+                            cpu,
+                            instruction
+                        );
+
+                        return 0;
+
+                    default:
+                        return 3;
+                }
             }
 
 
@@ -933,7 +1168,7 @@ static int exec_normal(
 
             int8_t value =
                 (int8_t)
-                    cpu->read_byte(
+                    interp_read_byte(cpu, 
                         addr
                     );
 
@@ -961,7 +1196,7 @@ static int exec_normal(
 
             int16_t value =
                 (int16_t)
-                    cpu->read_half(
+                    interp_read_half(cpu, 
                         addr
                     );
 
@@ -992,7 +1227,7 @@ static int exec_normal(
 
 
             uint32_t mem =
-                cpu->read_word(
+                interp_read_word(cpu, 
                     aligned
                 );
 
@@ -1053,7 +1288,7 @@ static int exec_normal(
             set_reg(
                 cpu,
                 rt,
-                cpu->read_word(
+                interp_read_word(cpu, 
                     addr
                 )
             );
@@ -1074,7 +1309,7 @@ static int exec_normal(
             set_reg(
                 cpu,
                 rt,
-                cpu->read_byte(
+                interp_read_byte(cpu, 
                     addr
                 )
             );
@@ -1095,7 +1330,7 @@ static int exec_normal(
             set_reg(
                 cpu,
                 rt,
-                cpu->read_half(
+                interp_read_half(cpu, 
                     addr
                 )
             );
@@ -1118,7 +1353,7 @@ static int exec_normal(
 
 
             uint32_t mem =
-                cpu->read_word(
+                interp_read_word(cpu, 
                     aligned
                 );
 
@@ -1178,7 +1413,7 @@ static int exec_normal(
          */
         case 0x28:
         {
-            cpu->write_byte(
+            interp_write_byte(cpu, 
                 rs_v + simm,
                 (uint8_t)rt_v
             );
@@ -1192,7 +1427,7 @@ static int exec_normal(
          */
         case 0x29:
         {
-            cpu->write_half(
+            interp_write_half(cpu, 
                 rs_v + simm,
                 (uint16_t)rt_v
             );
@@ -1215,7 +1450,7 @@ static int exec_normal(
 
 
             uint32_t mem =
-                cpu->read_word(
+                interp_read_word(cpu, 
                     aligned
                 );
 
@@ -1250,7 +1485,7 @@ static int exec_normal(
             }
 
 
-            cpu->write_word(
+            interp_write_word(cpu, 
                 aligned,
                 mem
             );
@@ -1264,7 +1499,7 @@ static int exec_normal(
          */
         case 0x2B:
         {
-            cpu->write_word(
+            interp_write_word(cpu, 
                 rs_v + simm,
                 rt_v
             );
@@ -1287,7 +1522,7 @@ static int exec_normal(
 
 
             uint32_t mem =
-                cpu->read_word(
+                interp_read_word(cpu, 
                     aligned
                 );
 
@@ -1322,7 +1557,7 @@ static int exec_normal(
             }
 
 
-            cpu->write_word(
+            interp_write_word(cpu, 
                 aligned,
                 mem
             );
@@ -1351,10 +1586,13 @@ static int exec_normal(
                 rs_v + simm;
 
 
-            cpu->gte_data[rt] =
-                cpu->read_word(
+            gte_write_data(
+                cpu,
+                (uint8_t)rt,
+                interp_read_word(cpu, 
                     addr
-                );
+                )
+            );
 
 
             return 0;
@@ -1370,9 +1608,12 @@ static int exec_normal(
                 rs_v + simm;
 
 
-            cpu->write_word(
+            interp_write_word(cpu, 
                 addr,
-                cpu->gte_data[rt]
+                gte_read_data(
+                    cpu,
+                    (uint8_t)rt
+                )
             );
 
 
@@ -1403,7 +1644,7 @@ static int exec_delay_slot(
 )
 {
     uint32_t instruction =
-        cpu->read_word(
+        interp_read_word(cpu, 
             pc
         );
 
@@ -1468,13 +1709,38 @@ static int exec_delay_slot(
 
 /*
  * ============================================================
- * Interprétation d'un basic block
+ * Interprétation R3000A
  * ============================================================
  */
 
-FMInterpResult fm_interp_run_block(
+static inline int interp_region_contains(
+    uint32_t pc,
+    uint32_t phys_begin,
+    uint32_t phys_end,
+    uint32_t stop_phys
+)
+{
+    uint32_t phys =
+        pc
+        &
+        0x1FFFFFFFu;
+
+    return
+        phys >= phys_begin
+        &&
+        phys < phys_end
+        &&
+        phys != stop_phys;
+}
+
+
+static FMInterpResult fm_interp_run_internal(
     CPUState *cpu,
-    uint32_t max_instructions
+    uint32_t max_instructions,
+    int chain_region,
+    uint32_t phys_begin,
+    uint32_t phys_end,
+    uint32_t stop_phys
 )
 {
     if (!cpu)
@@ -1510,8 +1776,34 @@ FMInterpResult fm_interp_run_block(
             cpu->pc;
 
 
+        /*
+         * B135.19: in chained mode the next PC may have left the hot
+         * resident region (or reached a real native function entry).
+         * Hand it back to main.c before fetching/executing it here.
+         */
+        if (
+            chain_region
+            &&
+            !interp_region_contains(
+                pc,
+                phys_begin,
+                phys_end,
+                stop_phys
+            )
+        )
+        {
+            return
+                make_result(
+                    FM_INTERP_BLOCK_DONE,
+                    pc,
+                    0u,
+                    count
+                );
+        }
+
+
         uint32_t instruction =
-            cpu->read_word(
+            interp_read_word(cpu, 
                 pc
             );
 
@@ -1653,6 +1945,25 @@ FMInterpResult fm_interp_run_block(
                 0;
 
 
+            /*
+             * B135.19: do not bounce through main.c for an internal branch.
+             * Calls/returns that leave the region still return normally.
+             */
+            if (
+                chain_region
+                &&
+                interp_region_contains(
+                    cpu->pc,
+                    phys_begin,
+                    phys_end,
+                    stop_phys
+                )
+            )
+            {
+                continue;
+            }
+
+
             return
                 make_result(
                     FM_INTERP_BLOCK_DONE,
@@ -1756,6 +2067,25 @@ FMInterpResult fm_interp_run_block(
 
             cpu->gpr[0] =
                 0;
+
+
+            /*
+             * B135.19: do not bounce through main.c for an internal branch.
+             * Calls/returns that leave the region still return normally.
+             */
+            if (
+                chain_region
+                &&
+                interp_region_contains(
+                    cpu->pc,
+                    phys_begin,
+                    phys_end,
+                    stop_phys
+                )
+            )
+            {
+                continue;
+            }
 
 
             return
@@ -1883,6 +2213,25 @@ FMInterpResult fm_interp_run_block(
                 0;
 
 
+            /*
+             * B135.19: do not bounce through main.c for an internal branch.
+             * Calls/returns that leave the region still return normally.
+             */
+            if (
+                chain_region
+                &&
+                interp_region_contains(
+                    cpu->pc,
+                    phys_begin,
+                    phys_end,
+                    stop_phys
+                )
+            )
+            {
+                continue;
+            }
+
+
             return
                 make_result(
                     FM_INTERP_BLOCK_DONE,
@@ -1986,6 +2335,25 @@ FMInterpResult fm_interp_run_block(
                 0;
 
 
+            /*
+             * B135.19: do not bounce through main.c for an internal branch.
+             * Calls/returns that leave the region still return normally.
+             */
+            if (
+                chain_region
+                &&
+                interp_region_contains(
+                    cpu->pc,
+                    phys_begin,
+                    phys_end,
+                    stop_phys
+                )
+            )
+            {
+                continue;
+            }
+
+
             return
                 make_result(
                     FM_INTERP_BLOCK_DONE,
@@ -2059,10 +2427,58 @@ FMInterpResult fm_interp_run_block(
         make_result(
             FM_INTERP_BUDGET,
             cpu->pc,
-            cpu->read_word(
+            interp_read_word(cpu, 
                 cpu->pc
             ),
             count
+        );
+}
+
+
+FMInterpResult fm_interp_run_block(
+    CPUState *cpu,
+    uint32_t max_instructions
+)
+{
+    return
+        fm_interp_run_internal(
+            cpu,
+            max_instructions,
+            0,
+            0u,
+            0u,
+            0xFFFFFFFFu
+        );
+}
+
+
+FMInterpResult fm_interp_run_region(
+    CPUState *cpu,
+    uint32_t max_instructions,
+    uint32_t phys_begin,
+    uint32_t phys_end,
+    uint32_t stop_phys
+)
+{
+    if (phys_begin >= phys_end)
+    {
+        return
+            make_result(
+                FM_INTERP_UNSUPPORTED,
+                cpu ? cpu->pc : 0u,
+                0u,
+                0u
+            );
+    }
+
+    return
+        fm_interp_run_internal(
+            cpu,
+            max_instructions,
+            1,
+            phys_begin,
+            phys_end,
+            stop_phys
         );
 }
 

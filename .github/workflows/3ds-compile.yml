@@ -1,0 +1,46 @@
+name: Compile 3DS C sources
+
+on:
+  push:
+    paths:
+      - '3ds/**'
+      - '.github/workflows/3ds-compile.yml'
+  pull_request:
+    paths:
+      - '3ds/**'
+      - '.github/workflows/3ds-compile.yml'
+  workflow_dispatch:
+
+jobs:
+  profile-objects:
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkitarm:20260610
+      options: --user 1001
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned PSXRecomp runtime
+        uses: actions/checkout@v4
+        with:
+          repository: Unchiga/psxrecomp
+          ref: 1965b2df424da03483a5370340433a862f78f103
+          path: work/upstream-psxrecomp
+      - name: Verify toolchain
+        run: |
+          test -f "$DEVKITARM/3ds_rules"
+          test -f "$DEVKITPRO/libctru/include/3ds.h"
+          "$DEVKITARM/bin/arm-none-eabi-gcc" --version
+      - name: Compile profile C objects
+        run: |
+          export PATH="$DEVKITARM/bin:$PATH"
+          make -C 3ds PROFILE=1 -j2 \
+            build-profile/main.o \
+            build-profile/platform.o \
+            build-profile/disc.o \
+            build-profile/fm_cpu.o \
+            build-profile/fm_memory.o \
+            build-profile/fm_runtime_shim.o \
+            build-profile/fm_interp.o \
+            build-profile/fm_gpu.o \
+            build-profile/gpu_sw_renderer.o \
+            build-profile/gpu_vram_dirty.o

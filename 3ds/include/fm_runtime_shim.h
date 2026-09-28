@@ -43,7 +43,14 @@ typedef enum FMRuntimeStopReason
     /*
      * Restore / exception demandant un retour contrôlé.
      */
-    FM_STOP_RESTORE
+    FM_STOP_RESTORE,
+
+    /*
+     * B135.66: a direct/nested generated call reached GsSortOt.
+     * main.c must service it with the verified C HLE before the generated
+     * implementation can run.
+     */
+    FM_STOP_GSSORTOT_HLE
 
 } FMRuntimeStopReason;
 
@@ -117,12 +124,202 @@ FMRuntimeProbeResult fm_runtime_probe(
     uint32_t check_budget
 );
 
+/*
+ * B135.14 - execute plusieurs dispatchs recompiles consecutifs sous le
+ * meme setjmp tant que le PC reste dans une plage resident donnee.
+ */
+FMRuntimeProbeResult fm_runtime_probe_chain(
+    CPUState *cpu,
+    uint32_t addr,
+    uint32_t check_budget,
+    uint32_t phys_begin,
+    uint32_t phys_end,
+    uint32_t phys2_begin,
+    uint32_t phys2_end,
+    uint32_t phys3_begin,
+    uint32_t phys3_end,
+    uint32_t phys4_begin,
+    uint32_t phys4_end,
+    uint32_t max_dispatches,
+    uint32_t *out_dispatches
+);
+
 
 /*
  * Nom lisible du motif d'arrêt.
  */
 const char *fm_runtime_stop_name(
     FMRuntimeStopReason reason
+);
+
+
+/*
+ * B135 - etat BIOS/HLE persistant necessaire au quick-state.
+ * Le contexte de probe/setjmp n'est volontairement jamais serialise.
+ */
+typedef struct FMRuntimeQuickState
+{
+    uint32_t bios_entry_hook_addr;
+    uint32_t bios_clear_pad;
+    uint32_t bios_memory_megabytes;
+    uint32_t bios_tty_bytes;
+
+    uint32_t bios_pad_buf1;
+    uint32_t bios_pad_buf2;
+    uint32_t bios_pad_size1;
+    uint32_t bios_pad_size2;
+    int32_t bios_pad_started;
+
+    struct
+    {
+        uint32_t used;
+        uint32_t enabled;
+        uint32_t ready;
+        uint32_t class_id;
+        uint32_t spec;
+        uint32_t mode;
+        uint32_t func;
+    } events[32];
+
+    uint32_t irq_chain_heads[8];
+    uint32_t change_clear_rcnt[4];
+} FMRuntimeQuickState;
+
+void fm_runtime_quick_save(FMRuntimeQuickState *out);
+void fm_runtime_quick_load(const FMRuntimeQuickState *in);
+
+/* B135.65 - counters from generated-code dispatch-entry checkpoints. */
+void fm_runtime_b13565_entries(
+    uint32_t *e12c50,
+    uint32_t *e12f70,
+    uint32_t *e41674,
+    uint32_t *e12d60,
+    uint32_t *e85d98,
+    uint32_t *e85d08,
+    uint32_t *last_entry
+);
+
+/* B135.81: read-only snapshot at generated function entry, including nested calls. */
+typedef struct FMDialogueEntryTrace
+{
+    uint32_t walker_calls;
+    uint32_t renderer_calls;
+    uint32_t walker_with_c2;
+    uint32_t walker_last_ra;
+    uint32_t renderer_last_ra;
+    uint32_t first_c2_ptr;
+    uint32_t last_c2_ptr;
+    uint32_t last_c2_head;
+    uint32_t last_object_flags;
+    uint32_t last_object_callback;
+    uint32_t last_overlay_word;
+} FMDialogueEntryTrace;
+
+void fm_runtime_dialogue_entry_trace(FMDialogueEntryTrace *out);
+
+typedef struct FMDialogueCreateTrace
+{
+    uint32_t constructor_calls;
+    uint32_t c2_constructor_calls;
+    uint32_t remove_calls;
+    uint32_t last_c2_index;
+    uint32_t last_c2_ra;
+    uint32_t last_c2_head_before;
+    uint32_t last_remove_category;
+    uint32_t category2_constructor_calls, last_category2_create_ra;
+    uint32_t last_category2_create_index;
+    uint32_t category2_remove_calls, last_category2_remove_ra;
+    uint32_t last_category2_remove_index, last_category2_remove_flags;
+} FMDialogueCreateTrace;
+
+void fm_runtime_dialogue_create_trace(FMDialogueCreateTrace *out);
+
+/* B135.84: category-2 object path, sampled at generated function entries. */
+typedef struct FMDialogueLayerTrace
+{
+    uint32_t category2_calls, category2_with_head;
+    uint32_t object_render_calls, primitive_calls;
+    uint32_t last_head, last_ra, last_flags, last_callback;
+    uint32_t last_tpage, last_clut, last_width, last_height;
+} FMDialogueLayerTrace;
+void fm_runtime_dialogue_layer_trace(FMDialogueLayerTrace *out);
+
+/* B135.86: actual dialogue script, glyph queue and category-6 renderer. */
+typedef struct FMTextTrace
+{
+    uint32_t gen[7], outer[7];
+    uint32_t script_ctx, script_ptr, script_flags, script_id, script_state;
+    uint32_t script_next_byte, text_object, glyph_write, last_char;
+    uint32_t last_create_index, last_create_ra, last_remove_index;
+    uint32_t last_remove_ra, last_remove_flags, last_render_ra;
+} FMTextTrace;
+void fm_runtime_text_trace_outer(CPUState *cpu, uint32_t phys);
+void fm_runtime_text_trace_get(FMTextTrace *out);
+
+void fm_runtime_b13567_pipeline(
+    uint32_t *fin_entries,
+    uint32_t *fin_b8,
+    uint32_t *fin_shape,
+    uint32_t *fin_no_shape,
+    uint32_t *draw_entries,
+    uint32_t *draw_shape,
+    uint32_t *draw_no_shape,
+    uint32_t *last_base,
+    uint32_t *last_src,
+    uint32_t *last_dst,
+    uint32_t *last_shape_packet,
+    uint32_t *last_4b8,
+    uint32_t *last_6a0
+);
+
+void fm_runtime_b13568_stages(
+    uint32_t *pre_entries,
+    uint32_t *pre_any,
+    uint32_t *post_entries,
+    uint32_t *post_any,
+    uint32_t *fin_entries,
+    uint32_t *fin_any,
+    uint32_t *pre_mask,
+    uint32_t *post_mask,
+    uint32_t *fin_mask,
+    uint32_t *base,
+    uint32_t ptrs[4]
+);
+
+void fm_runtime_b13569_sort_boundary(
+    uint32_t sort_calls[4],
+    uint32_t src_shape[4],
+    uint32_t dst_shape[4],
+    uint32_t *sort_other,
+    uint32_t *last_src,
+    uint32_t *last_dst,
+    uint32_t *last_slot,
+    uint32_t *last_src_packet,
+    uint32_t *last_dst_packet,
+    uint32_t *last_next_entry
+);
+
+void fm_runtime_b13570_death_stages(
+    uint32_t hits[7],
+    uint32_t shape[7],
+    uint32_t ots[7],
+    uint32_t tags[7],
+    uint32_t packets[7],
+    uint32_t *base,
+    uint32_t *gate4b8,
+    uint32_t *gate6a0
+);
+
+void fm_runtime_b13571_gate(
+    uint32_t *hand_d60,
+    uint32_t *gate0,
+    uint32_t *gate1,
+    uint32_t *gate80,
+    uint32_t *gate_other,
+    uint32_t *forced,
+    uint32_t *last_packet,
+    uint32_t *last_before,
+    uint32_t *last_after
 );
 
 

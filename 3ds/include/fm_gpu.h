@@ -57,6 +57,96 @@ unsigned fm_gpu_display_y(void);
 
 
 /*
+ * B135 - etat fonctionnel minimal du GPU pour le quick-state de debug.
+ * La VRAM 1024x512 est sauvegardee separement par main.c.
+ */
+typedef struct FMGpuQuickState
+{
+    uint32_t parser_state;
+    uint32_t cmd[16];
+    uint32_t cmd_have;
+    uint32_t cmd_need;
+
+    uint32_t has_frame;
+
+    uint16_t texpage;
+    uint16_t reserved0;
+    uint32_t texture_window;
+
+    int32_t draw_x1;
+    int32_t draw_y1;
+    int32_t draw_x2;
+    int32_t draw_y2;
+
+    int32_t offset_x;
+    int32_t offset_y;
+
+    int32_t mask_set;
+    int32_t mask_check;
+
+    uint32_t display_x;
+    uint32_t display_y;
+    int32_t display_disabled;
+    uint32_t display_mode;
+
+    uint32_t upload_x;
+    uint32_t upload_y;
+    uint32_t upload_w;
+    uint32_t upload_h;
+    uint32_t upload_index;
+    uint32_t upload_pixels;
+} FMGpuQuickState;
+
+void fm_gpu_quick_save(FMGpuQuickState *out);
+void fm_gpu_quick_load(const FMGpuQuickState *in);
+
+
+/*
+ * B122 - high-resolution GP0 opcode profiler.
+ */
+typedef struct FMGpuOpcodePerf
+{
+    uint8_t opcode;
+    uint32_t calls;
+    uint64_t total_us;
+    uint32_t max_us;
+} FMGpuOpcodePerf;
+
+void fm_gpu_b122_rank(
+    unsigned rank,
+    FMGpuOpcodePerf *out
+);
+
+void fm_gpu_b122_totals(
+    uint64_t *exec_us,
+    uint64_t *upload_us,
+    uint64_t *upload_words
+);
+
+/*
+ * B135.32 - reset the sampled GP0 profiler at the beginning of a DMA2
+ * linked list so GHOT/GHOT2 describe the most recent DMA, not the whole run.
+ */
+void fm_gpu_b13532_profile_reset(void);
+
+/*
+ * B135.34 - split sampled GP0(34h) cost into triangle setup versus
+ * scan-conversion/pixel raster time for the current DMA2 list.
+ */
+void fm_gpu_b13534_profile(
+    uint64_t *setup_us,
+    uint64_t *raster_us,
+    uint32_t *samples,
+    uint32_t *tri_calls,
+    uint32_t *fast_hits,
+    uint64_t *fast_pixels,
+    uint32_t *depth0_hits,
+    uint32_t *depth1_hits,
+    uint32_t *depth2_hits
+);
+
+
+/*
  * ============================================================
  * Diagnostic GPU bring-up
  * ============================================================
@@ -106,7 +196,64 @@ typedef struct FMGpuDebugStats
     unsigned display_y;
 
     int display_disabled;
+
+    uint32_t b124_rect_hits;
+    uint32_t b124_rect_fallbacks;
+    uint64_t b124_rect_pixels;
+    uint64_t b124_rect_texels;
+
+    uint32_t b125_texquad_hits;
+    uint32_t b125_gouraud_hits;
+    uint32_t b125_fallbacks;
+    uint64_t b125_pixels;
+
+    uint32_t b126_seen_2c;
+    uint32_t b126_seen_2e;
+    uint32_t b126_seen_3a;
+    uint32_t b126_try_t;
+    uint32_t b126_try_g;
+    uint32_t b126_reject_mask;
+    int b126_scale;
+    int b126_wide;
+    int b126_filter;
+
+    uint32_t b129_fill_hits;
+    uint32_t b129_fill_fallbacks;
+    uint64_t b129_fill_pixels;
+    uint64_t b129_fill_zero_pixels;
+    uint32_t b129_fill_max_pixels;
 } FMGpuDebugStats;
+
+uint32_t fm_gpu_b126_build_tag(void);
+uint32_t fm_gpu_b13545_generic_texquads(void);
+uint32_t fm_gpu_b13546_generic_3c(void);
+
+/*
+ * B135.43 - textured-rectangle write probe for missing dialogue/cards.
+ */
+void fm_gpu_b13543_rect_probe(
+    uint64_t *nonzero_texels,
+    uint64_t *writes,
+    uint32_t *clip_rejects,
+    int *last_x,
+    int *last_y,
+    int *last_w,
+    int *last_h,
+    int *last_off_x,
+    int *last_off_y,
+    int *last_area_x1,
+    int *last_area_y1,
+    int *last_area_x2,
+    int *last_area_y2
+);
+
+/*
+ * B127: lightweight hot-path snapshot.
+ * Unlike fm_gpu_debug_stats(), this does NOT scan the 1024x512 VRAM.
+ */
+void fm_gpu_b127_perf_snapshot(
+    FMGpuDebugStats *out
+);
 
 
 /*

@@ -24,11 +24,29 @@ GENERATED_COMBINED := \
 
 
 # ============================================================
-# Target
+# Build mode / target
 # ============================================================
+#
+# B135.74:
+#   make                 -> CLEAN (default, diagnostics compiled out)
+#   make profile         -> PROFILE (diagnostics enabled)
+#   make PROFILE=1       -> PROFILE (same source, isolated object dir)
+#
+# Separate object directories are intentional: switching mode can never
+# silently reuse objects built with the opposite diagnostic setting.
+#
 
+PROFILE ?= 0
+
+ifeq ($(PROFILE),1)
+TARGET := fm-new3ds-profile
+BUILD := build-profile
+PERF_MODE_DEFS := -DFM_PERF_PROFILE=1
+else
 TARGET := fm-new3ds
-BUILD := build
+BUILD := build-clean
+PERF_MODE_DEFS := -DFM_PERF_PROFILE=0
+endif
 
 
 # ============================================================
@@ -63,6 +81,7 @@ CFLAGS := \
 	-O3 \
 	-DNDEBUG \
 	-DPSX_NO_DEBUG_TOOLS \
+	$(PERF_MODE_DEFS) \
 	-fomit-frame-pointer \
 	-Wall \
 	-Wextra \
@@ -101,9 +120,12 @@ OBJECTS := \
 	$(BUILD)/gpu_vram_dirty.o
 
 
-.PHONY: all clean generated-release
+.PHONY: all clean generated-release profile
 
 all: $(TARGET).3dsx
+
+profile:
+	$(MAKE) PROFILE=1 all
 
 # B111: the huge PSXRecomp object is prelinked and is NOT rebuilt by
 # the normal %.o rule below. A normal 3DS build must therefore refresh
@@ -120,15 +142,36 @@ $(BUILD)/%.o: source/%.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 
+# ============================================================
+# 3DS software rasterizer hot path
+# ============================================================
+#
+# B123: keep conservative FP semantics for game/GTE code, but allow
+# aggressive FP reassociation/reciprocal optimizations in the software GPU.
+# The rasterizer performs float interpolation in the innermost pixel loops.
+#
+RENDERER_CFLAGS := \
+	$(CFLAGS) \
+	-Ofast \
+	-ffast-math \
+	-fno-math-errno \
+	-fno-trapping-math \
+	-funsafe-math-optimizations \
+	-freciprocal-math
+
 $(BUILD)/gpu_sw_renderer.o: $(RUNTIME)/src/gpu_sw_renderer.c | $(BUILD)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(RENDERER_CFLAGS) -c $< -o $@
 
 
 $(BUILD)/gpu_vram_dirty.o: $(RUNTIME)/src/gpu_vram_dirty.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 
-$(TARGET).elf: generated-release $(OBJECTS) $(GENERATED_COMBINED)
+$(GENERATED_COMBINED): generated-release
+	@test -s "$@"
+
+
+$(TARGET).elf: $(OBJECTS) $(GENERATED_COMBINED)
 	$(CC) \
 		$(LDFLAGS) \
 		$(OBJECTS) \
@@ -145,9 +188,13 @@ $(TARGET).3dsx: $(TARGET).elf
 
 clean:
 	rm -rf \
-		$(BUILD) \
-		$(TARGET).elf \
-		$(TARGET).3dsx
+		build \
+		build-clean \
+		build-profile \
+		fm-new3ds.elf \
+		fm-new3ds.3dsx \
+		fm-new3ds-profile.elf \
+		fm-new3ds-profile.3dsx
 
 
 -include $(OBJECTS:.o=.d)
