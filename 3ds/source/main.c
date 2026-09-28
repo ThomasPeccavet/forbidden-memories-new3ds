@@ -1291,7 +1291,9 @@ static uint32_t g_b74_last_12f70_ra = 0u;
  *
  * Cette branche ne progresse pas dans notre runtime actuel.
  * B75 ne dessine rien artificiellement : il finalise uniquement
- * l'animation d'entree, puis rend la main au VRAI callback menu.
+ * l'animation d'entree. La completion reproduit aussi l'effet exact
+ * de FUN_80040734 pour chaque objet (variant +0x69, clear flag 0x10)
+ * avant de rendre la main au VRAI callback menu.
  */
 static uint32_t g_b75_menu_entrance_bridge = 0u;
 static uint32_t g_b75_menu_entrance_frame = 0u;
@@ -12810,6 +12812,32 @@ int main(void)
                     {
                         flags &= (uint16_t)~0x0040u;
                     }
+
+                    /*
+                     * Match the real 80180390 completion path.
+                     *
+                     * During each entrance-animation tick the game calls:
+                     *
+                     *   FUN_80040734(obj, i*2 + (selected != i))
+                     *
+                     * and FUN_80040734 does exactly:
+                     *   obj[0x69] = variant;
+                     *   obj->flags &= ~0x0010;
+                     *
+                     * The old B75 skipped this step, leaving non-selected
+                     * menu objects with stale sprite/frame state. Reproduce
+                     * that exact state transition here before handing control
+                     * back to the real menu update.
+                     */
+                    uint8_t variant =
+                        (uint8_t)((i << 1) | (uint32_t)(c0 != i));
+
+                    fm_memory_write_byte(
+                        obj + 0x69u,
+                        variant
+                    );
+
+                    flags &= (uint16_t)~0x0010u;
 
                     /*
                      * Little-endian halfword writes using the byte
