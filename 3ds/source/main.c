@@ -997,47 +997,6 @@ static uint32_t g_b69_after_78588 = 0u;
 static uint32_t g_b69_after_47660 = 0u;
 
 
-/*
- * ============================================================
- * B70 - completion host de la commande graphique type 0x20
- * ============================================================
- *
- * B69 prouve que FUN_80046750 est REELLEMENT bloquee :
- *
- *   46750 ent/ret = 1/0
- *   queue count   = 2
- *   head type     = 0x20
- *
- * Le pseudo-C de FUN_80046750 est sans ambiguite :
- *
- *   case 0x20:
- *       if (*(ctx + entry + 0x90) == 0x20) {
- *           retire l'entree;
- *       }
- *       // sinon la boucle recommence sur LA MEME entree
- *
- * Sur PS1, ce champ est termine de facon asynchrone par le pipeline
- * GPU/DMA. Notre runtime rend bien la VRAM, mais ne publie pas encore
- * cette completion dans la file haut niveau du jeu.
- *
- * Le bridge ne touche QUE :
- *   - FUN_80046750 active;
- *   - tete de file type 0x20;
- *   - marqueur +0x10 de l'entree different de 0x20.
- *
- * Il transforme alors ce marqueur en 0x20, equivalent au signal de
- * completion attendu par le code original. FUN_80046750 retire elle-
- * meme l'entree et poursuit son cleanup normal.
- */
-static uint32_t g_b70_ready_bridge = 0u;
-static uint32_t g_b70_last_ctx = 0u;
-static uint32_t g_b70_last_count = 0u;
-static uint32_t g_b70_last_type = 0u;
-static uint32_t g_b70_last_marker_before = 0u;
-static uint32_t g_b70_last_marker_after = 0u;
-static uint32_t g_b70_entry1_type = 0u;
-static uint32_t g_b70_entry1_marker = 0u;
-
 static uint32_t g_b32_43e_returned = 0;
 static uint32_t g_b32_43e_return_frame = 0;
 
@@ -11901,8 +11860,6 @@ int main(void)
             (
                 g_str_intro_last_done != 0u
                 &&
-                g_b70_ready_bridge != 0u
-                &&
                 g_b69_after_46750 != 0u
             );
 
@@ -12362,97 +12319,6 @@ int main(void)
                     );
 
                 ++g_b59_pal_patch_count;
-            }
-        }
-
-
-        /*
-         * ====================================================
-         * B70 - GPU queue type-0x20 completion bridge
-         * ====================================================
-         */
-        if (
-            game_running
-            &&
-            cpu
-            &&
-            cpu->pc >= 0x80046750u
-            &&
-            cpu->pc < 0x800469ACu
-        )
-        {
-            uint32_t gfx_ctx =
-                fm_memory_read_word(
-                    0x8009C7E0u
-                );
-
-            if (
-                gfx_ctx >= 0x80000000u
-                &&
-                gfx_ctx < 0x80200000u
-            )
-            {
-                uint32_t count =
-                    fm_memory_read_half(
-                        gfx_ctx + 0x4Cu
-                    );
-
-                uint32_t type0 =
-                    fm_memory_read_byte(
-                        gfx_ctx + 0x80u
-                    );
-
-                uint32_t marker0 =
-                    fm_memory_read_word(
-                        gfx_ctx + 0x90u
-                    );
-
-                g_b70_last_ctx = gfx_ctx;
-                g_b70_last_count = count;
-                g_b70_last_type = type0;
-                g_b70_last_marker_before = marker0;
-
-                if (count > 1u)
-                {
-                    g_b70_entry1_type =
-                        fm_memory_read_byte(
-                            gfx_ctx + 0xB0u
-                        );
-
-                    g_b70_entry1_marker =
-                        fm_memory_read_word(
-                            gfx_ctx + 0xC0u
-                        );
-                }
-                else
-                {
-                    g_b70_entry1_type = 0u;
-                    g_b70_entry1_marker = 0u;
-                }
-
-                if (
-                    count != 0u
-                    &&
-                    type0 == 0x20u
-                    &&
-                    marker0 != 0x20u
-                )
-                {
-                    /*
-                     * Publier uniquement la completion manquante.
-                     */
-                    fm_memory_write_word(
-                        gfx_ctx + 0x90u,
-                        0x20u
-                    );
-
-                    ++g_b70_ready_bridge;
-                }
-
-                g_b70_last_marker_after =
-                    fm_memory_read_word(
-                        gfx_ctx + 0x90u
-                    );
             }
         }
 
