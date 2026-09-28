@@ -974,27 +974,11 @@ static uint32_t g_b68_last_slot = 0u;
 
 
 /*
- * ============================================================
- * B69 - trace du verrou graphique post-async
- * ============================================================
- *
- * B68 a repare la file async :
- *   POLL all/ok/wait/miss = 3/3/0/0
- *
- * Le CPU est maintenant observe dans FUN_80046750 avec
- * RA=80049600, donc appelee depuis FUN_800495C8.
- *
- * On determine si 80046750 est reellement bloquee dans sa liste
- * de commandes ou si elle revient normalement et est rappelee.
+ * Milestone reel du boot graphique.
+ * Passe a 1 uniquement lorsque FUN_80046750 est revenue dans
+ * FUN_800495C8 a l'adresse guest 0x80049600.
  */
-static uint32_t g_b69_495c8_enter = 0u;
-static uint32_t g_b69_495c8_ra = 0u;
-static uint32_t g_b69_46750_enter = 0u;
-static uint32_t g_b69_46750_ra = 0u;
-static uint32_t g_b69_after_46750 = 0u;
-static uint32_t g_b69_after_494a0 = 0u;
-static uint32_t g_b69_after_78588 = 0u;
-static uint32_t g_b69_after_47660 = 0u;
+static uint32_t g_title_graphics_ready = 0u;
 
 
 static uint32_t g_b32_43e_returned = 0;
@@ -5243,48 +5227,11 @@ static void fm_trace_dispatch(
             break;
 
         /*
-         * B69 - chemin FUN_800495C8 -> FUN_80046750.
-         */
-        case 0x000495C8u:
-            ++g_b69_495c8_enter;
-            if (cpu)
-            {
-                g_b69_495c8_ra = cpu->gpr[31];
-            }
-            break;
-
-        case 0x00046750u:
-            ++g_b69_46750_enter;
-            if (cpu)
-            {
-                g_b69_46750_ra = cpu->gpr[31];
-            }
-            break;
-
-        /*
-         * Les JAL de 800495C8 sont a :
-         *   495F8 -> 46750  ; retour 49600
-         *   49600 -> 494A0  ; retour 49608
-         *   49608 -> 78588  ; retour 49610
-         *   4965C -> 47660  ; retour 49664
-         *
-         * Les adresses de retour sont les meilleurs marqueurs pour
-         * prouver que chaque sous-appel a réellement fini.
+         * Fin reelle de FUN_80046750 dans FUN_800495C8.
+         * Ce marqueur ne modifie aucun etat guest.
          */
         case 0x00049600u:
-            ++g_b69_after_46750;
-            break;
-
-        case 0x00049608u:
-            ++g_b69_after_494a0;
-            break;
-
-        case 0x00049610u:
-            ++g_b69_after_78588;
-            break;
-
-        case 0x00049664u:
-            ++g_b69_after_47660;
+            g_title_graphics_ready = 1u;
             break;
 
         /*
@@ -11860,7 +11807,7 @@ int main(void)
             (
                 g_str_intro_last_done != 0u
                 &&
-                g_b69_after_46750 != 0u
+                g_title_graphics_ready != 0u
             );
 
         if (
