@@ -1846,6 +1846,19 @@ static uint32_t g_b13578_last_pick = 0u; /* 0=GP1, 1=draw */
 static uint32_t g_b13578_last_current_nz = 0u;
 static uint32_t g_b13578_last_draw_nz = 0u;
 
+/*
+ * B135.88 - quick-load presenter reseed.
+ *
+ * Quick-state restores CPU/RAM/VRAM/GPU state, but the host-side stable
+ * composite and B135.78 page history are intentionally not serialized.
+ * After a load, force exactly one fresh latch from the restored draw/display
+ * environment before returning to normal stale-GP1 arbitration.
+ */
+static uint32_t g_b13588_reseed_presenter = 0u;
+static uint32_t g_b13588_reseed_count = 0u;
+static uint32_t g_b13588_reseed_draw_pick = 0u;
+static uint32_t g_b13588_reseed_gp1_pick = 0u;
+
 static unsigned b13578_page_index(unsigned x, unsigned y)
 {
     return (y >= 256u ? 2u : 0u) + (x >= 320u ? 1u : 0u);
@@ -11472,10 +11485,22 @@ static int fm_b135_quick_load(
     g_b108_vsync_sync_valid = 0u;
 
     /*
-     * Forcer un nouveau latch/present depuis la VRAM restauree.
+     * B135.88:
+     * The serialized GPU/VRAM state is restored here, but the host-side
+     * composite and B135.78 page-history are not part of the quick-state.
+     * Drop every stale presenter baseline and request one forced reseed on
+     * the next host loop.
      */
     g_b84_latch_valid = 0u;
-    g_b86_present_dirty = 1u;
+    g_b86_present_dirty = 0u;
+    g_b86_last_display_x = 0xFFFFFFFFu;
+    g_b86_last_display_y = 0xFFFFFFFFu;
+    g_b13578_page_hash[0] = 0u;
+    g_b13578_page_hash[1] = 0u;
+    g_b13578_page_hash[2] = 0u;
+    g_b13578_page_hash[3] = 0u;
+    g_b1357_last_latched_gp0 = 0u;
+    g_b13588_reseed_presenter = 1u;
 
     g_b65_stop_code = 0u;
     g_b65_stop_pc = 0u;
@@ -17236,6 +17261,124 @@ int main(void)
             int b104_decode24 = 0;
 
             /*
+             * B135.88:
+             * A quick-load may restore a scene whose meaningful framebuffer
+             * lives on the draw page while GP1 still names an older visible
+             * page. Re-seed the host presenter once from the restored E3/E4
+             * draw environment. If that draw page is distinct and contains
+             * real pixels, prefer it; otherwise fall back to restored GP1.
+             * Guest GPU state is never modified.
+             */
+            if (g_b13588_reseed_presenter && !b104_24bit)
+            {
+                int draw_x1_88 = 0;
+                int draw_y1_88 = 0;
+                int draw_x2_88 = 0;
+                int draw_y2_88 = 0;
+
+                fm_gpu_b100_env_get(
+                    NULL, NULL,
+                    &draw_x1_88, &draw_y1_88,
+                    &draw_x2_88, &draw_y2_88,
+                    NULL, NULL, NULL, NULL,
+                    NULL, NULL, NULL, NULL
+                );
+
+                unsigned draw_x_88 = current_x;
+                unsigned draw_y_88 = current_y;
+
+                if (
+                    draw_x1_88 >= 320 && draw_x1_88 <= 639
+                    &&
+                    draw_x2_88 >= 320 && draw_x2_88 <= 639
+                )
+                {
+                    draw_x_88 = 320u;
+                }
+                else if (
+                    draw_x1_88 >= 0 && draw_x1_88 <= 319
+                    &&
+                    draw_x2_88 >= 0 && draw_x2_88 <= 319
+                )
+                {
+                    draw_x_88 = 0u;
+                }
+
+                if (
+                    draw_y1_88 >= 256 && draw_y1_88 <= 511
+                    &&
+                    draw_y2_88 >= 256 && draw_y2_88 <= 511
+                )
+                {
+                    draw_y_88 = 256u;
+                }
+                else if (
+                    draw_y1_88 >= 0 && draw_y1_88 <= 255
+                    &&
+                    draw_y2_88 >= 0 && draw_y2_88 <= 255
+                )
+                {
+                    draw_y_88 = 0u;
+                }
+
+                uint32_t gp1_hash_88 = 0u;
+                uint32_t gp1_nz_88 = 0u;
+                uint32_t draw_hash_88 = 0u;
+                uint32_t draw_nz_88 = 0u;
+
+                b13578_sample_page(
+                    vram, current_x, current_y,
+                    &gp1_hash_88, &gp1_nz_88
+                );
+
+                if (draw_x_88 == current_x && draw_y_88 == current_y)
+                {
+                    draw_hash_88 = gp1_hash_88;
+                    draw_nz_88 = gp1_nz_88;
+                }
+                else
+                {
+                    b13578_sample_page(
+                        vram, draw_x_88, draw_y_88,
+                        &draw_hash_88, &draw_nz_88
+                    );
+                }
+
+                if (
+                    (draw_x_88 != current_x || draw_y_88 != current_y)
+                    &&
+                    draw_nz_88 >= 32u
+                )
+                {
+                    latch_x = draw_x_88;
+                    latch_y = draw_y_88;
+                    g_b13578_last_pick = 1u;
+                    ++g_b13588_reseed_draw_pick;
+                }
+                else
+                {
+                    latch_x = current_x;
+                    latch_y = current_y;
+                    g_b13578_last_pick = 0u;
+                    ++g_b13588_reseed_gp1_pick;
+                }
+
+                g_b13578_page_hash[
+                    b13578_page_index(current_x, current_y)
+                ] = gp1_hash_88;
+                g_b13578_page_hash[
+                    b13578_page_index(draw_x_88, draw_y_88)
+                ] = draw_hash_88;
+                g_b13578_last_current_nz = gp1_nz_88;
+                g_b13578_last_draw_nz = draw_nz_88;
+                g_b13544_last_draw_x = draw_x_88;
+                g_b13576_last_draw_y = draw_y_88;
+
+                need_latch = 1;
+                g_b13588_reseed_presenter = 0u;
+                ++g_b13588_reseed_count;
+            }
+            /*
              * B104 : GP1(08) bit4 = affichage 24-bit.
              * Dans ce mode le framebuffer est un flux RGB888 compact
              * de 3 octets/pixel dans la VRAM, pas du BGR555.
@@ -17243,7 +17386,7 @@ int main(void)
              * Refaire un latch lorsque le flux GP0 bouge, le mode change,
              * la page change, ou au premier affichage.
              */
-            if (
+            else if (
                 b104_24bit
                 &&
                 (
@@ -19620,7 +19763,7 @@ int main(void)
                 if (t86.glyph_write >= 0x800EC390u &&
                     t86.glyph_write < 0x800F0000u)
                     glyph_count86 = (t86.glyph_write - 0x800EC390u) / 0x16u;
-                printf("\x1b[H\x1b[2K B135.87 TEXT / BLACK PAGE DIAG\n");
+                printf("\x1b[H\x1b[2K B135.88 QUICKLOAD / PRESENTER\n");
                 printf("\x1b[2K RUN:%u MEM:%d QS rc:%ld S/L:%lu/%lu\n",
                        (unsigned)game_running, memory_status,
                        (long)g_b135_qs_last_result,
@@ -19666,6 +19809,11 @@ int main(void)
                        (unsigned long)g_b86_present_count,
                        (unsigned long)g_b86_skipped_presents,
                        (unsigned long)g_b13578_last_pick);
+                printf("\x1b[2K QL reseed:%lu draw/gp1:%lu/%lu pending:%lu\n",
+                       (unsigned long)g_b13588_reseed_count,
+                       (unsigned long)g_b13588_reseed_draw_pick,
+                       (unsigned long)g_b13588_reseed_gp1_pick,
+                       (unsigned long)g_b13588_reseed_presenter);
                 printf("\x1b[2K PC:%08lX RA:%08lX cat6 head:%d\n",
                        (unsigned long)(cpu ? cpu->pc : 0u),
                        (unsigned long)(cpu ? cpu->gpr[31] : 0u), h86);
