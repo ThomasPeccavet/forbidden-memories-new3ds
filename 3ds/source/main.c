@@ -19621,6 +19621,11 @@ int main(void)
                     t86.glyph_write < 0x800F0000u)
                     glyph_count86 = (t86.glyph_write - 0x800EC390u) / 0x16u;
                 printf("\x1b[H\x1b[2K B135.87 TEXT / BLACK PAGE DIAG\n");
+                printf("\x1b[2K RUN:%u MEM:%d QS rc:%ld S/L:%lu/%lu\n",
+                       (unsigned)game_running, memory_status,
+                       (long)g_b135_qs_last_result,
+                       (unsigned long)g_b135_qs_save_count,
+                       (unsigned long)g_b135_qs_load_count);
                 /* Four canonical PS1 pages, the exact GP1 view, and the
                  * stable host composite. One pixel per 8x8 block. */
                 uint32_t nz87[6] = {0u, 0u, 0u, 0u, 0u, 0u};
