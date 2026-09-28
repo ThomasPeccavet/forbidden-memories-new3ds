@@ -3035,6 +3035,8 @@ static uint32_t g_b13583_outer_c2_create = 0u;
 static uint32_t g_b13583_outer_remove = 0u;
 static uint32_t g_b13583_last_create_ra = 0u;
 static uint32_t g_b13583_last_create_index = 0u;
+static uint32_t g_b13584_outer_cat2 = 0u;
+static uint32_t g_b13584_outer_draw = 0u;
 #endif
 
 /*
@@ -4884,6 +4886,9 @@ static void fm_trace_dispatch(
          */
         case 0x000418C0u:
             ++g_b52_418c0_hits;
+#if FM_PERF_PROFILE
+            ++g_b13584_outer_draw;
+#endif
             if (cpu)
             {
                 g_b52_ra = cpu->gpr[31];
@@ -5993,6 +5998,9 @@ static void fm_trace_dispatch(
          */
         case 0x00040B48u:
             ++g_b72_hit_40b48;
+#if FM_PERF_PROFILE
+            ++g_b13584_outer_cat2;
+#endif
             if (cpu)
             {
                 g_b72_last_40b48_ra = cpu->gpr[31];
@@ -17911,9 +17919,9 @@ int main(void)
             fm_memory_dma_debug(&b130_dma);
 
 #if FM_PERF_PROFILE
-            printf("BUILD B135.83-C2-CREATE-PROFILE (SAFE B135.71)\n");
+            printf("BUILD B135.84-LAYER-PROFILE (SAFE B135.71)\n");
 #else
-            printf("BUILD B135.83-C2-CREATE-CLEAN (SAFE B135.71)\n");
+            printf("BUILD B135.84-LAYER-CLEAN (SAFE B135.71)\n");
 #endif
 
             printf(
@@ -19580,7 +19588,7 @@ int main(void)
                 if (cpu)
                     b13549_obj_list_probe(cpu, 0x800F11C2u,
                                             NULL, &nodes81, NULL, NULL, NULL);
-                printf("\x1b[H\x1b[2K B135.83 DIALOGUE CREATE DIAG\n");
+                printf("\x1b[H\x1b[2K B135.84 DIALOGUE LAYER DIAG\n");
                 printf("\x1b[2K PC:%08lX RA:%08lX C2:%lu\n",
                        (unsigned long)(cpu ? cpu->pc : 0u),
                        (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -19660,6 +19668,65 @@ int main(void)
                        cpu ? (int16_t)cpu->read_half(0x800F11C8u) : -1,
                        cpu ? (int16_t)cpu->read_half(0x800F11CAu) : -1,
                        cpu ? (int16_t)cpu->read_half(0x800F11CCu) : -1);
+                FMDialogueLayerTrace layer84 = {0};
+                fm_runtime_dialogue_layer_trace(&layer84);
+                printf("\x1b[2K cat2 gen/live/outer:%lu/%lu/%lu compiled:%d\n",
+                       (unsigned long)layer84.category2_calls,
+                       (unsigned long)layer84.category2_with_head,
+                       (unsigned long)g_b13584_outer_cat2,
+                       psx_game_is_function_entry(0x80040B48u));
+                printf("\x1b[2K cat2 head:%ld RA:%08lX flags:%02lX\n",
+                       (long)(int32_t)layer84.last_head,
+                       (unsigned long)layer84.last_ra,
+                       (unsigned long)layer84.last_flags);
+                printf("\x1b[2K cat2 cb:%08lX raw14/1C:%04lX/%04lX wh:%lu/%lu\n",
+                       (unsigned long)layer84.last_callback,
+                       (unsigned long)layer84.last_tpage,
+                       (unsigned long)layer84.last_clut,
+                       (unsigned long)layer84.last_width,
+                       (unsigned long)layer84.last_height);
+                uint32_t cat2_nodes84 = 0u, cat2_draw84 = 0u;
+                int cat2_idx84 = cpu ? (int16_t)cpu->read_half(0x800F11C4u) : -1;
+                uint64_t cat2_seen84[2] = {0u, 0u};
+                while (cpu && cat2_idx84 >= 0 && cat2_idx84 < 0x60 &&
+                       cat2_nodes84 < 0x60u &&
+                       !(cat2_seen84[(unsigned)cat2_idx84 >> 6] &
+                         (1ull << ((unsigned)cat2_idx84 & 63u))))
+                {
+                    cat2_seen84[(unsigned)cat2_idx84 >> 6] |=
+                        1ull << ((unsigned)cat2_idx84 & 63u);
+                    uint32_t obj84 = 0x800F1210u + (uint32_t)cat2_idx84 * 0x70u;
+                    if ((cpu->read_byte(obj84 + 8u) & 0xC0u) == 0xC0u)
+                        ++cat2_draw84;
+                    ++cat2_nodes84;
+                    cat2_idx84 = (int16_t)cpu->read_half(obj84 + 2u);
+                }
+                printf("\x1b[2K cat2 nodes/draw/tail:%lu/%lu/%d\n",
+                       (unsigned long)cat2_nodes84,
+                       (unsigned long)cat2_draw84, cat2_idx84);
+                printf("\x1b[2K draw gen/outer/prim:%lu/%lu/%lu\n",
+                       (unsigned long)layer84.object_render_calls,
+                       (unsigned long)g_b13584_outer_draw,
+                       (unsigned long)layer84.primitive_calls);
+                /* Count bright pixels on both PS1 framebuffer pages in the
+                 * dialogue interior. This tests visible output independently
+                 * of object creation and OT submission. */
+                unsigned bright84[2] = {0u, 0u};
+                unsigned vy84 = fm_gpu_display_y();
+                for (unsigned page84 = 0; page84 < 2u; ++page84)
+                    if (vy84 + 224u < 512u)
+                        for (unsigned y84 = 170u; y84 < 224u; y84 += 2u)
+                            for (unsigned x84 = 32u; x84 < 288u; x84 += 2u)
+                            {
+                                uint16_t pixel84 = vram[(vy84 + y84) * 1024u
+                                    + page84 * 320u + x84];
+                                if ((pixel84 & 31u) > 19u &&
+                                    ((pixel84 >> 5) & 31u) > 19u &&
+                                    ((pixel84 >> 10) & 31u) > 19u)
+                                    ++bright84[page84];
+                            }
+                printf("\x1b[2K textbox bright page0/1:%u/%u vy:%u\n",
+                       bright84[0], bright84[1], vy84);
             }
 #endif
 

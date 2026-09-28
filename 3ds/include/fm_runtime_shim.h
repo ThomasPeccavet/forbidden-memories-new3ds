@@ -230,6 +230,16 @@ typedef struct FMDialogueCreateTrace
 
 void fm_runtime_dialogue_create_trace(FMDialogueCreateTrace *out);
 
+/* B135.84: category-2 object path, sampled at generated function entries. */
+typedef struct FMDialogueLayerTrace
+{
+    uint32_t category2_calls, category2_with_head;
+    uint32_t object_render_calls, primitive_calls;
+    uint32_t last_head, last_ra, last_flags, last_callback;
+    uint32_t last_tpage, last_clut, last_width, last_height;
+} FMDialogueLayerTrace;
+void fm_runtime_dialogue_layer_trace(FMDialogueLayerTrace *out);
+
 void fm_runtime_b13567_pipeline(
     uint32_t *fin_entries,
     uint32_t *fin_b8,

@@ -47,6 +47,7 @@ static uint32_t g_b13565_e_85d08 = 0u;
 static uint32_t g_b13565_last_entry = 0u;
 static FMDialogueEntryTrace g_dialogue_entry_trace;
 static FMDialogueCreateTrace g_dialogue_create_trace;
+static FMDialogueLayerTrace g_dialogue_layer_trace;
 
 /*
  * B135.67 - locate the hand layer across the REAL frame pipeline.
@@ -1315,6 +1316,33 @@ void psx_check_interrupts_dispatch_entry(
                 g_dialogue_entry_trace.renderer_last_ra = cpu->gpr[31];
             break;
 
+        case 0x00040B48u:
+            ++g_dialogue_layer_trace.category2_calls;
+            if (cpu)
+            {
+                int32_t head = (int16_t)cpu->read_half(0x800F11C4u);
+                g_dialogue_layer_trace.last_head = (uint32_t)head;
+                g_dialogue_layer_trace.last_ra = cpu->gpr[31];
+                if (head >= 0 && head < 0x60)
+                {
+                    uint32_t obj = 0x800F1210u + (uint32_t)head * 0x70u;
+                    ++g_dialogue_layer_trace.category2_with_head;
+                    g_dialogue_layer_trace.last_flags = cpu->read_byte(obj + 8u);
+                    g_dialogue_layer_trace.last_callback = cpu->read_word(obj + 0x24u);
+                    g_dialogue_layer_trace.last_tpage = cpu->read_half(obj + 0x14u);
+                    g_dialogue_layer_trace.last_clut = cpu->read_half(obj + 0x1Cu);
+                    g_dialogue_layer_trace.last_width = cpu->read_half(obj + 0x3Cu);
+                    g_dialogue_layer_trace.last_height = cpu->read_half(obj + 0x3Eu);
+                }
+            }
+            break;
+        case 0x000418C0u:
+            ++g_dialogue_layer_trace.object_render_calls;
+            break;
+        case 0x000424B8u:
+            ++g_dialogue_layer_trace.primitive_calls;
+            break;
+
         case 0x000403D0u:
             ++g_dialogue_create_trace.constructor_calls;
             if (cpu && cpu->gpr[5] == 1u)
@@ -1710,6 +1738,11 @@ void fm_runtime_dialogue_entry_trace(FMDialogueEntryTrace *out)
 void fm_runtime_dialogue_create_trace(FMDialogueCreateTrace *out)
 {
     if (out) *out = g_dialogue_create_trace;
+}
+
+void fm_runtime_dialogue_layer_trace(FMDialogueLayerTrace *out)
+{
+    if (out) *out = g_dialogue_layer_trace;
 }
 
 
