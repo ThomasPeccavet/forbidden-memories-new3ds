@@ -1153,22 +1153,6 @@ static uint32_t g_b37_ring_write = 0;
 static uint32_t g_b37_ring_read = 0;
 
 /*
- * B71 - sortie robuste de la boucle DMA2 observee apres START
- * sur l'ecran titre.
- *
- * B37 savait deja relacher CHCR.START/BUSY. Mais lorsque le CPU
- * revient comme bloc interprete directement sur 80081A90, il peut
- * rester sur le basic-block de polling sans repasser par le chemin
- * normal assez vite. Une fois CHCR effectivement relache, B71 place
- * le PC au debut du polling GPUSTAT suivant (80081AC0), ce qui est
- * exactement le chemin "DMA termine" de FUN_800819E0.
- */
-static uint32_t g_b71_dma_loop_escape = 0u;
-static uint32_t g_b71_last_escape_from = 0u;
-static uint32_t g_b71_last_escape_to = 0u;
-
-
-/*
  * ============================================================
  * B72 - bridge START titre retire
  * ============================================================
@@ -12849,41 +12833,6 @@ int main(void)
                         g_b37_last_chcr_after = chcr;
                     }
 
-                    /*
-                     * B71 - si START/BUSY est bien retombe, la condition
-                     * du do/while PS1 est satisfaite. Sortir explicitement
-                     * du basic-block de polling et laisser le vrai code
-                     * enchainer sur l'attente GPUSTAT.
-                     */
-                    if (
-                        (
-                            g_b37_last_chcr_after
-                            &
-                            0x01000000u
-                        )
-                        ==
-                        0u
-                    )
-                    {
-                        g_b71_last_escape_from =
-                            dispatch_address;
-
-                        cpu->pc =
-                            0x80081AC0u;
-
-                        dispatch_address =
-                            cpu->pc;
-
-                        phys =
-                            dispatch_address
-                            &
-                            0x1FFFFFFFu;
-
-                        g_b71_last_escape_to =
-                            dispatch_address;
-
-                        ++g_b71_dma_loop_escape;
-                    }
                 }
 
                 if (
