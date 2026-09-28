@@ -1170,27 +1170,14 @@ static uint32_t g_b71_last_escape_to = 0u;
 
 /*
  * ============================================================
- * B72 - START titre : impulsion 10 frames + traces latchees
+ * B72 - bridge START titre retire
  * ============================================================
  *
- * Le probe PC valide envoie START actif-bas 0xFFF7 pendant
- * exactement 10 frames. Sur 3DS un appui bref peut ne durer qu'une
- * frame hote et etre manque par la chaine input/VBlank guest.
- *
- * Une fois le titre reel atteint (bridge G20 + retour 46750 + STR
- * termine), tout front physique START est donc etire a 10 frames
- * PS1 : psx_pressed bit 3 == 0x0008.
- *
- * Les valeurs sont aussi latchees pour rester visibles APRES que
- * l'utilisateur a relache START.
+ * L'ancien bridge etirait artificiellement START sur 10 frames guest.
+ * Le pad normal est desormais transmis sans extension temporelle.
+ * Les compteurs ci-dessous restent uniquement comme diagnostics du
+ * chemin pad guest historique.
  */
-static uint32_t g_b72_start_down_count = 0u;
-static uint32_t g_b72_start_hold_frames = 0u;
-static uint32_t g_b72_start_last_frame = 0u;
-static uint32_t g_b72_start_last_host_held = 0u;
-static uint32_t g_b72_start_last_host_down = 0u;
-static uint32_t g_b72_start_last_psx = 0u;
-
 static uint32_t g_b72_guest_raw_latched = 0u;
 static uint32_t g_b72_guest_held_latched = 0u;
 static uint32_t g_b72_guest_edge_latched = 0u;
@@ -11919,16 +11906,14 @@ int main(void)
 
         /*
          * ====================================================
-         * B72 - START titre identique au probe PC : 10 frames
+         * START titre sans bridge B72
          * ====================================================
          *
-         * Ne pas activer pendant le START de bring-up B61.
-         * Le gate ci-dessous n'est vrai qu'apres :
-         *   - l'intro STR,
-         *   - la file graphique B70,
-         *   - le retour propre de FUN_80046750.
+         * START suit uniquement le chemin pad normal. Le front physique
+         * sert aussi a armer B73, sans maintenir artificiellement le bit
+         * pendant plusieurs frames.
          */
-        int b72_title_stage =
+        int b73_title_stage =
             (
                 g_str_intro_last_done != 0u
                 &&
@@ -11940,38 +11925,12 @@ int main(void)
         if (
             (down & KEY_START)
             &&
-            b72_title_stage
-        )
-        {
-            ++g_b72_start_down_count;
-
-            g_b72_start_hold_frames = 10u;
-            g_b72_start_last_frame = frame;
-            g_b72_start_last_host_held = held;
-            g_b72_start_last_host_down = down;
-
-            if (g_b73_menu_force_count == 0u)
-            {
-                g_b73_menu_force_request = 1u;
-            }
-        }
-
-        if (
-            b72_title_stage
+            b73_title_stage
             &&
-            g_b72_start_hold_frames != 0u
+            g_b73_menu_force_count == 0u
         )
         {
-            /*
-             * Dans DAT_8009C70C, START est dans l'octet haut :
-             * bit PS1 0x0008 -> format guest 0x0800.
-             */
-            psx_pressed |= 0x0800u;
-
-            g_b72_start_last_psx =
-                psx_pressed;
-
-            --g_b72_start_hold_frames;
+            g_b73_menu_force_request = 1u;
         }
 
 
@@ -11987,15 +11946,11 @@ int main(void)
          * 8018001C/80180390. On ne forge donc ni image, ni menu.
          */
         if (
-            b72_title_stage
+            b73_title_stage
             &&
             g_b73_menu_force_request
             &&
             g_b73_menu_force_count == 0u
-            &&
-            g_b72_start_hold_frames == 0u
-            &&
-            frame >= (g_b72_start_last_frame + 10u)
         )
         {
             g_b73_state60a_before =
