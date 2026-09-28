@@ -5145,13 +5145,20 @@ static void fm_trace_dispatch(
                  * les mots GP0 crees par CE rendu d'objet sont
                  * envoyes directement au GPU.
                  */
-                if (
-                    g_b78_alloc_delta != 0u
-                    &&
-                    g_b75_menu_entrance_bridge != 0u
-                    &&
-                    g_b73_hit_menu_destroy == 0u
-                )
+                /*
+                 * B135.91 - retire le bypass B79 du menu.
+                 *
+                 * B79 etait un pont de bring-up qui poussait directement
+                 * les packets fraichement alloues vers GP0. Le chemin OT /
+                 * DrawOTag / DMA2 est maintenant suffisamment avance et doit
+                 * rester responsable de l'ordre complet des primitives,
+                 * y compris les uploads texture/CLUT qui ne sont pas
+                 * necessairement dans le delta de l'objet courant.
+                 *
+                 * Conserver l'instrumentation B78/B79, mais ne plus soumettre
+                 * directement les packets du menu.
+                 */
+                if (0)
                 {
                     fm_b79_submit_new_menu_packets(
                         g_b78_alloc_before,
