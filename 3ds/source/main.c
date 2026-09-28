@@ -926,6 +926,10 @@ static uint32_t g_q20_diag_ctx = 0u;
 static uint32_t g_q20_diag_count = 0u;
 static uint32_t g_q20_diag_pc = 0u;
 static uint32_t g_q20_diag_words[12] = {0};
+static uint32_t g_q20_hit_474e0 = 0u;
+static uint32_t g_q20_hit_463f8 = 0u;
+static uint32_t g_q20_hit_459d0 = 0u;
+static uint32_t g_q20_hit_45908 = 0u;
 
 
 static uint32_t g_b32_43e_returned = 0;
@@ -5810,6 +5814,22 @@ static void fm_trace_dispatch(
 
                 break;
             }
+            break;
+
+        case 0x000474E0u:
+            ++g_q20_hit_474e0;
+            break;
+
+        case 0x000463F8u:
+            ++g_q20_hit_463f8;
+            break;
+
+        case 0x000459D0u:
+            ++g_q20_hit_459d0;
+            break;
+
+        case 0x00045908u:
+            ++g_q20_hit_45908;
             break;
 
         case 0x000401A4u:
@@ -18919,6 +18939,16 @@ int main(void)
                     t86.glyph_write < 0x800F0000u)
                     glyph_count86 = (t86.glyph_write - 0x800EC390u) / 0x16u;
                 printf("\x1b[H\x1b[2K B135.90 MAIN MENU ITEMS\n");
+                printf("\x1b[2K Q20:%lu n:%lu mode:%08lX pc:%08lX\n",
+                       (unsigned long)g_q20_diag_hits,
+                       (unsigned long)g_q20_diag_count,
+                       (unsigned long)g_q20_diag_words[4],
+                       (unsigned long)g_q20_diag_pc);
+                printf("\x1b[2K SVC 474E0/463F8/459D0/45908:%lu/%lu/%lu/%lu\n",
+                       (unsigned long)g_q20_hit_474e0,
+                       (unsigned long)g_q20_hit_463f8,
+                       (unsigned long)g_q20_hit_459d0,
+                       (unsigned long)g_q20_hit_45908);
                 printf("\x1b[2K RUN:%u MEM:%d QS rc:%ld S/L:%lu/%lu\n",
                        (unsigned)game_running, memory_status,
                        (long)g_b135_qs_last_result,
