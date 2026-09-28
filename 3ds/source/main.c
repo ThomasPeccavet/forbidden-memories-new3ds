@@ -917,6 +917,16 @@ static uint32_t g_b66_last_sync_after = 0u;
  */
 static uint32_t g_title_graphics_ready = 0u;
 
+/*
+ * Temporary root-cause diagnostics for the type-0x20 resident queue.
+ * Observation only: never modifies guest RAM or CPU state.
+ */
+static uint32_t g_q20_diag_hits = 0u;
+static uint32_t g_q20_diag_ctx = 0u;
+static uint32_t g_q20_diag_count = 0u;
+static uint32_t g_q20_diag_pc = 0u;
+static uint32_t g_q20_diag_words[12] = {0};
+
 
 static uint32_t g_b32_43e_returned = 0;
 static uint32_t g_b32_43e_return_frame = 0;
@@ -12091,6 +12101,45 @@ int main(void)
 
 
         /*
+         * Root-cause observer for the queue that previously required B70.
+         * Read-only: capture the exact head entry while FUN_80046750 stalls.
+         */
+        if (
+            game_running
+            &&
+            cpu
+            &&
+            cpu->pc >= 0x80046750u
+            &&
+            cpu->pc < 0x800469ACu
+        )
+        {
+            uint32_t qctx = fm_memory_read_word(0x8009C7E0u);
+
+            if (qctx >= 0x80000000u && qctx < 0x80200000u)
+            {
+                uint32_t qcount = fm_memory_read_half(qctx + 0x4Cu);
+                uint32_t qtype = fm_memory_read_byte(qctx + 0x80u);
+                uint32_t qmark = fm_memory_read_word(qctx + 0x90u);
+
+                if (qcount != 0u && qtype == 0x20u && qmark != 0x20u)
+                {
+                    ++g_q20_diag_hits;
+                    g_q20_diag_ctx = qctx;
+                    g_q20_diag_count = qcount;
+                    g_q20_diag_pc = cpu->pc;
+
+                    for (unsigned qi = 0u; qi < 12u; ++qi)
+                    {
+                        g_q20_diag_words[qi] =
+                            fm_memory_read_word(qctx + 0x80u + qi * 4u);
+                    }
+                }
+            }
+        }
+
+
+        /*
          * ====================================================
          * B75 - settle de l'animation d'entree du menu
          * ====================================================
@@ -17149,6 +17198,29 @@ int main(void)
 #else
             printf("BUILD B135.87-BLACK-CLEAN (SAFE B135.71)\n");
 #endif
+
+            printf(
+                "Q20 hit:%lu ctx:%08lX n:%lu pc:%08lX\n"
+                "Q20 %08lX %08lX %08lX %08lX\n"
+                "    %08lX %08lX %08lX %08lX\n"
+                "    %08lX %08lX %08lX %08lX\n",
+                (unsigned long)g_q20_diag_hits,
+                (unsigned long)g_q20_diag_ctx,
+                (unsigned long)g_q20_diag_count,
+                (unsigned long)g_q20_diag_pc,
+                (unsigned long)g_q20_diag_words[0],
+                (unsigned long)g_q20_diag_words[1],
+                (unsigned long)g_q20_diag_words[2],
+                (unsigned long)g_q20_diag_words[3],
+                (unsigned long)g_q20_diag_words[4],
+                (unsigned long)g_q20_diag_words[5],
+                (unsigned long)g_q20_diag_words[6],
+                (unsigned long)g_q20_diag_words[7],
+                (unsigned long)g_q20_diag_words[8],
+                (unsigned long)g_q20_diag_words[9],
+                (unsigned long)g_q20_diag_words[10],
+                (unsigned long)g_q20_diag_words[11]
+            );
 
             printf(
                 "RUN:%c F:%lu CPU:%08lX MENU:%u\n",
