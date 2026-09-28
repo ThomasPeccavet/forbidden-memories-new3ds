@@ -48,6 +48,83 @@ static uint32_t g_b13565_last_entry = 0u;
 static FMDialogueEntryTrace g_dialogue_entry_trace;
 static FMDialogueCreateTrace g_dialogue_create_trace;
 static FMDialogueLayerTrace g_dialogue_layer_trace;
+static FMTextTrace g_text_trace;
+
+/* Indexes: script tick, text-object setup, glyph enqueue, category-6
+ * walker, glyph draw callback, category-6 create, category-6 remove. */
+static void b13586_text_entry(CPUState *cpu, uint32_t phys, int outer)
+{
+    int slot = -1;
+    switch (phys)
+    {
+        case 0x000393B8u: slot = 0; break;
+        case 0x000391ECu: slot = 1; break;
+        case 0x00036C64u: slot = 2; break;
+        case 0x00041048u: slot = 3; break;
+        case 0x00036298u: slot = 4; break;
+        case 0x000403D0u:
+            if (cpu && cpu->gpr[5] == 6u) slot = 5;
+            break;
+        case 0x00040530u:
+            if (cpu && (cpu->gpr[4] & 0x1FFFFFFFu) >= 0x000F1210u &&
+                (cpu->gpr[4] & 0x1FFFFFFFu) < 0x000F3C10u &&
+                ((cpu->gpr[4] & 0x1FFFFFFFu) - 0x000F1210u) % 0x70u == 0u &&
+                cpu->read_half(cpu->gpr[4] + 0x1Eu) == 6u)
+                slot = 6;
+            break;
+    }
+    if (slot < 0) return;
+    if (outer) ++g_text_trace.outer[slot];
+    else ++g_text_trace.gen[slot];
+    if (!cpu) return;
+    if (slot == 0 || slot == 1)
+    {
+        uint32_t ctx = cpu->gpr[4];
+        if ((ctx & 0x1FFFFFFFu) >= 0x000F0850u &&
+            (ctx & 0x1FFFFFFFu) <= 0x000F0B00u)
+        {
+            uint32_t ptr = cpu->read_word(ctx);
+            g_text_trace.script_ctx = ctx;
+            g_text_trace.script_ptr = ptr;
+            g_text_trace.script_flags = cpu->read_half(ctx + 0x34u);
+            g_text_trace.script_id = cpu->read_half(ctx + 0x36u);
+            g_text_trace.script_state = cpu->read_byte(ctx + 0x51u);
+            g_text_trace.text_object = cpu->read_word(ctx + 0x28u);
+            g_text_trace.glyph_write = cpu->read_word(ctx + 0x20u);
+            if ((ptr & 0x1FFFFFFFu) >= 0x00010000u &&
+                (ptr & 0x1FFFFFFFu) < 0x00200000u)
+                g_text_trace.script_next_byte = cpu->read_byte(ptr);
+        }
+    }
+    if (slot == 2) g_text_trace.last_char = cpu->gpr[5];
+    if (slot == 3 || slot == 4) g_text_trace.last_render_ra = cpu->gpr[31];
+    if (slot == 5)
+    {
+        g_text_trace.last_create_index = cpu->gpr[4];
+        g_text_trace.last_create_ra = cpu->gpr[31];
+    }
+    if (slot == 6)
+    {
+        g_text_trace.last_remove_index =
+            ((cpu->gpr[4] & 0x1FFFFFFFu) - 0x000F1210u) / 0x70u;
+        g_text_trace.last_remove_flags = cpu->read_half(cpu->gpr[4] + 8u);
+        g_text_trace.last_remove_ra = cpu->gpr[31];
+    }
+}
+
+void fm_runtime_text_trace_outer(CPUState *cpu, uint32_t phys)
+{
+#if FM_PERF_PROFILE
+    b13586_text_entry(cpu, phys, 1);
+#else
+    (void)cpu; (void)phys;
+#endif
+}
+
+void fm_runtime_text_trace_get(FMTextTrace *out)
+{
+    if (out) *out = g_text_trace;
+}
 
 /*
  * B135.67 - locate the hand layer across the REAL frame pipeline.
@@ -1271,6 +1348,7 @@ void psx_check_interrupts_dispatch_entry(
         resume_pc & 0x1FFFFFFFu;
 
 #if FM_PERF_PROFILE
+    b13586_text_entry(cpu, phys, 0);
     g_b13565_last_entry =
         resume_pc;
 

@@ -4239,6 +4239,7 @@ static void fm_trace_dispatch(
 )
 {
 #if FM_PERF_PROFILE
+    fm_runtime_text_trace_outer(cpu, phys);
     if (g_b13582_pending && dispatch_address == g_b13582_last_ra)
     {
         ++g_b13582_returned;
@@ -17948,9 +17949,9 @@ int main(void)
             fm_memory_dma_debug(&b130_dma);
 
 #if FM_PERF_PROFILE
-            printf("BUILD B135.85-OBJECT-PROFILE (SAFE B135.71)\n");
+            printf("BUILD B135.86-TEXT-PROFILE (SAFE B135.71)\n");
 #else
-            printf("BUILD B135.85-OBJECT-CLEAN (SAFE B135.71)\n");
+            printf("BUILD B135.86-TEXT-CLEAN (SAFE B135.71)\n");
 #endif
 
             printf(
@@ -19607,174 +19608,77 @@ int main(void)
 
             }
 
-            /* Keep the decisive snapshot on the visible first rows even if
-             * older debug lines scroll the console during the same refresh. */
+            /* B135.86: keep the actual script/glyph path visible. */
 #if FM_PERF_PROFILE
             {
-                FMDialogueEntryTrace trace81 = {0};
-                uint32_t nodes81 = 0u;
-                fm_runtime_dialogue_entry_trace(&trace81);
-                if (cpu)
-                    b13549_obj_list_probe(cpu, 0x800F11C2u,
-                                            NULL, &nodes81, NULL, NULL, NULL);
-                printf("\x1b[H\x1b[2K B135.85 OBJECT STATE DIAG\n");
-                printf("\x1b[2K PC:%08lX RA:%08lX C2:%lu\n",
+                FMTextTrace t86 = {0};
+                fm_runtime_text_trace_get(&t86);
+                int h86 = cpu ? (int16_t)cpu->read_half(0x800F11CCu) : -1;
+                uint32_t obj86 = (h86 >= 0 && h86 < 0x60)
+                    ? 0x800F1210u + (uint32_t)h86 * 0x70u : 0u;
+                uint32_t glyph_count86 = 0u;
+                if (t86.glyph_write >= 0x800EC390u &&
+                    t86.glyph_write < 0x800F0000u)
+                    glyph_count86 = (t86.glyph_write - 0x800EC390u) / 0x16u;
+                printf("\x1b[H\x1b[2K B135.86 SCRIPT / GLYPH DIAG\n");
+                printf("\x1b[2K PC:%08lX RA:%08lX cat6 head:%d\n",
                        (unsigned long)(cpu ? cpu->pc : 0u),
-                       (unsigned long)(cpu ? cpu->gpr[31] : 0u),
-                       (unsigned long)nodes81);
-                printf("\x1b[2K head at walker:%ld\n",
-                       (long)(int32_t)trace81.last_c2_head);
-                printf("\x1b[2K C2 now:%08lX first:%08lX\n",
-                       (unsigned long)(cpu ? cpu->read_word(0x800923E0u) : 0u),
-                       (unsigned long)trace81.first_c2_ptr);
-                printf("\x1b[2K C2 at walker:%08lX\n",
-                       (unsigned long)trace81.last_c2_ptr);
-                printf("\x1b[2K compiled W/R:%d/%d outer:%lu/%lu\n",
-                       psx_game_is_function_entry(0x80041674u),
-                       psx_game_is_function_entry(0x800408BCu),
-                       (unsigned long)g_b13580_hit_41674,
-                       (unsigned long)g_b13579_hit_408bc);
-                printf("\x1b[2K nested W/R/C2:%lu/%lu/%lu\n",
-                       (unsigned long)trace81.walker_calls,
-                       (unsigned long)trace81.renderer_calls,
-                       (unsigned long)trace81.walker_with_c2);
-                printf("\x1b[2K Wra/Rra:%08lX/%08lX\n",
-                       (unsigned long)trace81.walker_last_ra,
-                       (unsigned long)trace81.renderer_last_ra);
-                printf("\x1b[2K callback:%08lX flags:%02lX\n",
-                       (unsigned long)trace81.last_object_callback,
-                       (unsigned long)trace81.last_object_flags);
-                printf("\x1b[2K OV atW/now:%08lX/%08lX\n",
-                       (unsigned long)trace81.last_overlay_word,
-                       (unsigned long)(cpu ? cpu->read_word(0x80180000u) : 0u));
-                printf("\x1b[2K GP0:%llu rect/quad:%lu/%lu\n",
+                       (unsigned long)(cpu ? cpu->gpr[31] : 0u), h86);
+                printf("\x1b[2K script tick gen/outer:%lu/%lu setup:%lu/%lu\n",
+                       (unsigned long)t86.gen[0], (unsigned long)t86.outer[0],
+                       (unsigned long)t86.gen[1], (unsigned long)t86.outer[1]);
+                printf("\x1b[2K char gen/outer:%lu/%lu last:%08lX\n",
+                       (unsigned long)t86.gen[2], (unsigned long)t86.outer[2],
+                       (unsigned long)t86.last_char);
+                printf("\x1b[2K cat6 walker gen/outer:%lu/%lu draw:%lu/%lu\n",
+                       (unsigned long)t86.gen[3], (unsigned long)t86.outer[3],
+                       (unsigned long)t86.gen[4], (unsigned long)t86.outer[4]);
+                printf("\x1b[2K cat6 create gen/outer:%lu/%lu remove:%lu/%lu\n",
+                       (unsigned long)t86.gen[5], (unsigned long)t86.outer[5],
+                       (unsigned long)t86.gen[6], (unsigned long)t86.outer[6]);
+                printf("\x1b[2K compiled tick/setup/char/walk/draw:%d/%d/%d/%d/%d\n",
+                       psx_game_is_function_entry(0x800393B8u),
+                       psx_game_is_function_entry(0x800391ECu),
+                       psx_game_is_function_entry(0x80036C64u),
+                       psx_game_is_function_entry(0x80041048u),
+                       psx_game_is_function_entry(0x80036298u));
+                printf("\x1b[2K last ctx:%08lX fl/id/state:%04lX/%04lX/%02lX\n",
+                       (unsigned long)t86.script_ctx,
+                       (unsigned long)t86.script_flags,
+                       (unsigned long)t86.script_id,
+                       (unsigned long)t86.script_state);
+                printf("\x1b[2K script ptr/byte:%08lX/%02lX textobj:%08lX\n",
+                       (unsigned long)t86.script_ptr,
+                       (unsigned long)t86.script_next_byte,
+                       (unsigned long)t86.text_object);
+                printf("\x1b[2K glyph write:%08lX rec:%lu draw RA:%08lX\n",
+                       (unsigned long)t86.glyph_write,
+                       (unsigned long)glyph_count86,
+                       (unsigned long)t86.last_render_ra);
+                printf("\x1b[2K obj6 fl/cb4C:%04X/%08lX\n",
+                       obj86 ? cpu->read_half(obj86 + 8u) : 0u,
+                       (unsigned long)(obj86 ? cpu->read_word(obj86 + 0x4Cu) : 0u));
+                printf("\x1b[2K create idx/RA:%lu/%08lX remove idx/fl/RA:%lu/%04lX/%08lX\n",
+                       (unsigned long)t86.last_create_index,
+                       (unsigned long)t86.last_create_ra,
+                       (unsigned long)t86.last_remove_index,
+                       (unsigned long)t86.last_remove_flags,
+                       (unsigned long)t86.last_remove_ra);
+                for (unsigned slot86 = 0; cpu && slot86 < 4u; ++slot86)
+                {
+                    uint32_t ctx86 = 0x800F0850u + slot86 * 100u;
+                    printf("\x1b[2K slot%u fl/id:%04X/%04X state:%02X obj:%08lX glyph:%08lX\n",
+                           slot86, cpu->read_half(ctx86 + 0x34u),
+                           cpu->read_half(ctx86 + 0x36u),
+                           cpu->read_byte(ctx86 + 0x51u),
+                           (unsigned long)cpu->read_word(ctx86 + 0x28u),
+                           (unsigned long)cpu->read_word(ctx86 + 0x20u));
+                }
+                printf("\x1b[2K GP0:%llu rect/quad:%lu/%lu display:%u,%u\n",
                        (unsigned long long)gpu_debug.gp0_words,
                        (unsigned long)gpu_debug.b124_rect_hits,
-                       (unsigned long)gpu_debug.b125_texquad_hits);
-                printf("\x1b[2K live/ret:%lu/%lu head:%lu\n",
-                       (unsigned long)g_b13582_active_calls,
-                       (unsigned long)g_b13582_returned,
-                       (unsigned long)g_b13582_last_head);
-                printf("\x1b[2K nodes/draw/bad:%lu/%lu/%lu\n",
-                       (unsigned long)g_b13582_last_nodes,
-                       (unsigned long)g_b13582_last_drawable,
-                       (unsigned long)g_b13582_last_bad);
-                printf("\x1b[2K last cb:%08lX fl:%02lX\n",
-                       (unsigned long)g_b13582_last_callback,
-                       (unsigned long)g_b13582_last_flags);
-                printf("\x1b[2K last ra:%08lX pending:%lu\n",
-                       (unsigned long)g_b13582_last_ra,
-                       (unsigned long)g_b13582_pending);
-                printf("\x1b[2K last GP0/422/424:%lu/%lu/%lu\n",
-                       (unsigned long)g_b13582_gp0_words,
-                       (unsigned long)g_b13582_last_422c0,
-                       (unsigned long)g_b13582_last_424b8);
-                FMDialogueCreateTrace create83 = {0};
-                fm_runtime_dialogue_create_trace(&create83);
-                printf("\x1b[2K create all/C2 gen:%lu/%lu\n",
-                       (unsigned long)create83.constructor_calls,
-                       (unsigned long)create83.c2_constructor_calls);
-                printf("\x1b[2K create C2 outer:%lu idx:%lu\n",
-                       (unsigned long)g_b13583_outer_c2_create,
-                       (unsigned long)(create83.c2_constructor_calls
-                           ? create83.last_c2_index : g_b13583_last_create_index));
-                printf("\x1b[2K create RA:%08lX head before:%ld\n",
-                       (unsigned long)(create83.c2_constructor_calls
-                           ? create83.last_c2_ra : g_b13583_last_create_ra),
-                       create83.c2_constructor_calls
-                           ? (long)(int32_t)create83.last_c2_head_before
-                           : -1l);
-                printf("\x1b[2K remove gen/outer:%lu/%lu cat:%lu\n",
-                       (unsigned long)create83.remove_calls,
-                       (unsigned long)g_b13583_outer_remove,
-                       (unsigned long)create83.last_remove_category);
-                printf("\x1b[2K heads 0/1/2/3:%d/%d/%d/%d\n",
-                       cpu ? (int16_t)cpu->read_half(0x800F11C0u) : -1,
-                       cpu ? (int16_t)cpu->read_half(0x800F11C2u) : -1,
-                       cpu ? (int16_t)cpu->read_half(0x800F11C4u) : -1,
-                       cpu ? (int16_t)cpu->read_half(0x800F11C6u) : -1);
-                printf("\x1b[2K heads 4/5/6:%d/%d/%d\n",
-                       cpu ? (int16_t)cpu->read_half(0x800F11C8u) : -1,
-                       cpu ? (int16_t)cpu->read_half(0x800F11CAu) : -1,
-                       cpu ? (int16_t)cpu->read_half(0x800F11CCu) : -1);
-                FMDialogueLayerTrace layer84 = {0};
-                fm_runtime_dialogue_layer_trace(&layer84);
-                printf("\x1b[2K cat2 gen/live/outer:%lu/%lu/%lu compiled:%d\n",
-                       (unsigned long)layer84.category2_calls,
-                       (unsigned long)layer84.category2_with_head,
-                       (unsigned long)g_b13584_outer_cat2,
-                       psx_game_is_function_entry(0x80040B48u));
-                printf("\x1b[2K cat2 head:%ld RA:%08lX flags:%02lX\n",
-                       (long)(int32_t)layer84.last_head,
-                       (unsigned long)layer84.last_ra,
-                       (unsigned long)layer84.last_flags);
-                printf("\x1b[2K cat2 cb:%08lX raw14/1C:%04lX/%04lX wh:%lu/%lu\n",
-                       (unsigned long)layer84.last_callback,
-                       (unsigned long)layer84.last_tpage,
-                       (unsigned long)layer84.last_clut,
-                       (unsigned long)layer84.last_width,
-                       (unsigned long)layer84.last_height);
-                uint32_t cat2_nodes84 = 0u, cat2_draw84 = 0u;
-                int cat2_idx84 = cpu ? (int16_t)cpu->read_half(0x800F11C4u) : -1;
-                uint64_t cat2_seen84[2] = {0u, 0u};
-                while (cpu && cat2_idx84 >= 0 && cat2_idx84 < 0x60 &&
-                       cat2_nodes84 < 0x60u &&
-                       !(cat2_seen84[(unsigned)cat2_idx84 >> 6] &
-                         (1ull << ((unsigned)cat2_idx84 & 63u))))
-                {
-                    cat2_seen84[(unsigned)cat2_idx84 >> 6] |=
-                        1ull << ((unsigned)cat2_idx84 & 63u);
-                    uint32_t obj84 = 0x800F1210u + (uint32_t)cat2_idx84 * 0x70u;
-                    if ((cpu->read_byte(obj84 + 8u) & 0xC0u) == 0xC0u)
-                        ++cat2_draw84;
-                    ++cat2_nodes84;
-                    cat2_idx84 = (int16_t)cpu->read_half(obj84 + 2u);
-                }
-                printf("\x1b[2K cat2 nodes/draw/tail:%lu/%lu/%d\n",
-                       (unsigned long)cat2_nodes84,
-                       (unsigned long)cat2_draw84, cat2_idx84);
-                printf("\x1b[2K cat2 outer live/draw:%lu/%lu ra:%08lX\n",
-                       (unsigned long)g_b13585_outer_cat2_live,
-                       (unsigned long)g_b13585_outer_cat2_drawable,
-                       (unsigned long)g_b13585_cat2_ra);
-                printf("\x1b[2K cat2 obj fl:%04lX cat:%lu cb:%08lX\n",
-                       (unsigned long)g_b13585_cat2_flags,
-                       (unsigned long)g_b13585_cat2_category,
-                       (unsigned long)g_b13585_cat2_callback);
-                printf("\x1b[2K cat2 create gen/outer:%lu/%lu idx:%lu ra:%08lX\n",
-                       (unsigned long)create83.category2_constructor_calls,
-                       (unsigned long)g_b13585_outer_cat2_create,
-                       (unsigned long)create83.last_category2_create_index,
-                       (unsigned long)create83.last_category2_create_ra);
-                printf("\x1b[2K cat2 remove gen/outer:%lu/%lu idx:%lu fl:%04lX ra:%08lX\n",
-                       (unsigned long)create83.category2_remove_calls,
-                       (unsigned long)g_b13585_outer_cat2_remove,
-                       (unsigned long)create83.last_category2_remove_index,
-                       (unsigned long)create83.last_category2_remove_flags,
-                       (unsigned long)create83.last_category2_remove_ra);
-                printf("\x1b[2K draw gen/outer/prim:%lu/%lu/%lu\n",
-                       (unsigned long)layer84.object_render_calls,
-                       (unsigned long)g_b13584_outer_draw,
-                       (unsigned long)layer84.primitive_calls);
-                /* Count bright pixels on both PS1 framebuffer pages in the
-                 * dialogue interior. This tests visible output independently
-                 * of object creation and OT submission. */
-                unsigned bright84[2] = {0u, 0u};
-                unsigned vy84 = fm_gpu_display_y();
-                for (unsigned page84 = 0; page84 < 2u; ++page84)
-                    if (vy84 + 224u < 512u)
-                        for (unsigned y84 = 170u; y84 < 224u; y84 += 2u)
-                            for (unsigned x84 = 32u; x84 < 288u; x84 += 2u)
-                            {
-                                uint16_t pixel84 = vram[(vy84 + y84) * 1024u
-                                    + page84 * 320u + x84];
-                                if ((pixel84 & 31u) > 19u &&
-                                    ((pixel84 >> 5) & 31u) > 19u &&
-                                    ((pixel84 >> 10) & 31u) > 19u)
-                                    ++bright84[page84];
-                            }
-                printf("\x1b[2K textbox bright page0/1:%u/%u vy:%u\n",
-                       bright84[0], bright84[1], vy84);
+                       (unsigned long)gpu_debug.b125_texquad_hits,
+                       fm_gpu_display_x(), fm_gpu_display_y());
             }
 #endif
 

@@ -244,6 +244,18 @@ typedef struct FMDialogueLayerTrace
 } FMDialogueLayerTrace;
 void fm_runtime_dialogue_layer_trace(FMDialogueLayerTrace *out);
 
+/* B135.86: actual dialogue script, glyph queue and category-6 renderer. */
+typedef struct FMTextTrace
+{
+    uint32_t gen[7], outer[7];
+    uint32_t script_ctx, script_ptr, script_flags, script_id, script_state;
+    uint32_t script_next_byte, text_object, glyph_write, last_char;
+    uint32_t last_create_index, last_create_ra, last_remove_index;
+    uint32_t last_remove_ra, last_remove_flags, last_render_ra;
+} FMTextTrace;
+void fm_runtime_text_trace_outer(CPUState *cpu, uint32_t phys);
+void fm_runtime_text_trace_get(FMTextTrace *out);
+
 void fm_runtime_b13567_pipeline(
     uint32_t *fin_entries,
     uint32_t *fin_b8,
