@@ -1006,6 +1006,21 @@ static uint32_t g_463f8_last_qcount = 0u;
 static uint32_t g_459d0_active20_mark10 = 0u;
 static uint32_t g_459d0_last_qcount = 0u;
 
+/* B136.00 - diagnose white-screen stall in FUN_80046750. */
+static uint32_t g_46750_hits = 0u;
+static uint32_t g_46750_last_ra = 0u;
+static uint32_t g_46750_last_qcount = 0u;
+static uint32_t g_46750_last_head_type = 0u;
+static uint32_t g_46750_last_head_mark = 0u;
+static uint32_t g_46750_pc_46810_hits = 0u;
+static uint32_t g_495c8_hits = 0u;
+static uint32_t g_495c8_last_a0 = 0u;
+static uint32_t g_495c8_last_ra = 0u;
+static uint32_t g_47660_hits = 0u;
+static uint32_t g_47660_last_a0 = 0u;
+static uint32_t g_47660_last_a1 = 0u;
+static uint32_t g_47660_last_a2 = 0u;
+
 
 static uint32_t g_b32_43e_returned = 0;
 static uint32_t g_b32_43e_return_frame = 0;
@@ -6133,6 +6148,53 @@ static void fm_trace_dispatch(
                     case 0x800480B4u: ++g_47c18_from_48044; break;
                     default: break;
                 }
+            }
+            break;
+
+        case 0x00046750u:
+            ++g_46750_hits;
+            if (cpu)
+            {
+                uint32_t qctx = fm_memory_read_word(0x8009C7E0u);
+                g_46750_last_ra = cpu->gpr[31];
+                if (qctx >= 0x80000000u && qctx < 0x80200000u)
+                {
+                    g_46750_last_qcount = fm_memory_read_half(qctx + 0x4Cu);
+                    g_46750_last_head_type = fm_memory_read_byte(qctx + 0x80u);
+                    g_46750_last_head_mark = fm_memory_read_word(qctx + 0x90u);
+                }
+            }
+            break;
+
+        case 0x00046810u:
+            ++g_46750_pc_46810_hits;
+            {
+                uint32_t qctx = fm_memory_read_word(0x8009C7E0u);
+                if (qctx >= 0x80000000u && qctx < 0x80200000u)
+                {
+                    g_46750_last_qcount = fm_memory_read_half(qctx + 0x4Cu);
+                    g_46750_last_head_type = fm_memory_read_byte(qctx + 0x80u);
+                    g_46750_last_head_mark = fm_memory_read_word(qctx + 0x90u);
+                }
+            }
+            break;
+
+        case 0x000495C8u:
+            ++g_495c8_hits;
+            if (cpu)
+            {
+                g_495c8_last_a0 = cpu->gpr[4];
+                g_495c8_last_ra = cpu->gpr[31];
+            }
+            break;
+
+        case 0x00047660u:
+            ++g_47660_hits;
+            if (cpu)
+            {
+                g_47660_last_a0 = cpu->gpr[4];
+                g_47660_last_a1 = cpu->gpr[5];
+                g_47660_last_a2 = cpu->gpr[6];
             }
             break;
 
@@ -19978,7 +20040,9 @@ int main(void)
                             "qmgr ed88/b78c/bdd4/b21c/c3d8/c548/b28c/ae58=%lu/%lu/%lu/%lu/%lu/%lu/%lu/%lu\n"
                             "qstate count=%lu head=%lu cur=%lu hist=%lu cd0=%lu cb0=%lu cf4=%lu ccc=%02lX cd4=%02lX\n"
                             "qcur handle=%08lX cmd=%02lX cb=%08lX retry=%08lX lastcmd=%02lX lasthandle=%08lX event=%02lX\n"
-                            "cdinit c218/c2b8/c720/a878/d224=%lu/%lu/%lu/%lu/%lu changes=%lu %lu->%lu pc=%08lX ra=%08lX\n",
+                            "cdinit c218/c2b8/c720/a878/d224=%lu/%lu/%lu/%lu/%lu changes=%lu %lu->%lu pc=%08lX ra=%08lX\n"
+                            "ws46750 hits=%lu pc46810=%lu ra=%08lX q=%lu type=%02lX mark=%08lX\n"
+                            "ws495c8 hits=%lu a0=%08lX ra=%08lX 47660=%lu a0/a1/a2=%08lX/%08lX/%08lX\n",
                             (unsigned long)frame,
                             (unsigned long)(cpu ? cpu->pc : 0u),
                             (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -20067,7 +20131,20 @@ int main(void)
                             (unsigned long)g_cdinit_last_old,
                             (unsigned long)g_cdinit_last_new,
                             (unsigned long)g_cdinit_last_change_pc,
-                            (unsigned long)g_cdinit_last_change_ra);
+                            (unsigned long)g_cdinit_last_change_ra,
+                            (unsigned long)g_46750_hits,
+                            (unsigned long)g_46750_pc_46810_hits,
+                            (unsigned long)g_46750_last_ra,
+                            (unsigned long)g_46750_last_qcount,
+                            (unsigned long)g_46750_last_head_type,
+                            (unsigned long)g_46750_last_head_mark,
+                            (unsigned long)g_495c8_hits,
+                            (unsigned long)g_495c8_last_a0,
+                            (unsigned long)g_495c8_last_ra,
+                            (unsigned long)g_47660_hits,
+                            (unsigned long)g_47660_last_a0,
+                            (unsigned long)g_47660_last_a1,
+                            (unsigned long)g_47660_last_a2);
                         fclose(c4f);
                     }
                 }
