@@ -473,6 +473,13 @@ static FM_BiosEvent g_bios_events[
     FM_BIOS_EVENT_COUNT
 ];
 
+/* B136.5 - BIOS event diagnostics for the CD readiness gate. */
+static uint32_t g_b136_bios_deliver_hits = 0u;
+static uint32_t g_b136_bios_deliver_class = 0u;
+static uint32_t g_b136_bios_deliver_spec = 0u;
+static uint32_t g_b136_bios_test_hits = 0u;
+static uint32_t g_b136_bios_test_handle = 0u;
+
 
 static int fm_bios_event_index(
     uint32_t handle
@@ -2383,6 +2390,10 @@ int fm_bios_try_hle(
                 uint32_t spec =
                     cpu->gpr[5];
 
+                ++g_b136_bios_deliver_hits;
+                g_b136_bios_deliver_class = class_id;
+                g_b136_bios_deliver_spec = spec;
+
 
                 for (
                     unsigned i = 0;
@@ -2662,6 +2673,9 @@ int fm_bios_try_hle(
              */
             case 0x0B:
             {
+                ++g_b136_bios_test_hits;
+                g_b136_bios_test_handle = cpu->gpr[4];
+
                 int index =
                     fm_bios_event_index(
                         cpu->gpr[4]
@@ -5426,4 +5440,22 @@ void fm_runtime_b136_post681(uint32_t out[11])
     out[8] = g_b136_post681_43dc8;
     out[9] = g_b136_post681_159f4;
     out[10] = g_b136_post681_2cf60;
+}
+
+
+void fm_runtime_b136_bios_event_diag(uint32_t out[12])
+{
+    if (!out) return;
+    out[0] = g_b136_bios_deliver_hits;
+    out[1] = g_b136_bios_deliver_class;
+    out[2] = g_b136_bios_deliver_spec;
+    out[3] = g_b136_bios_test_hits;
+    out[4] = g_b136_bios_test_handle;
+    out[5] = g_bios_events[0].used;
+    out[6] = g_bios_events[0].enabled;
+    out[7] = g_bios_events[0].ready;
+    out[8] = g_bios_events[0].class_id;
+    out[9] = g_bios_events[0].spec;
+    out[10] = g_bios_events[0].mode;
+    out[11] = g_bios_events[0].func;
 }
