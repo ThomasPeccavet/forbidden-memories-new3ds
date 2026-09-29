@@ -20365,8 +20365,10 @@ int main(void)
 #if FM_PERF_PROFILE
             uint32_t post681[11] = {0};
             uint32_t bios_event_diag[12] = {0};
+            uint32_t dma4_diag[4] = {0};
             fm_runtime_b136_post681(post681);
             fm_runtime_b136_bios_event_diag(bios_event_diag);
+            fm_runtime_b136_dma4_diag(dma4_diag);
 
             /*
              * Persistent manual-debug snapshot.
@@ -20510,7 +20512,10 @@ int main(void)
                         "producer_76098_a0=%08lX\n"
                         "producer_76098_a1=%08lX\n"
                         "producer_76098_ra=%08lX\n"
-                        "producer_93ff0=%08lX\n",
+                        "producer_93ff0=%08lX\n"
+                        "dma4_transfers=%lu\n"
+                        "dma4_event_bridge=%lu\n"
+                        "dma4_event_ready=%lu\n",
                         (unsigned long)frame,
                         (unsigned long)(cpu ? cpu->pc : 0u),
                         (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -20640,7 +20645,10 @@ int main(void)
                         (unsigned long)g_b136_76098_last_a0,
                         (unsigned long)g_b136_76098_last_a1,
                         (unsigned long)g_b136_76098_last_ra,
-                        (unsigned long)fm_memory_read_word(0x80093FF0u)
+                        (unsigned long)fm_memory_read_word(0x80093FF0u),
+                        (unsigned long)dma4_diag[2],
+                        (unsigned long)dma4_diag[0],
+                        (unsigned long)dma4_diag[3]
                     );
                     fclose(dbg);
                 }
