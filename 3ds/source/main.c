@@ -20389,9 +20389,11 @@ int main(void)
             uint32_t post681[11] = {0};
             uint32_t bios_event_diag[12] = {0};
             uint32_t dma4_diag[4] = {0};
+            uint32_t dma4_write_diag[6] = {0};
             fm_runtime_b136_post681(post681);
             fm_runtime_b136_bios_event_diag(bios_event_diag);
             fm_runtime_b136_dma4_diag(dma4_diag);
+            fm_memory_dma4_write_diag(dma4_write_diag);
 
             /*
              * Persistent manual-debug snapshot.
@@ -20546,7 +20548,13 @@ int main(void)
                         "spu_75afc_ra=%08lX\n"
                         "spu_ptr_madr=%08lX\n"
                         "spu_ptr_bcr=%08lX\n"
-                        "spu_ptr_chcr=%08lX\n",
+                        "spu_ptr_chcr=%08lX\n"
+                        "dma4_madr_writes=%lu\n"
+                        "dma4_bcr_writes=%lu\n"
+                        "dma4_chcr_writes=%lu\n"
+                        "dma4_last_madr=%08lX\n"
+                        "dma4_last_bcr=%08lX\n"
+                        "dma4_last_chcr=%08lX\n",
                         (unsigned long)frame,
                         (unsigned long)(cpu ? cpu->pc : 0u),
                         (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -20687,7 +20695,13 @@ int main(void)
                         (unsigned long)g_b136_75afc_last_ra,
                         (unsigned long)fm_memory_read_word(0x80093FBCu),
                         (unsigned long)fm_memory_read_word(0x80093FC0u),
-                        (unsigned long)fm_memory_read_word(0x80093FC4u)
+                        (unsigned long)fm_memory_read_word(0x80093FC4u),
+                        (unsigned long)dma4_write_diag[0],
+                        (unsigned long)dma4_write_diag[1],
+                        (unsigned long)dma4_write_diag[2],
+                        (unsigned long)dma4_write_diag[3],
+                        (unsigned long)dma4_write_diag[4],
+                        (unsigned long)dma4_write_diag[5]
                     );
                     fclose(dbg);
                 }
