@@ -30,6 +30,10 @@ void fm_memory_vblank_tick(void);
 uint16_t fm_memory_i_stat(void);
 uint16_t fm_memory_i_mask(void);
 
+/* B136.6: minimal DMA4/SPU completion bridge. */
+uint32_t fm_memory_dma4_take_completion(void);
+uint32_t fm_memory_dma4_transfer_count(void);
+
 
 /*
  * B135 - etat MMIO minimal pour le quick-state de debug.
@@ -54,6 +58,10 @@ typedef struct FMMemoryQuickState
     uint32_t dma2_madr;
     uint32_t dma2_bcr;
     uint32_t dma2_chcr;
+
+    uint32_t dma4_madr;
+    uint32_t dma4_bcr;
+    uint32_t dma4_chcr;
 
     uint32_t dma6_madr;
     uint32_t dma6_bcr;
