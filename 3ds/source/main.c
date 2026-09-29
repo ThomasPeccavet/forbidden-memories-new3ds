@@ -1021,6 +1021,15 @@ static uint32_t g_47660_last_a0 = 0u;
 static uint32_t g_47660_last_a1 = 0u;
 static uint32_t g_47660_last_a2 = 0u;
 
+/* B136.01 - compact 46750 queue loop trace. */
+static uint32_t g_46750_loop_samples = 0u;
+static uint32_t g_46750_loop_index = 0u;
+static uint32_t g_46750_loop_qcount = 0u;
+static uint32_t g_46750_loop_type = 0u;
+static uint32_t g_46750_loop_mark = 0u;
+static uint32_t g_46750_q_type[3] = {0u,0u,0u};
+static uint32_t g_46750_q_mark[3] = {0u,0u,0u};
+
 
 static uint32_t g_b32_43e_returned = 0;
 static uint32_t g_b32_43e_return_frame = 0;
@@ -6172,9 +6181,28 @@ static void fm_trace_dispatch(
                 uint32_t qctx = fm_memory_read_word(0x8009C7E0u);
                 if (qctx >= 0x80000000u && qctx < 0x80200000u)
                 {
-                    g_46750_last_qcount = fm_memory_read_half(qctx + 0x4Cu);
+                    uint32_t qn = fm_memory_read_half(qctx + 0x4Cu);
+                    g_46750_last_qcount = qn;
                     g_46750_last_head_type = fm_memory_read_byte(qctx + 0x80u);
                     g_46750_last_head_mark = fm_memory_read_word(qctx + 0x90u);
+
+                    ++g_46750_loop_samples;
+                    g_46750_loop_qcount = qn;
+                    /* iVar5 is the byte offset in the original function; on MIPS
+                     * this hot loop keeps it in s1 in the generated guest path. */
+                    g_46750_loop_index = cpu ? ((cpu->gpr[17] / 0x30u) & 0xFFu) : 0u;
+                    {
+                        uint32_t off = g_46750_loop_index * 0x30u;
+                        g_46750_loop_type = fm_memory_read_byte(qctx + 0x80u + off);
+                        g_46750_loop_mark = fm_memory_read_word(qctx + 0x90u + off);
+                    }
+
+                    for (uint32_t qi = 0u; qi < 3u; ++qi)
+                    {
+                        uint32_t off = qi * 0x30u;
+                        g_46750_q_type[qi] = qi < qn ? fm_memory_read_byte(qctx + 0x80u + off) : 0u;
+                        g_46750_q_mark[qi] = qi < qn ? fm_memory_read_word(qctx + 0x90u + off) : 0u;
+                    }
                 }
             }
             break;
@@ -20042,7 +20070,8 @@ int main(void)
                             "qcur handle=%08lX cmd=%02lX cb=%08lX retry=%08lX lastcmd=%02lX lasthandle=%08lX event=%02lX\n"
                             "cdinit c218/c2b8/c720/a878/d224=%lu/%lu/%lu/%lu/%lu changes=%lu %lu->%lu pc=%08lX ra=%08lX\n"
                             "ws46750 hits=%lu pc46810=%lu ra=%08lX q=%lu type=%02lX mark=%08lX\n"
-                            "ws495c8 hits=%lu a0=%08lX ra=%08lX 47660=%lu a0/a1/a2=%08lX/%08lX/%08lX\n",
+                            "ws495c8 hits=%lu a0=%08lX ra=%08lX 47660=%lu a0/a1/a2=%08lX/%08lX/%08lX\n"
+                            "wsloop samples=%lu idx=%lu q=%lu type=%02lX mark=%08lX q0=%02lX/%08lX q1=%02lX/%08lX q2=%02lX/%08lX\n",
                             (unsigned long)frame,
                             (unsigned long)(cpu ? cpu->pc : 0u),
                             (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -20144,7 +20173,18 @@ int main(void)
                             (unsigned long)g_47660_hits,
                             (unsigned long)g_47660_last_a0,
                             (unsigned long)g_47660_last_a1,
-                            (unsigned long)g_47660_last_a2);
+                            (unsigned long)g_47660_last_a2,
+                            (unsigned long)g_46750_loop_samples,
+                            (unsigned long)g_46750_loop_index,
+                            (unsigned long)g_46750_loop_qcount,
+                            (unsigned long)g_46750_loop_type,
+                            (unsigned long)g_46750_loop_mark,
+                            (unsigned long)g_46750_q_type[0],
+                            (unsigned long)g_46750_q_mark[0],
+                            (unsigned long)g_46750_q_type[1],
+                            (unsigned long)g_46750_q_mark[1],
+                            (unsigned long)g_46750_q_type[2],
+                            (unsigned long)g_46750_q_mark[2]);
                         fclose(c4f);
                     }
                 }
