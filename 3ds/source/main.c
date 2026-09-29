@@ -14872,9 +14872,18 @@ int main(void)
                     cpu->write_byte(0x80094D01u, 0u);
 
                     /* FUN_8007C218 final callback/IRQ state. */
-                    cpu->write_word(0x800F7308u, 0u);
-                    cpu->write_word(0x800F730Cu, 0u);
-                    cpu->write_word(0x800F7310u, 0u);
+                    /*
+                     * FUN_8007B53C immediately installs the high-level
+                     * queue callbacks after 7C218:
+                     *   7C460(7B28C), 7C46C(7C10C),
+                     *   7C478(7C1E0), 7C454(7C068).
+                     * Leaving these NULL prevents 7CB88 from ever
+                     * completing/removing queued jobs.
+                     */
+                    cpu->write_word(0x800F7308u, 0x8007C068u);
+                    cpu->write_word(0x800F730Cu, 0x8007B28Cu);
+                    cpu->write_word(0x800F7310u, 0x8007C10Cu);
+                    cpu->write_word(0x800F7314u, 0x8007C1E0u);
                     cpu->write_word(0x80094910u, 0x8007CA78u);
                     cpu->write_word(0x80094914u, 0x8007D0E0u);
                     cpu->write_word(0x80094930u, 1u);
