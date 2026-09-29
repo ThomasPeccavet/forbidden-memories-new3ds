@@ -1075,6 +1075,15 @@ static uint32_t g_cdinit_last_new = 0u;
 static uint32_t g_cdinit_last_change_pc = 0u;
 static uint32_t g_cdinit_last_change_ra = 0u;
 
+/* B135.98 - restore the periodic CD driver callback registered by 7C218. */
+static const uint32_t g_cd_tick_sentinel = 0x8000FF80u;
+static uint32_t g_cd_tick_active = 0u;
+static uint32_t g_cd_tick_last_frame = 0u;
+static uint32_t g_cd_tick_started = 0u;
+static uint32_t g_cd_tick_done = 0u;
+static uint32_t g_cd_tick_saved_pc = 0u;
+static uint32_t g_cd_tick_saved_gpr[32];
+
 /* B36: les callbacks LibCD sont asynchrones sur PS1. Leur execution ne
  * doit donc pas detruire le contexte CPU interrompu. */
 static uint32_t g_b33_saved_gpr[32];
@@ -13219,6 +13228,60 @@ int main(void)
                         fm_memory_read_word(0x80095BC4u);
                 }
 
+
+                /*
+                 * B135.98 - emulate the registration done by
+                 * FUN_8007C218 -> FUN_8007499C(0, FUN_8007C720).
+                 *
+                 * The hardware/event callback itself is unavailable on
+                 * the host, but we execute the real guest FUN_8007C720
+                 * once per host frame and restore the interrupted CPU
+                 * context afterwards. This lets the native CD state
+                 * machine advance 2 -> command -> 1 and start queued jobs.
+                 */
+                if (
+                    !g_cd_tick_active
+                    && frame != g_cd_tick_last_frame
+                    && fm_memory_read_word(0x80094CB0u) != 0u
+                    && fm_memory_read_word(0x800F7270u) != 0u
+                    && !g_b33_cb_active
+                    && !g_b34_ready_active
+                    && !g_b35_finalizer_active
+                )
+                {
+                    g_cd_tick_last_frame = frame;
+                    g_cd_tick_saved_pc = dispatch_address;
+                    for (unsigned i = 0; i < 32u; ++i)
+                        g_cd_tick_saved_gpr[i] = cpu->gpr[i];
+
+                    g_cd_tick_active = 1u;
+                    ++g_cd_tick_started;
+
+                    cpu->pc = 0x8007C720u;
+                    cpu->gpr[31] = g_cd_tick_sentinel;
+                    cpu->gpr[0] = 0u;
+
+                    static_miss = 0;
+                    continue;
+                }
+
+                if (
+                    g_cd_tick_active
+                    && dispatch_address == g_cd_tick_sentinel
+                )
+                {
+                    g_cd_tick_active = 0u;
+                    ++g_cd_tick_done;
+
+                    for (unsigned i = 0; i < 32u; ++i)
+                        cpu->gpr[i] = g_cd_tick_saved_gpr[i];
+
+                    cpu->pc = g_cd_tick_saved_pc;
+                    cpu->gpr[0] = 0u;
+
+                    static_miss = 0;
+                    continue;
+                }
 
                 /*
                  * Retour normal d'une iteration DIRECT-2DF.
