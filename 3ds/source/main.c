@@ -1062,6 +1062,19 @@ static uint32_t g_qmgr_last_event = 0u;
 static uint32_t g_qmgr_last_7ed88_ra = 0u;
 static uint32_t g_qmgr_last_7bdd4_ra = 0u;
 
+/* B135.96 - CD driver init/state-transition trace. */
+static uint32_t g_cdinit_hit_c218 = 0u;
+static uint32_t g_cdinit_hit_c2b8 = 0u;
+static uint32_t g_cdinit_hit_c720 = 0u;
+static uint32_t g_cdinit_hit_a878 = 0u;
+static uint32_t g_cdinit_hit_d224 = 0u;
+static uint32_t g_cdinit_state_observed = 0xFFFFFFFFu;
+static uint32_t g_cdinit_state_changes = 0u;
+static uint32_t g_cdinit_last_old = 0u;
+static uint32_t g_cdinit_last_new = 0u;
+static uint32_t g_cdinit_last_change_pc = 0u;
+static uint32_t g_cdinit_last_change_ra = 0u;
+
 /* B36: les callbacks LibCD sont asynchrones sur PS1. Leur execution ne
  * doit donc pas detruire le contexte CPU interrompu. */
 static uint32_t g_b33_saved_gpr[32];
@@ -4102,6 +4115,23 @@ static void fm_trace_dispatch(
         }
     }
 
+    {
+        uint32_t state = fm_memory_read_word(0x80094CD0u);
+        if (g_cdinit_state_observed == 0xFFFFFFFFu)
+        {
+            g_cdinit_state_observed = state;
+        }
+        else if (state != g_cdinit_state_observed)
+        {
+            g_cdinit_last_old = g_cdinit_state_observed;
+            g_cdinit_last_new = state;
+            g_cdinit_state_observed = state;
+            ++g_cdinit_state_changes;
+            g_cdinit_last_change_pc = cpu ? cpu->pc : 0u;
+            g_cdinit_last_change_ra = cpu ? cpu->gpr[31] : 0u;
+        }
+    }
+
     switch (phys)
     {
         case 0x00012D60u:
@@ -5950,6 +5980,26 @@ static void fm_trace_dispatch(
 
                 break;
             }
+            break;
+
+        case 0x0007C218u:
+            ++g_cdinit_hit_c218;
+            break;
+
+        case 0x0007C2B8u:
+            ++g_cdinit_hit_c2b8;
+            break;
+
+        case 0x0007C720u:
+            ++g_cdinit_hit_c720;
+            break;
+
+        case 0x0007A878u:
+            ++g_cdinit_hit_a878;
+            break;
+
+        case 0x0007D224u:
+            ++g_cdinit_hit_d224;
             break;
 
         case 0x0007ED88u:
@@ -19834,7 +19884,8 @@ int main(void)
                             "low7a1d4=%lu cmd=%02lX cb=%08lX resume=%08lX qbefore=%lu qafter=%lu\n"
                             "qmgr ed88/b78c/bdd4/b21c/c3d8/c548/b28c/ae58=%lu/%lu/%lu/%lu/%lu/%lu/%lu/%lu\n"
                             "qstate count=%lu head=%lu cur=%lu hist=%lu cd0=%lu cb0=%lu cf4=%lu ccc=%02lX cd4=%02lX\n"
-                            "qcur handle=%08lX cmd=%02lX cb=%08lX retry=%08lX lastcmd=%02lX lasthandle=%08lX event=%02lX\n",
+                            "qcur handle=%08lX cmd=%02lX cb=%08lX retry=%08lX lastcmd=%02lX lasthandle=%08lX event=%02lX\n"
+                            "cdinit c218/c2b8/c720/a878/d224=%lu/%lu/%lu/%lu/%lu changes=%lu %lu->%lu pc=%08lX ra=%08lX\n",
                             (unsigned long)frame,
                             (unsigned long)(cpu ? cpu->pc : 0u),
                             (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -19913,7 +19964,17 @@ int main(void)
                             (unsigned long)fm_memory_read_word(0x800F71BCu + (fm_memory_read_word(0x800F726Cu) & 7u) * 0x18u),
                             (unsigned long)g_qmgr_last_cmd,
                             (unsigned long)g_qmgr_last_handle,
-                            (unsigned long)g_qmgr_last_event);
+                            (unsigned long)g_qmgr_last_event,
+                            (unsigned long)g_cdinit_hit_c218,
+                            (unsigned long)g_cdinit_hit_c2b8,
+                            (unsigned long)g_cdinit_hit_c720,
+                            (unsigned long)g_cdinit_hit_a878,
+                            (unsigned long)g_cdinit_hit_d224,
+                            (unsigned long)g_cdinit_state_changes,
+                            (unsigned long)g_cdinit_last_old,
+                            (unsigned long)g_cdinit_last_new,
+                            (unsigned long)g_cdinit_last_change_pc,
+                            (unsigned long)g_cdinit_last_change_ra);
                         fclose(c4f);
                     }
                 }
