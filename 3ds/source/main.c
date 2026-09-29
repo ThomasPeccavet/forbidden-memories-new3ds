@@ -931,6 +931,21 @@ static uint32_t g_q20_hit_463f8 = 0u;
 static uint32_t g_q20_hit_459d0 = 0u;
 static uint32_t g_q20_hit_45908 = 0u;
 
+/* Read-only lifecycle trace for FUN_80047C18 and its queued 0x20/0x51 pair. */
+static uint32_t g_47c18_hits = 0u;
+static uint32_t g_47c18_last_ra = 0u;
+static uint32_t g_47c18_last_index = 0u;
+static uint32_t g_47c18_last_qcount = 0u;
+static uint32_t g_47c18_from_46ec4 = 0u;
+static uint32_t g_47c18_from_47f60 = 0u;
+static uint32_t g_47c18_from_47ff8 = 0u;
+static uint32_t g_47c18_from_48044 = 0u;
+static uint32_t g_463f8_head20_10 = 0u;
+static uint32_t g_463f8_pair20_10_51 = 0u;
+static uint32_t g_463f8_last_qcount = 0u;
+static uint32_t g_459d0_active20_mark10 = 0u;
+static uint32_t g_459d0_last_qcount = 0u;
+
 
 static uint32_t g_b32_43e_returned = 0;
 static uint32_t g_b32_43e_return_frame = 0;
@@ -5820,12 +5835,60 @@ static void fm_trace_dispatch(
             ++g_q20_hit_474e0;
             break;
 
+        case 0x00047C18u:
+            ++g_47c18_hits;
+            if (cpu)
+            {
+                uint32_t qctx = fm_memory_read_word(0x8009C7E0u);
+                g_47c18_last_ra = cpu->gpr[31];
+                g_47c18_last_index = cpu->gpr[4] & 0xFFFFu;
+                if (qctx >= 0x80000000u && qctx < 0x80200000u)
+                    g_47c18_last_qcount = fm_memory_read_half(qctx + 0x4Cu);
+
+                switch (cpu->gpr[31])
+                {
+                    case 0x80046FD8u: ++g_47c18_from_46ec4; break;
+                    case 0x80047FE0u: ++g_47c18_from_47f60; break;
+                    case 0x80048030u: ++g_47c18_from_47ff8; break;
+                    case 0x800480B4u: ++g_47c18_from_48044; break;
+                    default: break;
+                }
+            }
+            break;
+
         case 0x000463F8u:
             ++g_q20_hit_463f8;
+            {
+                uint32_t qctx = fm_memory_read_word(0x8009C7E0u);
+                if (qctx >= 0x80000000u && qctx < 0x80200000u)
+                {
+                    uint32_t n = fm_memory_read_half(qctx + 0x4Cu);
+                    g_463f8_last_qcount = n;
+                    if (n > 0u &&
+                        fm_memory_read_byte(qctx + 0x80u) == 0x20u &&
+                        fm_memory_read_word(qctx + 0x90u) == 0x10u)
+                    {
+                        ++g_463f8_head20_10;
+                        if (n > 1u &&
+                            fm_memory_read_byte(qctx + 0xB0u) == 0x51u)
+                            ++g_463f8_pair20_10_51;
+                    }
+                }
+            }
             break;
 
         case 0x000459D0u:
             ++g_q20_hit_459d0;
+            {
+                uint32_t qctx = fm_memory_read_word(0x8009C7E0u);
+                if (qctx >= 0x80000000u && qctx < 0x80200000u)
+                {
+                    g_459d0_last_qcount = fm_memory_read_half(qctx + 0x4Cu);
+                    if (fm_memory_read_byte(qctx + 0x7Cu) == 0x20u &&
+                        fm_memory_read_word(qctx + 0x5Cu) == 0x10u)
+                        ++g_459d0_active20_mark10;
+                }
+            }
             break;
 
         case 0x00045908u:
@@ -19276,6 +19339,22 @@ int main(void)
                        (unsigned long)g_q20_hit_463f8,
                        (unsigned long)g_q20_hit_459d0,
                        (unsigned long)g_q20_hit_45908);
+                printf("47C18:%lu idx:%lu RA:%08lX q:%lu\n",
+                       (unsigned long)g_47c18_hits,
+                       (unsigned long)g_47c18_last_index,
+                       (unsigned long)g_47c18_last_ra,
+                       (unsigned long)g_47c18_last_qcount);
+                printf("SRC 46EC4/47F60/47FF8/48044:%lu/%lu/%lu/%lu\n",
+                       (unsigned long)g_47c18_from_46ec4,
+                       (unsigned long)g_47c18_from_47f60,
+                       (unsigned long)g_47c18_from_47ff8,
+                       (unsigned long)g_47c18_from_48044);
+                printf("LIFE head20.10/pair51/active:%lu/%lu/%lu q:%lu/%lu\n",
+                       (unsigned long)g_463f8_head20_10,
+                       (unsigned long)g_463f8_pair20_10_51,
+                       (unsigned long)g_459d0_active20_mark10,
+                       (unsigned long)g_463f8_last_qcount,
+                       (unsigned long)g_459d0_last_qcount);
                 printf("active:%02X stage:%02X cbbusy:%02X flags:%04X\n",
                        (unsigned)fm_memory_read_byte(qctx2 + 0x7Cu),
                        (unsigned)fm_memory_read_byte(qctx2 + 0x7Du),
