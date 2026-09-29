@@ -2719,6 +2719,15 @@ static int32_t g_irq_exec_last_code = 0;
 static int32_t g_irq_exec_last_probe_reason = 0;
 static int32_t g_irq_exec_last_interp_reason = 0;
 
+/* B135.94 - persistent snapshot of the first isolated-VBlank execution failure. */
+static uint32_t g_irq_first_fail_frame = 0u;
+static int32_t g_irq_first_fail_code = 0;
+static uint32_t g_irq_first_fail_pc = 0u;
+static uint32_t g_irq_first_fail_phys = 0u;
+static int32_t g_irq_first_fail_probe_reason = 0;
+static int32_t g_irq_first_fail_interp_reason = 0;
+static uint32_t g_irq_first_fail_handoffs = 0u;
+
 
 /*
  * ============================================================
@@ -6736,6 +6745,16 @@ static int fm_execute_guest_vblank_callback(
 
             ++g_irq_exec_fail;
             g_irq_exec_last_code = -10;
+            if (g_irq_first_fail_frame == 0u)
+            {
+                g_irq_first_fail_frame = frame;
+                g_irq_first_fail_code = -10;
+                g_irq_first_fail_pc = irq_cpu.pc;
+                g_irq_first_fail_phys = phys;
+                g_irq_first_fail_probe_reason = g_irq_exec_last_probe_reason;
+                g_irq_first_fail_interp_reason = g_irq_exec_last_interp_reason;
+                g_irq_first_fail_handoffs = g_irq_exec_last_handoffs;
+            }
             return 0;
         }
 
@@ -6766,6 +6785,16 @@ static int fm_execute_guest_vblank_callback(
         {
             ++g_irq_exec_fail;
             g_irq_exec_last_code = -20;
+            if (g_irq_first_fail_frame == 0u)
+            {
+                g_irq_first_fail_frame = frame;
+                g_irq_first_fail_code = -20;
+                g_irq_first_fail_pc = irq_cpu.pc;
+                g_irq_first_fail_phys = irq_cpu.pc & 0x1FFFFFFFu;
+                g_irq_first_fail_probe_reason = g_irq_exec_last_probe_reason;
+                g_irq_first_fail_interp_reason = g_irq_exec_last_interp_reason;
+                g_irq_first_fail_handoffs = g_irq_exec_last_handoffs;
+            }
             return 0;
         }
 
@@ -6800,11 +6829,31 @@ static int fm_execute_guest_vblank_callback(
         g_irq_exec_last_code = -30;
         g_irq_exec_last_pc = local_interp.pc;
         g_irq_exec_last_phys = local_interp.pc & 0x1FFFFFFFu;
+        if (g_irq_first_fail_frame == 0u)
+        {
+            g_irq_first_fail_frame = frame;
+            g_irq_first_fail_code = -30;
+            g_irq_first_fail_pc = local_interp.pc;
+            g_irq_first_fail_phys = local_interp.pc & 0x1FFFFFFFu;
+            g_irq_first_fail_probe_reason = g_irq_exec_last_probe_reason;
+            g_irq_first_fail_interp_reason = g_irq_exec_last_interp_reason;
+            g_irq_first_fail_handoffs = g_irq_exec_last_handoffs;
+        }
         return 0;
     }
 
     ++g_irq_exec_fail;
     g_irq_exec_last_code = -40;
+    if (g_irq_first_fail_frame == 0u)
+    {
+        g_irq_first_fail_frame = frame;
+        g_irq_first_fail_code = -40;
+        g_irq_first_fail_pc = g_irq_exec_last_pc;
+        g_irq_first_fail_phys = g_irq_exec_last_phys;
+        g_irq_first_fail_probe_reason = g_irq_exec_last_probe_reason;
+        g_irq_first_fail_interp_reason = g_irq_exec_last_interp_reason;
+        g_irq_first_fail_handoffs = g_irq_exec_last_handoffs;
+    }
     return 0;
 }
 
@@ -19574,6 +19623,15 @@ int main(void)
                        (unsigned long)g_vb_gate_last_set_frame,
                        (unsigned long)g_vb_gate_last_clear_frame,
                        (unsigned long)g_vb_gate_last_skip_frame);
+                printf("IRQ FIRST FAIL f:%lu code:%ld pc:%08lX phys:%08lX\n",
+                       (unsigned long)g_irq_first_fail_frame,
+                       (long)g_irq_first_fail_code,
+                       (unsigned long)g_irq_first_fail_pc,
+                       (unsigned long)g_irq_first_fail_phys);
+                printf("IRQ FAIL reason probe/interp/hand:%ld/%ld/%lu\n",
+                       (long)g_irq_first_fail_probe_reason,
+                       (long)g_irq_first_fail_interp_reason,
+                       (unsigned long)g_irq_first_fail_handoffs);
                 printf("47C18:%lu idx:%lu RA:%08lX q:%lu\n",
                        (unsigned long)g_47c18_hits,
                        (unsigned long)g_47c18_last_index,
