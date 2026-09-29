@@ -6432,7 +6432,18 @@ static int fm_execute_guest_vblank_callback(
          * LibCD backend for the exact guest call, independent of which
          * CPU context issued it.
          */
-        if (phys == 0x000474E0u) ++g_q20_hit_474e0;
+        if (phys == 0x000474E0u)
+        {
+            ++g_q20_hit_474e0;
+            /*
+             * 474E0 normally runs in this isolated VBlank CPU context.
+             * Capture the guest call-site registers here as well as in
+             * the main dispatcher, otherwise the overlay can show hits
+             * without ever exposing the real indirect caller.
+             */
+            g_q20_ra_474e0 = irq_cpu.gpr[31];
+            g_q20_sp_474e0 = irq_cpu.gpr[29];
+        }
         if (phys == 0x000463F8u) ++g_q20_hit_463f8;
         if (phys == 0x000459D0u) ++g_q20_hit_459d0;
         if (phys == 0x00045908u) ++g_q20_hit_45908;
