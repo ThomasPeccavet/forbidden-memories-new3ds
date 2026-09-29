@@ -14739,71 +14739,92 @@ int main(void)
                 if (phys == 0x0007B53Cu)
                 {
                     /*
-                     * DAT_80094CB0 = CD subsystem initialized.
+                     * B135.97 - faithful LibCD initialization HLE.
+                     *
+                     * The old shortcut only published CB0=1 and callback
+                     * pointers.  It skipped FUN_8007C2B8, leaving CD0=0
+                     * while the high-level queue was already accepting jobs.
+                     * That impossible state makes 7B21C/7C3D8 refuse to start
+                     * the queued command forever.
+                     *
+                     * Mirror the observable final state of:
+                     *   7B53C -> 7C218 -> 7C2B8
+                     * without emulating the hardware registration calls.
                      */
-                    cpu->write_word(
-                        0x80094CB0u,
-                        1
-                    );
 
+                    /* High-level job queue starts empty. */
+                    cpu->write_word(0x800F7268u, 0u);
+                    cpu->write_word(0x800F726Cu, 0u);
+                    cpu->write_word(0x800F7270u, 0u);
+                    cpu->write_word(0x800F72F8u, 0u);
 
-                    /*
-                     * DAT_80094930 = CD interrupt layer ready.
-                     */
-                    cpu->write_word(
-                        0x80094930u,
-                        1
-                    );
+                    for (uint32_t i = 0u; i < 8u; ++i)
+                    {
+                        uint32_t q = 0x800F71A8u + i * 0x18u;
+                        cpu->write_word(q + 0x00u, 0u); /* handle */
+                        cpu->write_word(q + 0x04u, 0u); /* cmd/params */
+                        cpu->write_word(q + 0x08u, 0u);
+                        cpu->write_word(q + 0x0Cu, 0u);
+                        cpu->write_word(q + 0x10u, 0u); /* callback */
+                        cpu->write_word(q + 0x14u, 0u); /* retry/context */
 
+                        /* History ring used by FUN_8007BDD4. */
+                        cpu->write_word(0x800F7278u + i * 0x10u, 0u);
+                        cpu->write_word(0x800F727Cu + i * 0x10u, 0u);
+                        cpu->write_word(0x800F7280u + i * 0x10u, 0u);
+                        cpu->write_word(0x800F7284u + i * 0x10u, 0u);
+                    }
 
-                    /*
-                     * Callbacks internes Psy-Q.
-                     */
-                    cpu->write_word(
-                        0x80094910u,
-                        0x8007CA78u
-                    );
+                    /* FUN_8007C2B8 final driver state. */
+                    cpu->write_word(0x80094CB0u, 0u);
+                    cpu->write_byte(0x80094CB4u, 0u);
+                    cpu->write_byte(0x80094CB5u, 0u);
+                    cpu->write_byte(0x80094CB6u, 0u);
+                    cpu->write_byte(0x80094CB7u, 0u);
+                    cpu->write_word(0x80094CBCu, 0u);
 
+                    for (uint32_t a = 0x80094CC0u; a <= 0x80094CC7u; ++a)
+                        cpu->write_byte(a, 0u);
 
-                    cpu->write_word(
-                        0x80094914u,
-                        0x8007D0E0u
-                    );
+                    cpu->write_word(0x80094CD0u, 2u);
+                    cpu->write_byte(0x80094CD4u, 0x0Eu);
+                    cpu->write_byte(0x80094CC8u, 0u);
+                    cpu->write_byte(0x80094CCCu, 0u);
+                    cpu->write_byte(0x80094CD8u, 0x15u);
+                    cpu->write_byte(0x80094CDCu, 0u);
+                    cpu->write_byte(0x80094CDDu, 0u);
+                    cpu->write_byte(0x80094CE2u, 0u);
+                    cpu->write_byte(0x80094CE3u, 0u);
+                    cpu->write_byte(0x80094CE4u, 0u);
+                    cpu->write_byte(0x80094CE5u, 0u);
+                    cpu->write_byte(0x80094CE6u, 0u);
+                    cpu->write_byte(0x80094CE7u, 0u);
+                    cpu->write_byte(0x80094CE8u, 0u);
+                    cpu->write_word(0x80094CECu, 1u);
+                    cpu->write_word(0x80094CF0u, 0u);
+                    cpu->write_word(0x80094CF4u, 0u);
+                    cpu->write_word(0x80094CF8u, 0u);
+                    cpu->write_word(0x80094CFCu, 0u);
+                    cpu->write_byte(0x80094D00u, 0u);
+                    cpu->write_byte(0x80094D01u, 0u);
 
+                    /* FUN_8007C218 final callback/IRQ state. */
+                    cpu->write_word(0x800F7308u, 0u);
+                    cpu->write_word(0x800F730Cu, 0u);
+                    cpu->write_word(0x800F7310u, 0u);
+                    cpu->write_word(0x80094910u, 0x8007CA78u);
+                    cpu->write_word(0x80094914u, 0x8007D0E0u);
+                    cpu->write_word(0x80094930u, 1u);
+                    cpu->write_word(0x80094CB0u, 1u);
 
-                    /*
-                     * Callbacks utilisateur initialement NULL.
-                     */
-                    cpu->write_word(
-                        0x800F7308u,
-                        0
-                    );
+                    ++g_cdinit_hit_c218;
+                    ++g_cdinit_hit_c2b8;
 
-
-                    cpu->write_word(
-                        0x800F730Cu,
-                        0
-                    );
-
-
-                    cpu->write_word(
-                        0x800F7310u,
-                        0
-                    );
-
-
-                    /*
-                     * Retour succès.
-                     */
-                    cpu->gpr[2] = 1;
-
-                    cpu->pc =
-                        cpu->gpr[31];
-
-                    cpu->gpr[0] = 0;
+                    cpu->gpr[2] = 1u;
+                    cpu->pc = cpu->gpr[31];
+                    cpu->gpr[0] = 0u;
 
                     static_miss = 0;
-
                     continue;
                 }
 
