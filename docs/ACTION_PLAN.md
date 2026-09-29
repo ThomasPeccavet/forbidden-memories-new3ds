@@ -1,129 +1,151 @@
 # Plan d'action — New Nintendo 3DS
 
-Dernière mise à jour : **21 septembre 2026**.
+Dernière mise à jour : **29 septembre 2026**.
 
 ## Objectif actif
 
-Le menu SU est visible et navigable, « Nlle partie » fonctionne, la
-saisie/validation du nom fonctionne et le backend atteint la première
-cinématique / les premiers dialogues.
+Faire progresser le startup sans forcer les états guest.
 
-L'objectif immédiat est :
+Le verrou courant est :
 
-> **retrouver une cadence acceptable en identifiant le hotspot réel, puis
-> corriger le rendu de la première cinématique.**
+> **la synchronisation SPU attendue par Psy-Q avant la programmation DMA4, qui
+> doit ensuite rendre READY l'événement BIOS attendu par FUN_80014478 et permettre
+> la reprise du ReadN à LBA 0x3172D.**
 
-## Phase 1 — Mesurer avant de modifier
+## Phase 1 — Valider le nouveau modèle SPU
 
-Créer un profil court et lisible sur une fenêtre stable de plusieurs frames.
+Compiler :
 
-Mesurer par frame :
+~~~sh
+git pull
+make clean
+make PROFILE=1 -j4
+~~~
 
-- temps total boucle hôte ;
-- temps dispatcher / guest ;
-- temps callback VBlank ;
-- temps rendu GPU logiciel ;
-- temps composition/copie VRAM ;
-- temps de présentation 3DS ;
-- temps d'attente VBlank ;
-- instructions interprétées ;
-- appels fallback R3000A ;
-- commandes GP0 et primitives dessinées.
+Contrôler dans `debug-latest.txt` :
 
-Conserver les tops B110 de plages guest par temps cumulé, temps maximum et nombre
-d'appels.
+~~~text
+spu_reg_1aa
+spu_reg_1ae
+dma4_madr_writes
+dma4_bcr_writes
+dma4_chcr_writes
+dma4_last_chcr
+dma4_transfers
+dma4_event_bridge
+~~~
 
-### Critère de succès
+### Succès attendu
 
-Attribuer la majorité du coût à une catégorie concrète avant toute nouvelle
-optimisation.
+~~~text
+dma4_chcr_writes > 0
+dma4_transfers    > 0
+dma4_event_bridge > 0
+~~~
 
-## Phase 2 — Vérifier le timing guest
+Si les stores DMA4 apparaissent, le diagnostic SPU est validé.
+
+## Phase 2 — Vérifier la livraison de l'événement BIOS
 
 Contrôler :
 
-1. nombre de VBlanks guest par seconde hôte ;
-2. appels des callbacks guest par frame ;
-3. boucles qui attendent un état CD/DMA/GPU ;
-4. bridges qui passent immédiatement un wait au lieu de reproduire sa latence ;
-5. fonctions relancées plusieurs fois car un drapeau matériel n'évolue pas comme
-   sur PS1.
+~~~text
+bios_test_hits
+bios_ev0_ready
+gate_777d8_hits
+gate_73dc8_hits
+~~~
 
-### Angle d'attaque prioritaire
+Le comportement recherché est :
+1. completion DMA4 ;
+2. événement exact F0000009/0x20 rendu READY ;
+3. TestEvent retourne succès ;
+4. FUN_800777D8 laisse FUN_80014478 continuer.
 
-Rechercher une plage PC avec énormément de hits et peu de progression logique :
-une routine qui devrait attendre mais tourne en boucle active expliquerait mieux
-quelques FPS qu'une simple conversion framebuffer déjà optimisée.
+Ne pas rendre l'événement READY sans cause DMA/SPU.
 
-## Phase 3 — Isoler interpréteur vs code recompilé
+## Phase 3 — Vérifier la reprise du ReadN
 
-Ajouter ou exploiter des compteurs distincts :
+Contrôler :
 
-- appels vers fonction recompilée ;
-- appels fallback ;
-- instructions R3000A interprétées ;
-- temps cumulé dans l'interpréteur ;
-- temps cumulé dans les fonctions ARM générées.
+~~~text
+req10
+req24
+req2c
+b34_start
+b34_done
+b32_calls
+b32_ok
+b32_fail
+~~~
 
-Si quelques fonctions overlay dominent, les identifier par adresse et envisager
-leur recompilation ciblée.
+Requête cible :
 
-## Phase 4 — GPU logiciel et présentation
+~~~text
+remaining = 0x2000
+LBA       = 0x3172D
+cmd       = 0x06
+~~~
 
-Ne poursuivre ici que si le profiling l'indique.
+Critère :
+- nouveau DataReady ;
+- nouveaux CdGetSector ;
+- remaining diminue ;
+- aucun échec.
 
-Mesurer :
+## Phase 4 — Sortir du second FUN_80043CD4
 
-- pixels réellement rasterisés ;
-- primitives par frame ;
-- coût texture/CLUT ;
-- coût composition base + overlay ;
-- coût conversion RGB555 ;
-- coût flush framebuffer.
+Contrôler :
 
-Pistes possibles seulement si confirmées : dirty rectangles, moins de copies,
-chemins spécialisés, traitement cache-friendly, puis à plus long terme rendu
-natif GPU 3DS.
+~~~text
+c460
+c484
+post681_43dc8
+post681_159f4
+post681_2cf60
+~~~
 
-## Phase 5 — Première cinématique
+Succès :
+- les bits bloquants de `C460` disparaissent par le vrai chemin ;
+- `FUN_80043DC8` puis `FUN_800159F4` sont atteintes.
 
-Une fois les FPS maîtrisés, reprendre :
+## Phase 5 — Nettoyer les probes une fois le startup débloqué
 
-- GP0 E3/E4/E5 draw area/draw offset ;
-- GP1 display start ;
-- display mode ;
-- RGB24 ;
-- MDEC input/output ;
-- page VRAM affichée ;
-- composition des plans.
+Quand la chaîne est prouvée :
+- conserver uniquement les compteurs utiles ;
+- supprimer les probes devenus redondants ;
+- garder les TXT persistants ;
+- documenter chaque bridge restant ;
+- ne pas retirer une sonde avant d'avoir une preuve stable du remplacement.
 
-### Critère de succès
+## Phase 6 — Reprendre le chemin fonctionnel
 
-Cinématique lisible et cadrée suffisamment pour poursuivre les dialogues sans
-patch visuel spécifique.
+Une fois le startup fidèle rétabli :
+1. SU/menu ;
+2. nouvelle partie ;
+3. saisie du nom ;
+4. dialogues ;
+5. carte ;
+6. premier duel.
 
-## Phase 6 — Premier duel
+Comparer avec les jalons B135 déjà obtenus.
 
-1. progresser dans les dialogues ;
-2. tracer chaque nouvel overlay ;
-3. corriger uniquement les nouveaux besoins matériels rencontrés ;
-4. atteindre Simon Muran ;
-5. afficher le plateau ;
-6. jouer un tour complet.
+## Phase 7 — Performance
 
-## Phase 7 — Réduire la dette de bring-up
+Après rétablissement du chemin :
+- profiler code recompilé vs fallback ;
+- mesurer boucles de wait ;
+- mesurer GPU logiciel / present ;
+- réduire les diagnostics de chemin chaud ;
+- viser une cadence exploitable avant d'élargir l'émulation.
 
-Pour chaque bridge : documenter sa condition, retrouver le comportement PS1,
-déplacer la correction dans CD/DMA/GPU/IRQ/timing, puis supprimer le patch
-spécifique.
+## Discipline
 
-## Discipline de travail
+- une hypothèse à la fois ;
+- une trace TXT pour chaque expérience importante ;
+- ne pas forcer `C460`, `remaining` ou `ready` ;
+- corriger le modèle matériel au niveau le plus bas possible ;
+- conserver le comportement guest original ;
+- ne pas réinvestiguer un point déjà prouvé sauf régression.
 
-- profiler avant d'optimiser ;
-- ne pas transformer un appel inconnu en no-op sans preuve ;
-- ne pas réouvrir un problème déjà validé sauf régression ;
-- conserver capture/mesure à chaque jalon ;
-- comparer avec le runtime PC ;
-- ne pas versionner BIN, BIOS Sony, EXE extrait ni shards C propriétaires ;
-- garder PSXRecomp sur la révision documentée tant qu'un changement amont n'est
-  pas volontairement validé.
+Voir [B136_STARTUP_CD_SPU_DMA4.md](B136_STARTUP_CD_SPU_DMA4.md).
