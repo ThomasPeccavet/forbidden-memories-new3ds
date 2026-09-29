@@ -20554,7 +20554,12 @@ int main(void)
                         "dma4_chcr_writes=%lu\n"
                         "dma4_last_madr=%08lX\n"
                         "dma4_last_bcr=%08lX\n"
-                        "dma4_last_chcr=%08lX\n",
+                        "dma4_last_chcr=%08lX\n"
+                        "spu_base=%08lX\n"
+                        "spu_mode=%08lX\n"
+                        "spu_reg_1a6=%04lX\n"
+                        "spu_reg_1aa=%04lX\n"
+                        "spu_reg_1ae=%04lX\n",
                         (unsigned long)frame,
                         (unsigned long)(cpu ? cpu->pc : 0u),
                         (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -20701,7 +20706,12 @@ int main(void)
                         (unsigned long)dma4_write_diag[2],
                         (unsigned long)dma4_write_diag[3],
                         (unsigned long)dma4_write_diag[4],
-                        (unsigned long)dma4_write_diag[5]
+                        (unsigned long)dma4_write_diag[5],
+                        (unsigned long)fm_memory_read_word(0x80093FB8u),
+                        (unsigned long)fm_memory_read_word(0x80094008u),
+                        (unsigned long)fm_memory_read_half(fm_memory_read_word(0x80093FB8u) + 0x1A6u),
+                        (unsigned long)fm_memory_read_half(fm_memory_read_word(0x80093FB8u) + 0x1AAu),
+                        (unsigned long)fm_memory_read_half(fm_memory_read_word(0x80093FB8u) + 0x1AEu)
                     );
                     fclose(dbg);
                 }
