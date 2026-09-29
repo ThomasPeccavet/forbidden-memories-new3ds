@@ -17,6 +17,9 @@ void     fm_memory_write_half(uint32_t addr, uint16_t value);
 uint8_t  fm_memory_read_byte(uint32_t addr);
 void     fm_memory_write_byte(uint32_t addr, uint8_t value);
 
+/* B136.0: dump exact writes touching startup state words. */
+void fm_memory_watch_dump(const char *path);
+
 int fm_memory_self_test(void);
 
 uint32_t fm_memory_last_unmapped(void);
