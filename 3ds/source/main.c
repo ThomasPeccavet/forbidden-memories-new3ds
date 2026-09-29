@@ -20216,6 +20216,68 @@ int main(void)
 
 #if FM_PERF_PROFILE
             /*
+             * Persistent manual-debug snapshot.
+             *
+             * Convention from B136 onward:
+             * every debug build must leave machine-readable text on SD.
+             * Screenshots are supplemental only.
+             */
+            {
+                FILE *dbg = fopen("sdmc:/3ds/fm-new3ds/debug-latest.txt", "wb");
+                if (dbg)
+                {
+                    fprintf(
+                        dbg,
+                        "frame=%lu\n"
+                        "pc=%08lX\n"
+                        "ra=%08lX\n"
+                        "startup_401=%lu\n"
+                        "startup_43e=%lu\n"
+                        "startup_main=%lu\n"
+                        "43f3c=%lu\n"
+                        "43f4c=%lu\n"
+                        "43f54=%lu\n"
+                        "ov680f4_enter=%lu\n"
+                        "ov68160_enter=%lu\n"
+                        "ov68160_return=%lu\n"
+                        "ov68160_v0=%08lX\n"
+                        "ov68160_ret0=%lu\n"
+                        "ov68160_ret1=%lu\n"
+                        "ov68160_ret2=%lu\n"
+                        "ov68160_retx=%lu\n"
+                        "ov68160_state=%08lX\n"
+                        "bios_region_bfc7ff52=%02lX\n"
+                        "cd_queue=%lu\n"
+                        "cd_state=%lu\n"
+                        "gpu_gp0=%llu\n",
+                        (unsigned long)frame,
+                        (unsigned long)(cpu ? cpu->pc : 0u),
+                        (unsigned long)(cpu ? cpu->gpr[31] : 0u),
+                        (unsigned long)g_hit_401a4,
+                        (unsigned long)g_hit_intro_init,
+                        (unsigned long)g_hit_main_loop,
+                        (unsigned long)g_b47_m_43f3c,
+                        (unsigned long)g_b47_m_43f4c,
+                        (unsigned long)g_b47_m_43f54,
+                        (unsigned long)g_b47_680f4_enter,
+                        (unsigned long)g_b47_68160_enter,
+                        (unsigned long)g_b47_68160_return,
+                        (unsigned long)g_b47_68160_last_v0,
+                        (unsigned long)g_ov681_ret_0,
+                        (unsigned long)g_ov681_ret_1,
+                        (unsigned long)g_ov681_ret_2,
+                        (unsigned long)g_ov681_ret_other,
+                        (unsigned long)fm_memory_read_word(0x80169474u),
+                        (unsigned long)fm_memory_read_byte(0xBFC7FF52u),
+                        (unsigned long)fm_memory_read_word(0x800F7270u),
+                        (unsigned long)fm_memory_read_word(0x80094CD0u),
+                        (unsigned long long)fm_gpu_gp0_count()
+                    );
+                    fclose(dbg);
+                }
+            }
+
+            /*
              * Temporary compact native-queue diagnostic.
              * Read-only: keep the lower screen stable so the runner can
              * capture the state that replaces the old B70 mutation.
