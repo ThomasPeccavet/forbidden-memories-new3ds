@@ -20193,7 +20193,12 @@ int main(void)
                             "startup 401/43e/main=%lu/%lu/%lu forced=%lu/%lu 43ret=%lu\n"
                             "43e mile 3c/4c/54/f8/54b/64/6c=%lu/%lu/%lu/%lu/%lu/%lu/%lu\n"
                             "direct active/calls/ret=%lu/%lu/%lu pc=%08lX guestframes=%lu\n"
-                            "gpu fill/draw/copy/upload=%llu/%llu/%llu/%llu gp0=%llu\n",
+                            "gpu fill/draw/copy/upload=%llu/%llu/%llu/%llu gp0=%llu\n"
+                            "ov160 ent/ret z/nz=%lu/%lu %lu/%lu v0=%08lX ra=%08lX\n"
+                            "ov160 a0/a1/a2/a3=%08lX/%08lX/%08lX/%08lX sp=%08lX\n"
+                            "ov160 code0=%08lX %08lX %08lX %08lX %08lX %08lX %08lX %08lX\n"
+                            "ov160 code1=%08lX %08lX %08lX %08lX %08lX %08lX %08lX %08lX %08lX\n"
+                            "b61 req/bridge/old/atret=%lu/%lu/%08lX/%lu\n",
                             (unsigned long)frame,
                             (unsigned long)(cpu ? cpu->pc : 0u),
                             (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -20343,7 +20348,39 @@ int main(void)
                             (unsigned long long)gpu_debug.packets_draw,
                             (unsigned long long)gpu_debug.packets_copy,
                             (unsigned long long)gpu_debug.packets_upload,
-                            (unsigned long long)gpu_debug.gp0_words);
+                            (unsigned long long)gpu_debug.gp0_words,
+                            (unsigned long)g_b47_68160_enter,
+                            (unsigned long)g_b47_68160_return,
+                            (unsigned long)g_b47_68160_v0_zero,
+                            (unsigned long)g_b47_68160_v0_nonzero,
+                            (unsigned long)g_b47_68160_last_v0,
+                            (unsigned long)g_b47_68160_last_ra,
+                            (unsigned long)g_b60_ent_a0,
+                            (unsigned long)g_b60_ent_a1,
+                            (unsigned long)g_b60_ent_a2,
+                            (unsigned long)g_b60_ent_a3,
+                            (unsigned long)g_b60_ent_sp,
+                            (unsigned long)fm_memory_read_word(0x80168160u),
+                            (unsigned long)fm_memory_read_word(0x80168164u),
+                            (unsigned long)fm_memory_read_word(0x80168168u),
+                            (unsigned long)fm_memory_read_word(0x8016816Cu),
+                            (unsigned long)fm_memory_read_word(0x80168170u),
+                            (unsigned long)fm_memory_read_word(0x80168174u),
+                            (unsigned long)fm_memory_read_word(0x80168178u),
+                            (unsigned long)fm_memory_read_word(0x8016817Cu),
+                            (unsigned long)fm_memory_read_word(0x80168180u),
+                            (unsigned long)fm_memory_read_word(0x80168184u),
+                            (unsigned long)fm_memory_read_word(0x80168188u),
+                            (unsigned long)fm_memory_read_word(0x8016818Cu),
+                            (unsigned long)fm_memory_read_word(0x80168190u),
+                            (unsigned long)fm_memory_read_word(0x80168194u),
+                            (unsigned long)fm_memory_read_word(0x80168198u),
+                            (unsigned long)fm_memory_read_word(0x8016819Cu),
+                            (unsigned long)fm_memory_read_word(0x801681A0u),
+                            (unsigned long)g_b61_skip_request,
+                            (unsigned long)g_b61_bridge_count,
+                            (unsigned long)g_b61_old_v0,
+                            (unsigned long)g_b61_at_return);
                         fclose(c4f);
                     }
                 }
