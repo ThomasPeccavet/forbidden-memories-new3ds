@@ -2728,6 +2728,13 @@ static int32_t g_irq_first_fail_probe_reason = 0;
 static int32_t g_irq_first_fail_interp_reason = 0;
 static uint32_t g_irq_first_fail_handoffs = 0u;
 
+/* B135.95 - first IRQ return accepted as success while the VBlank gate is still set. */
+static uint32_t g_irq_gate_success_frame = 0u;
+static uint32_t g_irq_gate_success_prev_pc = 0u;
+static uint32_t g_irq_gate_success_prev_phys = 0u;
+static uint32_t g_irq_gate_success_prev_ra = 0u;
+static uint32_t g_irq_gate_success_handoffs = 0u;
+
 
 /*
  * ============================================================
@@ -6433,6 +6440,9 @@ static int fm_execute_guest_vblank_callback(
 )
 {
     const uint32_t sentinel = 0x8000FFF0u;
+    uint32_t prev_non_sentinel_pc = 0u;
+    uint32_t prev_non_sentinel_phys = 0u;
+    uint32_t prev_non_sentinel_ra = 0u;
 
     if (!cpu)
     {
@@ -6500,6 +6510,17 @@ static int fm_execute_guest_vblank_callback(
         {
             ++g_irq_exec_ok;
             g_irq_exec_last_code = 1;
+            if (
+                g_irq_gate_success_frame == 0u
+                && fm_memory_read_byte(g_vblank_registered_gp + 4u) != 0u
+            )
+            {
+                g_irq_gate_success_frame = frame;
+                g_irq_gate_success_prev_pc = prev_non_sentinel_pc;
+                g_irq_gate_success_prev_phys = prev_non_sentinel_phys;
+                g_irq_gate_success_prev_ra = prev_non_sentinel_ra;
+                g_irq_gate_success_handoffs = g_irq_exec_last_handoffs;
+            }
             return 1;
         }
 
@@ -6507,10 +6528,25 @@ static int fm_execute_guest_vblank_callback(
         {
             ++g_irq_exec_ok;
             g_irq_exec_last_code = 1;
+            if (
+                g_irq_gate_success_frame == 0u
+                && fm_memory_read_byte(g_vblank_registered_gp + 4u) != 0u
+            )
+            {
+                g_irq_gate_success_frame = frame;
+                g_irq_gate_success_prev_pc = prev_non_sentinel_pc;
+                g_irq_gate_success_prev_phys = prev_non_sentinel_phys;
+                g_irq_gate_success_prev_ra = prev_non_sentinel_ra;
+                g_irq_gate_success_handoffs = g_irq_exec_last_handoffs;
+            }
             return 1;
         }
 
         uint32_t phys = irq_cpu.pc & 0x1FFFFFFFu;
+
+        prev_non_sentinel_pc = irq_cpu.pc;
+        prev_non_sentinel_phys = phys;
+        prev_non_sentinel_ra = irq_cpu.gpr[31];
 
         if (phys == 0x00012C2Cu)
         {
@@ -19632,6 +19668,13 @@ int main(void)
                        (long)g_irq_first_fail_probe_reason,
                        (long)g_irq_first_fail_interp_reason,
                        (unsigned long)g_irq_first_fail_handoffs);
+                printf("IRQ GATE SUCCESS f:%lu prev:%08lX phys:%08lX\n",
+                       (unsigned long)g_irq_gate_success_frame,
+                       (unsigned long)g_irq_gate_success_prev_pc,
+                       (unsigned long)g_irq_gate_success_prev_phys);
+                printf("IRQ GATE SUCCESS ra:%08lX hand:%lu\n",
+                       (unsigned long)g_irq_gate_success_prev_ra,
+                       (unsigned long)g_irq_gate_success_handoffs);
                 printf("47C18:%lu idx:%lu RA:%08lX q:%lu\n",
                        (unsigned long)g_47c18_hits,
                        (unsigned long)g_47c18_last_index,
