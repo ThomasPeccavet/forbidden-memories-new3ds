@@ -1,8 +1,8 @@
-# Prototype natif New 3DS — état du 19 septembre 2026
+# Prototype natif New 3DS — état du 29 septembre 2026
 
-Le prototype exécute désormais suffisamment de la version française pour
-afficher le logo Konami et l'écran titre, reconnaître START, charger l'overlay
-SU et entrer dans la boucle du menu principal.
+Le prototype a déjà exécuté de nombreux écrans réels du jeu dans les séries B135,
+mais le travail courant se concentre sur un démarrage plus fidèle et moins
+dépendant des bypass.
 
 ## Backend actuel
 
@@ -13,44 +13,22 @@ SU et entrer dans la boucle du menu principal.
 - code résident PSXRecomp ;
 - dispatcher natif ;
 - fallback R3000A ;
-- BIOS/MMIO/IRQ/pad nécessaires au chemin courant ;
+- BIOS HLE partiel ;
+- événements BIOS Open/Enable/Test ;
+- VBlank / IRQ de bring-up ;
 - CD sector reader + requêtes async ;
-- GPU GP0/GP1 + DMA/bridges de synchronization ;
+- GPU GP0/GP1 ;
+- DMA2 GPU ;
+- DMA6 OTC ;
+- DMA4 SPU minimal ;
+- SPU contrôle/status minimal ;
 - rasteriseur logiciel ;
-- overlays dynamiques exécutables en RAM guest ;
-- diagnostics détaillés écran inférieur.
+- overlays dynamiques en RAM guest ;
+- diagnostics persistants TXT sur SD.
 
-## Résultat graphique validé
+## Architecture actuelle
 
-Le backend a affiché de vraies images du jeu dans Azahar :
-
-1. Konami ;
-2. écran titre Forbidden Memories.
-
-Ce résultat invalide l'ancienne description « aucune image réelle » des notes du
-17 septembre.
-
-## Overlay SU
-
-Après START :
-
-- état résident 8 sélectionné ;
-- `SU.mrg` chargé ;
-- signature overlay observée à `0x80180000` ;
-- init `0x8018001C` exécutée ;
-- update `0x80180390` exécutée en boucle ;
-- `DAT_8009C898 = 0x80180B4C` ;
-- callback draw réellement appelé ;
-- 11 objets du menu présents en RAM.
-
-B75 montre que l'animation d'entrée peut être terminée et que les objets du groupe
-actif se retrouvent à `x=160`, timer `0`, flags visibles. L'écran reste
-néanmoins sur le titre : le prochain travail est donc dans la chaîne
-**objet → renderer → GP0 → VRAM visible**.
-
-## Architecture
-
-```text
+~~~text
 EXE + CD
    |
    v
@@ -61,56 +39,125 @@ CPUState / RAM
    +--> fallback R3000A
    |
    v
-BIOS / MMIO / IRQ / pad
+BIOS / events / IRQ
    |
-   +--> CD / overlays
+   +--> CD
    |
-   +--> GPU / DMA --> GP0 --> rasteriseur --> VRAM --> écran
-```
+   +--> DMA
+   |     +--> DMA2 GPU --> GP0 --> rasteriseur --> VRAM
+   |     +--> DMA4 SPU --> event sync
+   |     +--> DMA6 OTC
+   |
+   +--> SPU MMIO minimal
+~~~
 
-## Bridges de bring-up importants
+## État historique validé
 
-Le `main.c` courant contient plusieurs bridges instrumentés qui ont permis de
-franchir des attentes spécifiques :
+Dans différentes branches B135, le backend a déjà atteint :
+- Konami ;
+- écran titre ;
+- menu principal ;
+- nouvelle partie ;
+- saisie du nom ;
+- dialogues ;
+- carte ;
+- duel.
 
-- CD stream / requêtes async ;
-- helpers GTE ;
-- completion graphique type `0x20` ;
-- attente DMA2 ;
-- impulsion START 10 frames ;
-- entrée contrôlée vers l'état 8 ;
-- animation d'entrée SU.
+Ces jalons restent importants comme référence fonctionnelle.
 
-Ils sont utiles pour localiser les causes, mais constituent encore de la dette de
-bring-up à remplacer progressivement.
+## Verrou actuel
 
-## Build
+Le startup courant bloque avant le chargement SU final.
 
-PSXRecomp :
+Chaîne :
 
-```text
-1965b2df424da03483a5370340433a862f78f103
-```
+~~~text
+FUN_80043CD4
+ -> FUN_80014478
+ -> FUN_800777D8
+ -> TestEvent(F1000000)
+ -> event F0000009/0x20
+ -> SPU sync
+ -> DMA4
+ -> ReadN
+~~~
 
-```sh
-export PATH=$DEVKITARM/bin:$PATH
+La cause racine immédiate est documentée ici :
+[B136_STARTUP_CD_SPU_DMA4.md](B136_STARTUP_CD_SPU_DMA4.md).
+
+## SPU minimal
+
+Le runtime ne modélisait jusque-là aucun registre SPU utile à Psy-Q.
+
+Ajout courant :
+
+~~~text
+1F801DA6 transfer address
+1F801DA8 transfer data
+1F801DAA control
+1F801DAE status
+~~~
+
+Le but n'est pas encore de produire de l'audio. Le modèle sert uniquement à
+reproduire les transitions de contrôle nécessaires aux wait loops du jeu et à la
+programmation DMA4.
+
+## DMA4 minimal
+
+Ajout :
+
+~~~text
+1F8010C0 MADR
+1F8010C4 BCR
+1F8010C8 CHCR
+~~~
+
+Avec :
+- START ;
+- completion synchrone de bring-up ;
+- flag DICR canal 4 ;
+- compteur de completion ;
+- bridge vers l'événement BIOS exact.
+
+## Diagnostics
+
+Référence :
+
+~~~text
+sdmc:/3ds/fm-new3ds/debug-latest.txt
+sdmc:/3ds/fm-new3ds/memory-watch.txt
+~~~
+
+La règle est désormais de préférer les traces persistantes aux captures écran
+pour tout diagnostic d'état interne.
+
+## Build profil
+
+Depuis `3ds` :
+
+~~~sh
+git pull
+make clean
+make PROFILE=1 -j4
+~~~
+
+Pour reconstruire aussi les shards générés :
+
+~~~sh
+cd ..
+bash rebuild_generated_release.sh
 make -C 3ds clean
-make -C 3ds PSXRECOMP_ROOT=../work/upstream-psxrecomp -j4
-```
-
-Disque :
-
-```text
-sdmc:/3ds/fm-new3ds/disc.bin
-```
+make -C 3ds PROFILE=1 -j4
+~~~
 
 ## Limites
 
-- menu SU pas encore visible ;
-- pas encore de nouvelle partie sur 3DS ;
-- CD/IRQ/DMA/GTE encore partiellement bridgés ;
+- modèle SPU minimal non encore validé ;
 - audio absent ;
+- XA absent ;
+- plusieurs bridges de bring-up subsistent ;
+- performance encore insuffisante dans certaines scènes ;
 - sauvegarde absente ;
-- pas encore de validation New 3DS physique.
+- pas de validation complète New 3DS physique.
 
 Voir [CURRENT_STATUS.md](CURRENT_STATUS.md) et [ACTION_PLAN.md](ACTION_PLAN.md).
