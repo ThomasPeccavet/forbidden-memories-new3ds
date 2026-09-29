@@ -737,6 +737,17 @@ static uint32_t g_b57_last_remaining = 0u;
 static uint32_t g_b57_resets = 0u;
 static uint32_t g_b57_read_index = 0u;
 
+/* B136.2 - generation trace for DAT_800EB1B8. */
+static uint32_t g_b136_reqgen_count = 0u;
+static uint32_t g_b136_reqgen_ra = 0u;
+static uint32_t g_b136_reqgen_flags = 0u;
+static uint32_t g_b136_reqgen_len = 0u;
+static uint32_t g_b136_reqgen_lba = 0u;
+static uint32_t g_b136_reqgen_callback = 0u;
+static uint32_t g_b136_reqgen_user = 0u;
+static uint32_t g_b136_reqgen_ready_started = 0u;
+static uint32_t g_b136_reqgen_getsec_ok = 0u;
+
 
 /*
  * ============================================================
@@ -4793,6 +4804,21 @@ static void fm_trace_dispatch(
             {
                 g_vsync_main_last_a0 = cpu->gpr[4];
                 g_vsync_main_last_ra = cpu->gpr[31];
+            }
+            break;
+
+        case 0x000138B4u:
+            if (cpu && cpu->gpr[4] == 0x800EB1B8u)
+            {
+                ++g_b136_reqgen_count;
+                g_b136_reqgen_ra = cpu->gpr[31];
+                g_b136_reqgen_flags = cpu->gpr[5];
+                g_b136_reqgen_len = (uint32_t)(-(int32_t)cpu->gpr[8]) * 0x800u;
+                g_b136_reqgen_lba = cpu->gpr[7];
+                g_b136_reqgen_callback = cpu->gpr[9];
+                g_b136_reqgen_user = cpu->gpr[10];
+                g_b136_reqgen_ready_started = g_b34_ready_started;
+                g_b136_reqgen_getsec_ok = g_b32_getsec_ok;
             }
             break;
 
@@ -20345,7 +20371,16 @@ int main(void)
                         "b13594_low_cmd=%08lX\n"
                         "qmgr_7b78c=%lu\n"
                         "qmgr_7c548=%lu\n"
-                        "qmgr_last_cmd=%08lX\n",
+                        "qmgr_last_cmd=%08lX\n"
+                        "reqgen_count=%lu\n"
+                        "reqgen_ra=%08lX\n"
+                        "reqgen_flags=%08lX\n"
+                        "reqgen_len=%08lX\n"
+                        "reqgen_lba_arg=%08lX\n"
+                        "reqgen_cb=%08lX\n"
+                        "reqgen_user=%08lX\n"
+                        "reqgen_ready_at_create=%lu\n"
+                        "reqgen_getsec_at_create=%lu\n",
                         (unsigned long)frame,
                         (unsigned long)(cpu ? cpu->pc : 0u),
                         (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -20432,7 +20467,16 @@ int main(void)
                         (unsigned long)g_b13594_low_cmd,
                         (unsigned long)g_qmgr_hit_7b78c,
                         (unsigned long)g_qmgr_hit_7c548,
-                        (unsigned long)g_qmgr_last_cmd
+                        (unsigned long)g_qmgr_last_cmd,
+                        (unsigned long)g_b136_reqgen_count,
+                        (unsigned long)g_b136_reqgen_ra,
+                        (unsigned long)g_b136_reqgen_flags,
+                        (unsigned long)g_b136_reqgen_len,
+                        (unsigned long)g_b136_reqgen_lba,
+                        (unsigned long)g_b136_reqgen_callback,
+                        (unsigned long)g_b136_reqgen_user,
+                        (unsigned long)g_b136_reqgen_ready_started,
+                        (unsigned long)g_b136_reqgen_getsec_ok
                     );
                     fclose(dbg);
                 }
