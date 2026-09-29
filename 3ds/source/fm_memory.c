@@ -136,16 +136,17 @@ static uint32_t g_memory_watch_count = 0u;
 static int fm_memory_watch_overlap(uint32_t phys, uint32_t size)
 {
     static const uint32_t watched[] = {
-        0x0009C424u,
-        0x0009C428u,
-        0x0009C43Cu,
-        0x0009C440u,
-        0x0009C454u,
-        0x0009C460u,
-        0x0009C484u,
+        /* B136.3: quiet watch focused on the stalled CD request. */
+        0x0009C460u, /* global CD flags */
+        0x0009C484u, /* global CD pending state */
         0x000EB1C8u, /* req + 0x10 remaining */
+        0x000EB1D0u, /* req + 0x18 data/buffer */
         0x000EB1D4u, /* req + 0x1C total/initial */
-        0x000EB1DCu  /* req + 0x24 LBA */
+        0x000EB1D8u, /* req + 0x20 callback */
+        0x000EB1DCu, /* req + 0x24 LBA */
+        0x000EB1E4u, /* req + 0x2C flags/cmd */
+        0x000EB1ECu, /* req + 0x34 user/context */
+        0x000EB1F8u  /* req + 0x40 state */
     };
 
     uint32_t end = phys + size;
