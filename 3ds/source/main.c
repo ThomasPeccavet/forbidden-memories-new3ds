@@ -19123,6 +19123,69 @@ int main(void)
             }
 #endif
 
+
+#if FM_PERF_PROFILE
+            /*
+             * Temporary compact native-queue diagnostic.
+             * Read-only: keep the lower screen stable so the runner can
+             * capture the state that replaces the old B70 mutation.
+             */
+            {
+                uint32_t qctx2 = fm_memory_read_word(0x8009C7E0u);
+                uint32_t qcnt2 = 0u;
+                uint32_t qtype2 = 0u;
+                uint32_t qmark2 = 0u;
+                if (qctx2 >= 0x80000000u && qctx2 < 0x80200000u)
+                {
+                    qcnt2 = fm_memory_read_half(qctx2 + 0x4Cu);
+                    qtype2 = fm_memory_read_byte(qctx2 + 0x80u);
+                    qmark2 = fm_memory_read_word(qctx2 + 0x90u);
+                }
+
+                printf("\x1b[2J\x1b[H");
+                printf("Q20 ROOT CAUSE\n");
+                printf("PC:%08lX RA:%08lX frame:%lu\n",
+                       (unsigned long)(cpu ? cpu->pc : 0u),
+                       (unsigned long)(cpu ? cpu->gpr[31] : 0u),
+                       (unsigned long)frame);
+                printf("ctx:%08lX n:%lu type:%02lX mark:%08lX\n",
+                       (unsigned long)qctx2,
+                       (unsigned long)qcnt2,
+                       (unsigned long)qtype2,
+                       (unsigned long)qmark2);
+                printf("hits:%lu SVC:%lu/%lu/%lu/%lu\n",
+                       (unsigned long)g_q20_diag_hits,
+                       (unsigned long)g_q20_hit_474e0,
+                       (unsigned long)g_q20_hit_463f8,
+                       (unsigned long)g_q20_hit_459d0,
+                       (unsigned long)g_q20_hit_45908);
+                printf("active:%02X stage:%02X cbbusy:%02X flags:%04X\n",
+                       (unsigned)fm_memory_read_byte(qctx2 + 0x7Cu),
+                       (unsigned)fm_memory_read_byte(qctx2 + 0x7Du),
+                       (unsigned)fm_memory_read_byte(qctx2 + 0x1618u),
+                       (unsigned)fm_memory_read_half(qctx2 + 0x40u));
+                printf("CD C460:%08lX C470:%08lX C484:%08lX\n",
+                       (unsigned long)fm_memory_read_word(0x8009C460u),
+                       (unsigned long)fm_memory_read_word(0x8009C470u),
+                       (unsigned long)fm_memory_read_word(0x8009C484u));
+                printf("W0:%08lX W1:%08lX W2:%08lX W3:%08lX\n",
+                       (unsigned long)g_q20_diag_words[0],
+                       (unsigned long)g_q20_diag_words[1],
+                       (unsigned long)g_q20_diag_words[2],
+                       (unsigned long)g_q20_diag_words[3]);
+                printf("W4:%08lX W5:%08lX W6:%08lX W7:%08lX\n",
+                       (unsigned long)g_q20_diag_words[4],
+                       (unsigned long)g_q20_diag_words[5],
+                       (unsigned long)g_q20_diag_words[6],
+                       (unsigned long)g_q20_diag_words[7]);
+                printf("W8:%08lX W9:%08lX WA:%08lX WB:%08lX\n",
+                       (unsigned long)g_q20_diag_words[8],
+                       (unsigned long)g_q20_diag_words[9],
+                       (unsigned long)g_q20_diag_words[10],
+                       (unsigned long)g_q20_diag_words[11]);
+            }
+#endif
+
             /*
              * Reset des compteurs de mesure de rendu sans
              * consommer une ligne supplémentaire à l'écran.
