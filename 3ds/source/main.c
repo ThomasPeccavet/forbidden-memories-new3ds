@@ -1037,6 +1037,17 @@ static uint32_t g_46750_vb_q_before = 0u;
 static uint32_t g_46750_vb_q_after = 0u;
 static uint32_t g_46750_vb_last_frame = 0u;
 
+/* B136.04 - diagnose the long 47910 initializer loop. */
+static uint32_t g_47910_hits = 0u;
+static uint32_t g_47a58_hits = 0u;
+static uint32_t g_47910_ctx = 0u;
+static uint32_t g_47910_count0 = 0u;
+static uint32_t g_47910_ptr43c = 0u;
+static uint32_t g_47910_w0 = 0u;
+static uint32_t g_47910_w1 = 0u;
+static uint32_t g_47910_w2 = 0u;
+static uint32_t g_47910_w3 = 0u;
+
 
 static uint32_t g_b32_43e_returned = 0;
 static uint32_t g_b32_43e_return_frame = 0;
@@ -6163,6 +6174,36 @@ static void fm_trace_dispatch(
                     case 0x80048030u: ++g_47c18_from_47ff8; break;
                     case 0x800480B4u: ++g_47c18_from_48044; break;
                     default: break;
+                }
+            }
+            break;
+
+        case 0x00047910u:
+            ++g_47910_hits;
+            {
+                uint32_t qctx = fm_memory_read_word(0x8009C7E0u);
+                g_47910_ctx = qctx;
+                if (qctx >= 0x80000000u && qctx < 0x80200000u)
+                {
+                    g_47910_count0 = fm_memory_read_half(qctx + 0u);
+                    g_47910_ptr43c = fm_memory_read_word(qctx + 0x43Cu);
+                    g_47910_w0 = fm_memory_read_word(qctx + 0u);
+                    g_47910_w1 = fm_memory_read_word(qctx + 4u);
+                    g_47910_w2 = fm_memory_read_word(qctx + 8u);
+                    g_47910_w3 = fm_memory_read_word(qctx + 12u);
+                }
+            }
+            break;
+
+        case 0x00047A58u:
+            ++g_47a58_hits;
+            {
+                uint32_t qctx = fm_memory_read_word(0x8009C7E0u);
+                g_47910_ctx = qctx;
+                if (qctx >= 0x80000000u && qctx < 0x80200000u)
+                {
+                    g_47910_count0 = fm_memory_read_half(qctx + 0u);
+                    g_47910_ptr43c = fm_memory_read_word(qctx + 0x43Cu);
                 }
             }
             break;
@@ -20122,7 +20163,8 @@ int main(void)
                             "ws46750 hits=%lu pc46810=%lu ra=%08lX q=%lu type=%02lX mark=%08lX\n"
                             "ws495c8 hits=%lu a0=%08lX ra=%08lX 47660=%lu a0/a1/a2=%08lX/%08lX/%08lX\n"
                             "wsloop samples=%lu idx=%lu q=%lu type=%02lX mark=%08lX q0=%02lX/%08lX q1=%02lX/%08lX q2=%02lX/%08lX\n"
-                            "wsvb attempts/ok=%lu/%lu qbefore/after=%lu/%lu frame=%lu\n",
+                            "wsvb attempts/ok=%lu/%lu qbefore/after=%lu/%lu frame=%lu\n"
+                            "47910/47A58=%lu/%lu ctx=%08lX count0=%lu ptr43c=%08lX w=%08lX/%08lX/%08lX/%08lX\n",
                             (unsigned long)frame,
                             (unsigned long)(cpu ? cpu->pc : 0u),
                             (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -20240,7 +20282,16 @@ int main(void)
                             (unsigned long)g_46750_vb_preempt_ok,
                             (unsigned long)g_46750_vb_q_before,
                             (unsigned long)g_46750_vb_q_after,
-                            (unsigned long)g_46750_vb_last_frame);
+                            (unsigned long)g_46750_vb_last_frame,
+                            (unsigned long)g_47910_hits,
+                            (unsigned long)g_47a58_hits,
+                            (unsigned long)g_47910_ctx,
+                            (unsigned long)g_47910_count0,
+                            (unsigned long)g_47910_ptr43c,
+                            (unsigned long)g_47910_w0,
+                            (unsigned long)g_47910_w1,
+                            (unsigned long)g_47910_w2,
+                            (unsigned long)g_47910_w3);
                         fclose(c4f);
                     }
                 }
