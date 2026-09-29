@@ -1033,6 +1033,19 @@ static uint32_t g_b33_cb_done = 0;
 static uint32_t g_b33_cb_skipped = 0;
 static uint32_t g_b33_last_params = 0;
 static uint32_t g_b33_last_ctx = 0;
+static uint32_t g_b33_cb_return_value = 1u;
+
+/*
+ * B135.94 - low-level async LibCD completion.
+ * FUN_8007C548 drives FUN_8007A1D4 directly, bypassing the older
+ * FUN_8007BA00 bridge. Keep the real guest completion callback chain.
+ */
+static uint32_t g_b13594_low_calls = 0u;
+static uint32_t g_b13594_low_cmd = 0u;
+static uint32_t g_b13594_low_callback = 0u;
+static uint32_t g_b13594_low_resume = 0u;
+static uint32_t g_b13594_low_queue_before = 0u;
+static uint32_t g_b13594_low_queue_after = 0u;
 
 /* B36: les callbacks LibCD sont asynchrones sur PS1. Leur execution ne
  * doit donc pas detruire le contexte CPU interrompu. */
@@ -6374,7 +6387,8 @@ static int fm_b33_schedule_cd_callback(
     uint32_t callback,
     uint32_t resume_pc,
     uint32_t params,
-    uint32_t context
+    uint32_t context,
+    uint32_t return_value
 )
 {
     if (!cpu)
@@ -6387,6 +6401,7 @@ static int fm_b33_schedule_cd_callback(
     g_b33_cb_resume = resume_pc;
     g_b33_last_params = params;
     g_b33_last_ctx = context;
+    g_b33_cb_return_value = return_value;
 
     fm_b33_fill_cd_result(cpu, command);
 
@@ -6436,7 +6451,7 @@ static int fm_b33_schedule_cd_callback(
     )
     {
         ++g_b33_cb_skipped;
-        cpu->gpr[2] = 1u;
+        cpu->gpr[2] = g_b33_cb_return_value;
         cpu->pc = resume_pc;
         cpu->gpr[31] = resume_pc;
         cpu->gpr[0] = 0u;
@@ -6447,7 +6462,7 @@ static int fm_b33_schedule_cd_callback(
     if (g_b33_cb_active)
     {
         ++g_b33_cb_skipped;
-        cpu->gpr[2] = 1u;
+        cpu->gpr[2] = g_b33_cb_return_value;
         cpu->pc = resume_pc;
         cpu->gpr[31] = resume_pc;
         cpu->gpr[0] = 0u;
@@ -6705,6 +6720,7 @@ static int fm_execute_guest_vblank_callback(
 
             g_b33_cb_active = 0u;
             ++g_b33_cb_done;
+            g_b13594_low_queue_after = irq_cpu.read_word(0x800F7270u);
 
             for (unsigned i = 0; i < 32u; ++i)
             {
@@ -6712,7 +6728,7 @@ static int fm_execute_guest_vblank_callback(
             }
             ++g_b33_ctx_restored;
 
-            irq_cpu.gpr[2] = 1u;
+            irq_cpu.gpr[2] = g_b33_cb_return_value;
             irq_cpu.pc = resume_pc;
             irq_cpu.gpr[0] = 0u;
 
@@ -6721,6 +6737,65 @@ static int fm_execute_guest_vblank_callback(
                 g_b34_ready_pending = 1u;
                 g_b34_ready_arm_frame = frame + 1u;
             }
+
+            continue;
+        }
+
+        /*
+         * B135.94: low-level asynchronous LibCD command.
+         *
+         * The internal queue path is:
+         *   7B78C -> 7C3D8 -> 7C548 -> 7A1D4(async)
+         *
+         * On PS1, the CD IRQ later invokes DAT_80094910 (7CA78), which
+         * reaches 7CB88 -> 7B28C -> 7AE58 and completes/removes the job.
+         * Our host has no real CD IRQ, so publish CdlComplete and execute
+         * that exact guest callback chain.
+         */
+        if (phys == 0x0007A1D4u && irq_cpu.gpr[7] != 0u)
+        {
+            uint32_t command = irq_cpu.gpr[4] & 0xFFu;
+            uint32_t params = irq_cpu.gpr[5];
+            uint32_t callback = irq_cpu.read_word(0x80094910u);
+            uint32_t resume_pc = irq_cpu.gpr[31];
+
+            ++g_b13594_low_calls;
+            g_b13594_low_cmd = command;
+            g_b13594_low_callback = callback;
+            g_b13594_low_resume = resume_pc;
+            g_b13594_low_queue_before = irq_cpu.read_word(0x800F7270u);
+            g_cd_last_cmd = command;
+
+            if (command == 0x02u && params != 0u)
+            {
+                uint32_t minute = fm_bcd_to_u32(irq_cpu.read_byte(params + 0u));
+                uint32_t second = fm_bcd_to_u32(irq_cpu.read_byte(params + 1u));
+                uint32_t frame_cd = fm_bcd_to_u32(irq_cpu.read_byte(params + 2u));
+                uint32_t absolute_sector = ((minute * 60u + second) * 75u) + frame_cd;
+                g_cd_lba = absolute_sector >= 150u ? absolute_sector - 150u : 0u;
+                g_cd_pos = 2048u;
+            }
+
+            if (command == 0x06u)
+            {
+                g_cd_reading = 1;
+                g_cd_pos = 2048u;
+                g_cd_error = 0;
+            }
+            else if (command == 0x09u)
+            {
+                g_cd_reading = 0;
+            }
+
+            fm_b33_schedule_cd_callback(
+                &irq_cpu,
+                command,
+                callback,
+                resume_pc,
+                params,
+                0u,
+                0u
+            );
 
             continue;
         }
@@ -6772,7 +6847,8 @@ static int fm_execute_guest_vblank_callback(
                 callback,
                 resume_pc,
                 params,
-                context
+                context,
+                1u
             );
 
             continue;
@@ -13071,6 +13147,7 @@ int main(void)
 
                     g_b33_cb_active = 0u;
                     ++g_b33_cb_done;
+                    g_b13594_low_queue_after = cpu->read_word(0x800F7270u);
 
                     /* B36: le callback est une interruption logique.
                      * Restaurer les registres du caller de la commande,
@@ -13086,7 +13163,7 @@ int main(void)
                      * Le haut niveau 8007B78C gere desormais lui-meme
                      * son ID et son historique dans le guest.
                      */
-                    cpu->gpr[2] = 1u;
+                    cpu->gpr[2] = g_b33_cb_return_value;
 
                     cpu->pc = resume_pc;
                     cpu->gpr[0] = 0u;
@@ -14154,6 +14231,60 @@ int main(void)
                  * dans a2, pas dans a0. Exemple observe a 80014928 :
                  *   a0=A0, a1=gp+21C, a2=06(ReadN), a3=80013FBC.
                  */
+                /*
+                 * B135.94 - internal LibCD async command completion.
+                 * Preserve the real guest queue/callback lifecycle instead
+                 * of fabricating a queue result.
+                 */
+                if (phys == 0x0007A1D4u && cpu->gpr[7] != 0u)
+                {
+                    uint32_t command = cpu->gpr[4] & 0xFFu;
+                    uint32_t params = cpu->gpr[5];
+                    uint32_t callback = cpu->read_word(0x80094910u);
+                    uint32_t resume_pc = cpu->gpr[31];
+
+                    ++g_b13594_low_calls;
+                    g_b13594_low_cmd = command;
+                    g_b13594_low_callback = callback;
+                    g_b13594_low_resume = resume_pc;
+                    g_b13594_low_queue_before = cpu->read_word(0x800F7270u);
+                    g_cd_last_cmd = command;
+
+                    if (command == 0x02u && params != 0u)
+                    {
+                        uint32_t minute = fm_bcd_to_u32(cpu->read_byte(params + 0u));
+                        uint32_t second = fm_bcd_to_u32(cpu->read_byte(params + 1u));
+                        uint32_t frame_cd = fm_bcd_to_u32(cpu->read_byte(params + 2u));
+                        uint32_t absolute_sector = ((minute * 60u + second) * 75u) + frame_cd;
+                        g_cd_lba = absolute_sector >= 150u ? absolute_sector - 150u : 0u;
+                        g_cd_pos = 2048u;
+                    }
+
+                    if (command == 0x06u)
+                    {
+                        g_cd_reading = 1;
+                        g_cd_pos = 2048u;
+                        g_cd_error = 0;
+                    }
+                    else if (command == 0x09u)
+                    {
+                        g_cd_reading = 0;
+                    }
+
+                    fm_b33_schedule_cd_callback(
+                        cpu,
+                        command,
+                        callback,
+                        resume_pc,
+                        params,
+                        0u,
+                        0u
+                    );
+
+                    static_miss = 0;
+                    continue;
+                }
+
                 if (phys == 0x0007BA00u)
                 {
                     uint32_t mode = cpu->gpr[4] & 0xFFu;
@@ -14195,7 +14326,8 @@ int main(void)
                         callback,
                         resume_pc,
                         params,
-                        context
+                        context,
+                        1u
                     );
 
                     static_miss = 0;
@@ -19640,7 +19772,8 @@ int main(void)
                             "lastframes474=%lu 463=%lu 459d=%lu 45908=%lu\n"
                             "cdsync79c8c=%lu cdstate74a2c=%lu cdirq79728=%lu\n"
                             "bec=%02lX bed=%02lX cmd=%02lX irqflag=%04lX irq_nonzero=%lu\n"
-                            "loop=%lu deadline=%lu bec2=%lu bec5=%lu ra79c8c=%08lX ra79728=%08lX\n",
+                            "loop=%lu deadline=%lu bec2=%lu bec5=%lu ra79c8c=%08lX ra79728=%08lX\n"
+                            "low7a1d4=%lu cmd=%02lX cb=%08lX resume=%08lX qbefore=%lu qafter=%lu\n",
                             (unsigned long)frame,
                             (unsigned long)(cpu ? cpu->pc : 0u),
                             (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -19689,7 +19822,13 @@ int main(void)
                             (unsigned long)g_cdsync_bec2_seen,
                             (unsigned long)g_cdsync_bec5_seen,
                             (unsigned long)g_cdsync_last_ra_79c8c,
-                            (unsigned long)g_cdsync_last_ra_79728);
+                            (unsigned long)g_cdsync_last_ra_79728,
+                            (unsigned long)g_b13594_low_calls,
+                            (unsigned long)g_b13594_low_cmd,
+                            (unsigned long)g_b13594_low_callback,
+                            (unsigned long)g_b13594_low_resume,
+                            (unsigned long)g_b13594_low_queue_before,
+                            (unsigned long)g_b13594_low_queue_after);
                         fclose(c4f);
                     }
                 }
