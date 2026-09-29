@@ -94,6 +94,16 @@
 #define PSX_DMA_DPCR        0x1F8010F0u
 #define PSX_DMA_DICR        0x1F8010F4u
 
+/*
+ * Minimal SPU MMIO needed by Psy-Q transfer setup.
+ * Base 1F801C00; only a few control/status registers are modeled.
+ */
+#define PSX_SPU_BASE        0x1F801C00u
+#define PSX_SPU_XFER_ADDR   (PSX_SPU_BASE + 0x1A6u)
+#define PSX_SPU_XFER_DATA   (PSX_SPU_BASE + 0x1A8u)
+#define PSX_SPU_CTRL        (PSX_SPU_BASE + 0x1AAu)
+#define PSX_SPU_STAT        (PSX_SPU_BASE + 0x1AEu)
+
 
 /*
  * ============================================================
@@ -313,6 +323,12 @@ static uint32_t g_dma6_chcr = 0;
 
 static uint32_t g_dma_dpcr = 0;
 static uint32_t g_dma_dicr = 0;
+
+/* Minimal SPU state for Psy-Q DMA/PIO synchronization. */
+static uint16_t g_spu_xfer_addr = 0;
+static uint16_t g_spu_xfer_data = 0;
+static uint16_t g_spu_ctrl = 0;
+static uint16_t g_spu_stat = 0;
 
 /*
  * Diagnostics internes. Ils pourront être exposés plus tard
@@ -3612,6 +3628,19 @@ uint16_t fm_memory_read_half(
             addr
         );
 
+    if (
+        phys == PSX_SPU_XFER_ADDR
+        ||
+        phys == PSX_SPU_XFER_DATA
+        ||
+        phys == PSX_SPU_CTRL
+        ||
+        phys == PSX_SPU_STAT
+    )
+    {
+        return fm_spu_read_half(phys);
+    }
+
     /* B92 - hot RAM fast path before timer/DMA decoding. */
     if (
         g_ram
@@ -4049,6 +4078,72 @@ void fm_memory_write_half(
 
 /*
  * ============================================================
+ * Minimal SPU MMIO
+ * ============================================================
+ *
+ * Psy-Q SPU transfer code used by Forbidden Memories polls:
+ *   1F801DA6 transfer address
+ *   1F801DAA control bits 0x30
+ *   1F801DAE status bit 0x400 / low 11 bits
+ *
+ * We do not render audio here.  We mirror the control transfer mode into
+ * status sufficiently for the library's bounded wait loops to observe the
+ * hardware as ready.
+ */
+static uint16_t fm_spu_read_half(uint32_t phys)
+{
+    switch (phys)
+    {
+        case PSX_SPU_XFER_ADDR: return g_spu_xfer_addr;
+        case PSX_SPU_XFER_DATA: return g_spu_xfer_data;
+        case PSX_SPU_CTRL:      return g_spu_ctrl;
+        case PSX_SPU_STAT:      return g_spu_stat;
+        default:                return 0u;
+    }
+}
+
+
+static void fm_spu_write_half(uint32_t phys, uint16_t value)
+{
+    switch (phys)
+    {
+        case PSX_SPU_XFER_ADDR:
+            g_spu_xfer_addr = value;
+            return;
+
+        case PSX_SPU_XFER_DATA:
+            g_spu_xfer_data = value;
+            return;
+
+        case PSX_SPU_CTRL:
+            g_spu_ctrl = value;
+
+            /*
+             * Reflect transfer mode bits immediately.  This is the exact
+             * condition FUN_80075AFC(3) waits for before programming DMA4.
+             */
+            g_spu_stat =
+                (uint16_t)(
+                    (g_spu_stat & ~0x0430u)
+                    |
+                    (value & 0x0030u)
+                );
+            return;
+
+        case PSX_SPU_STAT:
+            /*
+             * Status is normally hardware-driven. Ignore guest writes.
+             */
+            return;
+
+        default:
+            return;
+    }
+}
+
+
+/*
+ * ============================================================
  * WORD READ
  * ============================================================
  */
@@ -4123,6 +4218,29 @@ uint32_t fm_memory_read_word(
             );
     }
 
+
+    /*
+     * SPU packed word reads (two adjacent 16-bit registers).
+     */
+    if (phys == 0x1F801DA4u)
+    {
+        return
+            (uint32_t)fm_spu_read_half(PSX_SPU_XFER_ADDR) << 16;
+    }
+
+    if (phys == 0x1F801DA8u)
+    {
+        return
+            (uint32_t)fm_spu_read_half(PSX_SPU_XFER_DATA)
+            |
+            ((uint32_t)fm_spu_read_half(PSX_SPU_CTRL) << 16);
+    }
+
+    if (phys == 0x1F801DACu)
+    {
+        return
+            (uint32_t)fm_spu_read_half(PSX_SPU_STAT) << 16;
+    }
 
     /*
      * --------------------------------------------------------
@@ -4411,6 +4529,27 @@ void fm_memory_write_word(
         return;
     }
 
+
+    /*
+     * SPU packed word writes (two adjacent 16-bit registers).
+     */
+    if (phys == 0x1F801DA4u)
+    {
+        fm_spu_write_half(PSX_SPU_XFER_ADDR, (uint16_t)(value >> 16));
+        return;
+    }
+
+    if (phys == 0x1F801DA8u)
+    {
+        fm_spu_write_half(PSX_SPU_XFER_DATA, (uint16_t)value);
+        fm_spu_write_half(PSX_SPU_CTRL, (uint16_t)(value >> 16));
+        return;
+    }
+
+    if (phys == 0x1F801DACu)
+    {
+        return;
+    }
 
     /*
      * --------------------------------------------------------
@@ -5118,6 +5257,11 @@ void fm_memory_quick_save(
 
     out->dma_dpcr = g_dma_dpcr;
     out->dma_dicr = g_dma_dicr;
+
+    out->spu_xfer_addr = g_spu_xfer_addr;
+    out->spu_xfer_data = g_spu_xfer_data;
+    out->spu_ctrl = g_spu_ctrl;
+    out->spu_stat = g_spu_stat;
 }
 
 
@@ -5162,6 +5306,11 @@ void fm_memory_quick_load(
 
     g_dma_dpcr = in->dma_dpcr;
     g_dma_dicr = in->dma_dicr;
+
+    g_spu_xfer_addr = in->spu_xfer_addr;
+    g_spu_xfer_data = in->spu_xfer_data;
+    g_spu_ctrl = in->spu_ctrl;
+    g_spu_stat = in->spu_stat;
 
     /*
      * La table de detection de boucle DMA est purement host/debug.
