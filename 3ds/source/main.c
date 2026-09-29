@@ -20303,7 +20303,9 @@ int main(void)
 
 #if FM_PERF_PROFILE
             uint32_t post681[11] = {0};
+            uint32_t bios_event_diag[12] = {0};
             fm_runtime_b136_post681(post681);
+            fm_runtime_b136_bios_event_diag(bios_event_diag);
 
             /*
              * Persistent manual-debug snapshot.
@@ -20422,7 +20424,19 @@ int main(void)
                         "gate_73dc8_ra=%08lX\n"
                         "gate_93f40=%08lX\n"
                         "gate_93f48=%08lX\n"
-                        "gate_93fec=%08lX\n",
+                        "gate_93fec=%08lX\n"
+                        "bios_deliver_hits=%lu\n"
+                        "bios_deliver_class=%08lX\n"
+                        "bios_deliver_spec=%08lX\n"
+                        "bios_test_hits=%lu\n"
+                        "bios_test_handle=%08lX\n"
+                        "bios_ev0_used=%lu\n"
+                        "bios_ev0_enabled=%lu\n"
+                        "bios_ev0_ready=%lu\n"
+                        "bios_ev0_class=%08lX\n"
+                        "bios_ev0_spec=%08lX\n"
+                        "bios_ev0_mode=%08lX\n"
+                        "bios_ev0_func=%08lX\n",
                         (unsigned long)frame,
                         (unsigned long)(cpu ? cpu->pc : 0u),
                         (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -20527,7 +20541,19 @@ int main(void)
                         (unsigned long)g_b136_73dc8_last_ra,
                         (unsigned long)fm_memory_read_word(0x80093F40u),
                         (unsigned long)fm_memory_read_word(0x80093F48u),
-                        (unsigned long)fm_memory_read_word(0x80093FECu)
+                        (unsigned long)fm_memory_read_word(0x80093FECu),
+                        (unsigned long)bios_event_diag[0],
+                        (unsigned long)bios_event_diag[1],
+                        (unsigned long)bios_event_diag[2],
+                        (unsigned long)bios_event_diag[3],
+                        (unsigned long)bios_event_diag[4],
+                        (unsigned long)bios_event_diag[5],
+                        (unsigned long)bios_event_diag[6],
+                        (unsigned long)bios_event_diag[7],
+                        (unsigned long)bios_event_diag[8],
+                        (unsigned long)bios_event_diag[9],
+                        (unsigned long)bios_event_diag[10],
+                        (unsigned long)bios_event_diag[11]
                     );
                     fclose(dbg);
                 }
