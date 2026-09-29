@@ -643,6 +643,10 @@ static uint32_t g_trace_last_phys = 0xFFFFFFFFu;
 
 static uint32_t g_hit_startup = 0;
 static uint32_t g_hit_service = 0;
+static uint32_t g_hit_12cb8 = 0;
+static uint32_t g_hit_vsync_main = 0;
+static uint32_t g_vsync_main_last_a0 = 0;
+static uint32_t g_vsync_main_last_ra = 0;
 static uint32_t g_hit_load_wait = 0;
 
 /* B31: snapshot exact de la requete asynchrone au premier passage dans 80013700. */
@@ -4778,6 +4782,19 @@ static void fm_trace_dispatch(
             ++g_hit_service;
             break;
 
+        case 0x00012CB8u:
+            ++g_hit_12cb8;
+            break;
+
+        case 0x000746B8u:
+            ++g_hit_vsync_main;
+            if (cpu)
+            {
+                g_vsync_main_last_a0 = cpu->gpr[4];
+                g_vsync_main_last_ra = cpu->gpr[31];
+            }
+            break;
+
         case 0x00013700u:
             ++g_hit_load_wait;
 
@@ -8721,6 +8738,10 @@ static void fm_cd_hle_reset(void)
 
     g_hit_startup = 0;
     g_hit_service = 0;
+    g_hit_12cb8 = 0;
+    g_hit_vsync_main = 0;
+    g_vsync_main_last_a0 = 0;
+    g_vsync_main_last_ra = 0;
     g_hit_load_wait = 0;
     g_b31_req_snap = 0;
     g_b31_req_10 = g_b31_req_18 = g_b31_req_1c = g_b31_req_20 = 0;
@@ -20249,7 +20270,23 @@ int main(void)
                         "bios_region_bfc7ff52=%02lX\n"
                         "cd_queue=%lu\n"
                         "cd_state=%lu\n"
-                        "gpu_gp0=%llu\n",
+                        "gpu_gp0=%llu\n"
+                        "service_12c50=%lu\n"
+                        "service_12cb8=%lu\n"
+                        "service_12d60=%lu\n"
+                        "vsync_main_hits=%lu\n"
+                        "vsync_main_a0=%08lX\n"
+                        "vsync_main_ra=%08lX\n"
+                        "c424=%02lX\n"
+                        "c428=%08lX\n"
+                        "c454=%02lX\n"
+                        "c43c=%08lX\n"
+                        "c440=%08lX\n"
+                        "c460=%08lX\n"
+                        "c484=%08lX\n"
+                        "libcd_c218=%lu\n"
+                        "libcd_c2b8=%lu\n"
+                        "libcd_c720=%lu\n",
                         (unsigned long)frame,
                         (unsigned long)(cpu ? cpu->pc : 0u),
                         (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -20271,7 +20308,23 @@ int main(void)
                         (unsigned long)fm_memory_read_byte(0xBFC7FF52u),
                         (unsigned long)fm_memory_read_word(0x800F7270u),
                         (unsigned long)fm_memory_read_word(0x80094CD0u),
-                        (unsigned long long)fm_gpu_gp0_count()
+                        (unsigned long long)fm_gpu_gp0_count(),
+                        (unsigned long)g_hit_service,
+                        (unsigned long)g_hit_12cb8,
+                        (unsigned long)g_4b8_hit_12d60,
+                        (unsigned long)g_hit_vsync_main,
+                        (unsigned long)g_vsync_main_last_a0,
+                        (unsigned long)g_vsync_main_last_ra,
+                        (unsigned long)fm_memory_read_byte(0x8009C424u),
+                        (unsigned long)fm_memory_read_word(0x8009C428u),
+                        (unsigned long)fm_memory_read_byte(0x8009C454u),
+                        (unsigned long)fm_memory_read_word(0x8009C43Cu),
+                        (unsigned long)fm_memory_read_word(0x8009C440u),
+                        (unsigned long)fm_memory_read_word(0x8009C460u),
+                        (unsigned long)fm_memory_read_word(0x8009C484u),
+                        (unsigned long)g_cdinit_hit_c218,
+                        (unsigned long)g_cdinit_hit_c2b8,
+                        (unsigned long)g_cdinit_hit_c720
                     );
                     fclose(dbg);
                 }
