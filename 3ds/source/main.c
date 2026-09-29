@@ -2358,6 +2358,16 @@ static uint32_t g_b47_68160_v0_nonzero = 0u;
 static uint32_t g_b47_68160_last_v0 = 0u;
 static uint32_t g_b47_68160_last_ra = 0u;
 
+/* MANUAL TRACE 68160 - dump real dynamic overlay bytes, no lab runner. */
+static uint32_t g_ov681_dump_done = 0u;
+static uint32_t g_ov681_f4_words[12] = {0};
+static uint32_t g_ov681_160_words[24] = {0};
+static uint32_t g_ov681_ret_0 = 0u;
+static uint32_t g_ov681_ret_1 = 0u;
+static uint32_t g_ov681_ret_2 = 0u;
+static uint32_t g_ov681_ret_other = 0u;
+static uint32_t g_ov681_last_ret = 0u;
+
 static uint32_t g_b47_last_milestone = 0u;
 static uint32_t g_b47_last_milestone_frame = 0u;
 
@@ -5319,6 +5329,11 @@ static void fm_trace_dispatch(
                 }
 
                 g_b47_68160_last_v0 = cpu->gpr[2];
+                g_ov681_last_ret = cpu->gpr[2];
+                if (cpu->gpr[2] == 0u) ++g_ov681_ret_0;
+                else if (cpu->gpr[2] == 1u) ++g_ov681_ret_1;
+                else if (cpu->gpr[2] == 2u) ++g_ov681_ret_2;
+                else ++g_ov681_ret_other;
 
                 g_b60_ret_v0 = cpu->gpr[2];
                 g_b60_ret_s0 = cpu->gpr[16];
@@ -5369,6 +5384,33 @@ static void fm_trace_dispatch(
             if (cpu)
             {
                 g_b47_68160_last_ra = cpu->gpr[31];
+
+                if (!g_ov681_dump_done)
+                {
+                    for (uint32_t i = 0u; i < 12u; ++i)
+                        g_ov681_f4_words[i] = fm_memory_read_word(0x801680F4u + i * 4u);
+                    for (uint32_t i = 0u; i < 24u; ++i)
+                        g_ov681_160_words[i] = fm_memory_read_word(0x80168160u + i * 4u);
+
+                    FILE *ovf = fopen("sdmc:/3ds/fm-new3ds/overlay-68160-diag.txt", "wb");
+                    if (ovf)
+                    {
+                        fprintf(ovf, "801680F4 words:\n");
+                        for (uint32_t i = 0u; i < 12u; ++i)
+                            fprintf(ovf, "%08lX %08lX\n",
+                                    (unsigned long)(0x801680F4u + i * 4u),
+                                    (unsigned long)g_ov681_f4_words[i]);
+
+                        fprintf(ovf, "80168160 words:\n");
+                        for (uint32_t i = 0u; i < 24u; ++i)
+                            fprintf(ovf, "%08lX %08lX\n",
+                                    (unsigned long)(0x80168160u + i * 4u),
+                                    (unsigned long)g_ov681_160_words[i]);
+
+                        fclose(ovf);
+                    }
+                    g_ov681_dump_done = 1u;
+                }
             }
             break;
 
@@ -8780,6 +8822,14 @@ static void fm_cd_hle_reset(void)
     g_b47_68160_v0_nonzero = 0u;
     g_b47_68160_last_v0 = 0u;
     g_b47_68160_last_ra = 0u;
+    g_ov681_dump_done = 0u;
+    memset(g_ov681_f4_words, 0, sizeof(g_ov681_f4_words));
+    memset(g_ov681_160_words, 0, sizeof(g_ov681_160_words));
+    g_ov681_ret_0 = 0u;
+    g_ov681_ret_1 = 0u;
+    g_ov681_ret_2 = 0u;
+    g_ov681_ret_other = 0u;
+    g_ov681_last_ret = 0u;
     g_b47_last_milestone = 0u;
     g_b47_last_milestone_frame = 0u;
 
@@ -19808,6 +19858,23 @@ int main(void)
                 (unsigned long)g_b47_68160_v0_zero,
                 (unsigned long)g_b47_68160_v0_nonzero,
                 (unsigned long)g_b47_68160_last_ra
+            );
+
+            printf(
+                "OVRET 0/1/2/X:%lu/%lu/%lu/%lu last:%08lX\n",
+                (unsigned long)g_ov681_ret_0,
+                (unsigned long)g_ov681_ret_1,
+                (unsigned long)g_ov681_ret_2,
+                (unsigned long)g_ov681_ret_other,
+                (unsigned long)g_ov681_last_ret
+            );
+
+            printf(
+                "OVSIG F4:%08lX %08lX 160:%08lX %08lX\n",
+                (unsigned long)g_ov681_f4_words[0],
+                (unsigned long)g_ov681_f4_words[1],
+                (unsigned long)g_ov681_160_words[0],
+                (unsigned long)g_ov681_160_words[1]
             );
 
             printf(
