@@ -76,6 +76,15 @@
 #define PSX_DMA2_CHCR       0x1F8010A8u
 
 /*
+ * Canal 4 = SPU.
+ * Le rendu audio n'est pas encore implémenté, mais le jeu dépend de la
+ * sémantique de fin DMA4 pour son événement de synchronisation.
+ */
+#define PSX_DMA4_MADR       0x1F8010C0u
+#define PSX_DMA4_BCR        0x1F8010C4u
+#define PSX_DMA4_CHCR       0x1F8010C8u
+
+/*
  * Canal 6 = OTC (Ordering Table Clear).
  */
 #define PSX_DMA6_MADR       0x1F8010E0u
@@ -285,6 +294,12 @@ static FMRootCounter g_timers[
 static uint32_t g_dma2_madr = 0;
 static uint32_t g_dma2_bcr = 0;
 static uint32_t g_dma2_chcr = 0;
+
+static uint32_t g_dma4_madr = 0;
+static uint32_t g_dma4_bcr = 0;
+static uint32_t g_dma4_chcr = 0;
+static uint32_t g_dma4_transfer_count = 0;
+static uint32_t g_dma4_completion_pending = 0;
 
 static uint32_t g_dma6_madr = 0;
 static uint32_t g_dma6_bcr = 0;
@@ -2263,6 +2278,68 @@ static void fm_dma2_try_start(void)
 
 /*
  * ============================================================
+ * DMA4 SPU - minimal completion bridge
+ * ============================================================
+ *
+ * SPU sample RAM/audio are not emulated yet.  For bring-up, retain the
+ * hardware-visible DMA semantics the game waits on: START clears, DICR
+ * channel-4 completion is latched, and one completion token is exposed
+ * to the BIOS event bridge.
+ */
+static void fm_dma4_complete(void)
+{
+    g_dma4_chcr &=
+        ~(
+            0x01000000u
+            |
+            0x10000000u
+        );
+
+    /* DICR flag channel 4 = bit 28. */
+    g_dma_dicr |= (1u << 28);
+
+    ++g_dma4_transfer_count;
+    ++g_dma4_completion_pending;
+
+    fm_dma_update_irq();
+}
+
+
+static void fm_dma4_try_start(void)
+{
+    if ((g_dma4_chcr & 0x01000000u) == 0u)
+    {
+        return;
+    }
+
+    /*
+     * Transfer payload is intentionally not rendered into SPU RAM yet.
+     * The current game path only requires completion/liveness.
+     */
+    fm_dma4_complete();
+}
+
+
+uint32_t fm_memory_dma4_take_completion(void)
+{
+    if (g_dma4_completion_pending == 0u)
+    {
+        return 0u;
+    }
+
+    --g_dma4_completion_pending;
+    return 1u;
+}
+
+
+uint32_t fm_memory_dma4_transfer_count(void)
+{
+    return g_dma4_transfer_count;
+}
+
+
+/*
+ * ============================================================
  * DMA6 OTC - Ordering Table Clear
  * ============================================================
  *
@@ -2444,6 +2521,24 @@ static int fm_dma_is_register(
         )
         ||
         (
+            phys >= PSX_DMA4_MADR
+            &&
+            phys < PSX_DMA4_MADR + 4u
+        )
+        ||
+        (
+            phys >= PSX_DMA4_BCR
+            &&
+            phys < PSX_DMA4_BCR + 4u
+        )
+        ||
+        (
+            phys >= PSX_DMA4_CHCR
+            &&
+            phys < PSX_DMA4_CHCR + 4u
+        )
+        ||
+        (
             phys >= PSX_DMA6_MADR
             &&
             phys < PSX_DMA6_MADR + 4u
@@ -2489,6 +2584,15 @@ static uint32_t fm_dma_register_read32(
 
         case PSX_DMA2_CHCR:
             return g_dma2_chcr;
+
+        case PSX_DMA4_MADR:
+            return g_dma4_madr;
+
+        case PSX_DMA4_BCR:
+            return g_dma4_bcr;
+
+        case PSX_DMA4_CHCR:
+            return g_dma4_chcr;
 
         case PSX_DMA6_MADR:
             return g_dma6_madr;
@@ -2540,6 +2644,33 @@ static uint32_t fm_dma_register_base(
     )
     {
         return PSX_DMA2_CHCR;
+    }
+
+    if (
+        phys >= PSX_DMA4_MADR
+        &&
+        phys < PSX_DMA4_MADR + 4u
+    )
+    {
+        return PSX_DMA4_MADR;
+    }
+
+    if (
+        phys >= PSX_DMA4_BCR
+        &&
+        phys < PSX_DMA4_BCR + 4u
+    )
+    {
+        return PSX_DMA4_BCR;
+    }
+
+    if (
+        phys >= PSX_DMA4_CHCR
+        &&
+        phys < PSX_DMA4_CHCR + 4u
+    )
+    {
+        return PSX_DMA4_CHCR;
     }
 
     if (
@@ -4013,9 +4144,51 @@ uint32_t fm_memory_read_word(
 
     /*
      * --------------------------------------------------------
+     * DMA4 SPU
+     * --------------------------------------------------------
+     */
+
+    if (phys == PSX_DMA4_MADR)
+    {
+        g_dma4_madr = value & 0x00FFFFFFu;
+        return;
+    }
+
+    if (phys == PSX_DMA4_BCR)
+    {
+        g_dma4_bcr = value;
+        return;
+    }
+
+    if (phys == PSX_DMA4_CHCR)
+    {
+        g_dma4_chcr =
+            value;
+
+        fm_dma4_try_start();
+        return;
+    }
+
+    /*
+     * --------------------------------------------------------
      * DMA6 OTC
      * --------------------------------------------------------
      */
+
+    if (phys == PSX_DMA4_MADR)
+    {
+        return g_dma4_madr;
+    }
+
+    if (phys == PSX_DMA4_BCR)
+    {
+        return g_dma4_bcr;
+    }
+
+    if (phys == PSX_DMA4_CHCR)
+    {
+        return g_dma4_chcr;
+    }
 
     if (phys == PSX_DMA6_MADR)
     {
@@ -4916,6 +5089,10 @@ void fm_memory_quick_save(
     out->dma2_bcr = g_dma2_bcr;
     out->dma2_chcr = g_dma2_chcr;
 
+    out->dma4_madr = g_dma4_madr;
+    out->dma4_bcr = g_dma4_bcr;
+    out->dma4_chcr = g_dma4_chcr;
+
     out->dma6_madr = g_dma6_madr;
     out->dma6_bcr = g_dma6_bcr;
     out->dma6_chcr = g_dma6_chcr;
@@ -4954,6 +5131,11 @@ void fm_memory_quick_load(
     g_dma2_madr = in->dma2_madr;
     g_dma2_bcr = in->dma2_bcr;
     g_dma2_chcr = in->dma2_chcr;
+
+    g_dma4_madr = in->dma4_madr;
+    g_dma4_bcr = in->dma4_bcr;
+    g_dma4_chcr = in->dma4_chcr;
+    g_dma4_completion_pending = 0u;
 
     g_dma6_madr = in->dma6_madr;
     g_dma6_bcr = in->dma6_bcr;
