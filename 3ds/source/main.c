@@ -937,6 +937,12 @@ static uint32_t g_q20_last_frame_474e0 = 0u;
 static uint32_t g_q20_last_frame_463f8 = 0u;
 static uint32_t g_q20_last_frame_459d0 = 0u;
 static uint32_t g_q20_last_frame_45908 = 0u;
+static uint32_t g_vb_gate_set_hits = 0u;
+static uint32_t g_vb_gate_clear_hits = 0u;
+static uint32_t g_vb_gate_skip_hits = 0u;
+static uint32_t g_vb_gate_last_set_frame = 0u;
+static uint32_t g_vb_gate_last_clear_frame = 0u;
+static uint32_t g_vb_gate_last_skip_frame = 0u;
 
 /* B135.91 - read-only state split around 459D0 -> 45918 -> 45908. */
 static uint32_t g_459d0_cmd20 = 0u;
@@ -6496,6 +6502,26 @@ static int fm_execute_guest_vblank_callback(
         }
 
         uint32_t phys = irq_cpu.pc & 0x1FFFFFFFu;
+
+        if (phys == 0x00012C2Cu)
+        {
+            ++g_vb_gate_set_hits;
+            g_vb_gate_last_set_frame = frame;
+        }
+        if (phys == 0x00012C38u)
+        {
+            ++g_vb_gate_clear_hits;
+            g_vb_gate_last_clear_frame = frame;
+        }
+        if (phys == 0x00012C40u)
+        {
+            uint32_t gate = fm_memory_read_byte(g_vblank_registered_gp + 4u);
+            if (gate != 0u)
+            {
+                ++g_vb_gate_skip_hits;
+                g_vb_gate_last_skip_frame = frame;
+            }
+        }
 
         /*
          * The resident queue service (800474E0 -> 800463F8 ->
@@ -19539,6 +19565,15 @@ int main(void)
                        (unsigned long)g_q20_last_frame_463f8,
                        (unsigned long)g_q20_last_frame_459d0,
                        (unsigned long)g_q20_last_frame_45908);
+                printf("VB gate val:%02lX set/clear/skip:%lu/%lu/%lu\n",
+                       (unsigned long)fm_memory_read_byte(g_vblank_registered_gp + 4u),
+                       (unsigned long)g_vb_gate_set_hits,
+                       (unsigned long)g_vb_gate_clear_hits,
+                       (unsigned long)g_vb_gate_skip_hits);
+                printf("VB gate frame set/clear/skip:%lu/%lu/%lu\n",
+                       (unsigned long)g_vb_gate_last_set_frame,
+                       (unsigned long)g_vb_gate_last_clear_frame,
+                       (unsigned long)g_vb_gate_last_skip_frame);
                 printf("47C18:%lu idx:%lu RA:%08lX q:%lu\n",
                        (unsigned long)g_47c18_hits,
                        (unsigned long)g_47c18_last_index,
