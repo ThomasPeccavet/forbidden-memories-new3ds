@@ -1,43 +1,115 @@
 > [!NOTE]
-> **Analyse historique d'overlay.** Cette page décrit la première cartographie statique de SU.MRG. Le backend New 3DS dispose maintenant d'un fallback R3000A destiné précisément à exécuter ces images dynamiques avant toute recompilation dédiée. Voir [CURRENT_STATUS.md](CURRENT_STATUS.md) et [ACTION_PLAN.md](ACTION_PLAN.md).
+> **Analyse historique d'overlay.** Cette page décrit la cartographie statique de
+> SU.MRG. Le verrou actif du 29 septembre 2026 se situe désormais plus tôt dans
+> le startup, dans la chaîne CD / événement BIOS / SPU / DMA4. Voir
+> [B136_STARTUP_CD_SPU_DMA4.md](B136_STARTUP_CD_SPU_DMA4.md).
 
 # Piste SU.MRG et chargement par étapes
 
 Analyse statique des exports `research/ghidra-fr/export/pseudo-c`.
 
-## Chemin suivi
+## Chemin startup vers SU
 
-`80012a44` appelle `80043e3c(0)`, qui appelle notamment `8006b560` puis attend via `80013700`. `8006b560` configure `80014d38` avec une requête associée au symbole `s_M__mrgSU_SU_mrg_800117fc`, une position liée à `DAT_8009c44b`, une longueur `0x73` et le callback `8006b350`.
+`80012A44` appelle `80043E3C(0)`.
 
-`80014d38` passe la requête à `800138b4`, qui appelle `8001385c`. Cette dernière convertit les longueurs négatives en octets avec un facteur `0x800` et les positions positives par un décalage de 11 bits.
+La fonction :
+- initialise plusieurs états ;
+- prépare une première requête avec `80014D38` ;
+- exécute l'overlay `801680F4 / 80168160` ;
+- poursuit plusieurs initialisations ;
+- passe par un second `80043CD4` ;
+- puis doit atteindre `80043DC8`, `800159F4`, `8002CF60` et enfin
+  `8006B560`.
 
-Le chemin `80012c50 -> 80012f70 -> 80014978 -> 80014478` assure le traitement récurrent.
+Le diagnostic B136 a confirmé que le startup courant s'arrête **avant**
+`8006B560`, dans le second `80043CD4`.
 
-## Étapes de 8006b350
+## Première requête historique
 
-| Index | Taille | Destination indiquée |
-|---|---|---|
-| 0 | 0x20000 | Tampon DAT_8009c4b0, mode 2 |
-| 1 | 0x10000 | Même tampon, mode 2 |
-| 2 | 0x1000 | 0x801dd000, mode 1 |
-| 3 | 0x8000 | PTR_DAT_8001002c, mode 1 |
-| 4 | 0x800 | 0x801af800, mode 1 |
+`80043E3C` appelle notamment :
 
-Somme : `0x39800 = 0x73 * 0x800`.
+~~~text
+FUN_80014D38(0,0,0x2503,0x25,FUN_800438D4,0,0)
+~~~
 
-La capture de références fournie lors de l'analyse identifie `PTR_DAT_8001002c` comme pointant vers `0x80180000`. Sous hypothèse de consommation séquentielle, l'étape 3 commence à `+0x31000` dans la requête.
+`80014D38` passe la requête à `800138B4`, puis `8001385C`.
 
-## Ce qui a été confirmé ensuite
+Le pipeline récurrent reste :
 
-Le sondage SU et la seconde passe Ghidra ont fortement confirmé que le bloc chargé à `0x80180000` contient du code MIPS cohérent et correspond à un overlay de menu. Voir :
+~~~text
+80012C50
+ -> 80012F70
+ -> 80014978
+ -> 80014478
+~~~
 
+## Chargement SU par FUN_8006B350
+
+Une fois le startup libéré, `8006B560` configure une requête associée à :
+
+~~~text
+M:\mrg\SU\SU.mrg
+~~~
+
+`8006B350` découpe ensuite le chargement :
+
+| Index | Taille | Destination |
+| --- | ---: | --- |
+| 0 | 0x20000 | tampon DAT_8009C4B0, mode 2 |
+| 1 | 0x10000 | même tampon, mode 2 |
+| 2 | 0x1000 | 0x801DD000, mode 1 |
+| 3 | 0x8000 | PTR_DAT_8001002C, mode 1 |
+| 4 | 0x800 | 0x801AF800, mode 1 |
+
+Somme :
+
+~~~text
+0x39800 = 0x73 * 0x800
+~~~
+
+La zone `PTR_DAT_8001002C` a été observée vers `0x80180000`, utilisée par des
+images overlay dynamiques.
+
+## Ce qui a déjà été confirmé
+
+Les passes précédentes ont prouvé que :
+- le bloc `0x80180000` contient du code MIPS cohérent ;
+- SU contient bien le chemin menu ;
+- les overlays dynamiques peuvent être exécutés via fallback R3000A ;
+- le menu et les écrans suivants ont déjà été atteints dans les branches B135.
+
+Voir :
 - [SU_PROBE_RESULTS.md](SU_PROBE_RESULTS.md)
 - [SU_MENU_ANALYSIS.md](SU_MENU_ANALYSIS.md)
 
-Cette zone dynamique ne doit pas être considérée comme une fonction permanente : différentes images peuvent réutiliser la même adresse.
+## Verrou actuel avant SU
 
-## Conséquence pour le backend New 3DS
+La requête actuellement bloquée n'est pas encore le chargement SU final.
 
-Le fallback R3000A permet maintenant d'exécuter immédiatement un bloc chargé dans `0x801xxxxx` sans attendre une nouvelle génération PSXRecomp. Une recompilation ARM dédiée pourra être ajoutée plus tard pour les overlays chauds et identifiés de manière stable.
+Elle est :
 
-Le prochain travail lié aux overlays consiste à journaliser l'adresse, la taille, la source et une empreinte de chaque image réellement chargée pendant le boot New 3DS.
+~~~text
+LBA       = 0x3172D
+remaining = 0x2000
+cmd       = ReadN
+~~~
+
+Elle dépend d'une synchronisation SPU/DMA4 et d'un événement BIOS
+`F0000009/0x20`.
+
+Le prochain objectif est donc de libérer cette chaîne avant de réinvestiguer
+SU lui-même.
+
+## Conséquence
+
+Ne pas considérer SU comme cassé tant que le startup B136 n'a pas repassé :
+
+~~~text
+post681_43dc8
+post681_159f4
+...
+8006B560
+~~~
+
+La priorité actuelle est documentée dans :
+[B136_STARTUP_CD_SPU_DMA4.md](B136_STARTUP_CD_SPU_DMA4.md).
