@@ -300,6 +300,12 @@ static uint32_t g_dma4_bcr = 0;
 static uint32_t g_dma4_chcr = 0;
 static uint32_t g_dma4_transfer_count = 0;
 static uint32_t g_dma4_completion_pending = 0;
+static uint32_t g_dma4_madr_writes = 0;
+static uint32_t g_dma4_bcr_writes = 0;
+static uint32_t g_dma4_chcr_writes = 0;
+static uint32_t g_dma4_last_madr_write = 0;
+static uint32_t g_dma4_last_bcr_write = 0;
+static uint32_t g_dma4_last_chcr_write = 0;
 
 static uint32_t g_dma6_madr = 0;
 static uint32_t g_dma6_bcr = 0;
@@ -4448,6 +4454,8 @@ void fm_memory_write_word(
 
     if (phys == PSX_DMA4_MADR)
     {
+        ++g_dma4_madr_writes;
+        g_dma4_last_madr_write = value;
         g_dma4_madr =
             value
             &
@@ -4458,6 +4466,8 @@ void fm_memory_write_word(
 
     if (phys == PSX_DMA4_BCR)
     {
+        ++g_dma4_bcr_writes;
+        g_dma4_last_bcr_write = value;
         g_dma4_bcr =
             value;
 
@@ -4466,6 +4476,8 @@ void fm_memory_write_word(
 
     if (phys == PSX_DMA4_CHCR)
     {
+        ++g_dma4_chcr_writes;
+        g_dma4_last_chcr_write = value;
         g_dma4_chcr =
             value;
 
@@ -5163,4 +5175,16 @@ void fm_memory_quick_load(
     );
 
     g_dma2_visit_generation = 1u;
+}
+
+
+void fm_memory_dma4_write_diag(uint32_t out[6])
+{
+    if (!out) return;
+    out[0] = g_dma4_madr_writes;
+    out[1] = g_dma4_bcr_writes;
+    out[2] = g_dma4_chcr_writes;
+    out[3] = g_dma4_last_madr_write;
+    out[4] = g_dma4_last_bcr_write;
+    out[5] = g_dma4_last_chcr_write;
 }
