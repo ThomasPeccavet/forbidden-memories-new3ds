@@ -359,3 +359,7 @@ int fm_bios_try_hle(
  * 0 si aucun hook n'a encore été installé.
  */
 uint32_t fm_bios_hook_addr(void);
+
+
+/* B136.1: generated-entry counters for the sequence after 80168160. */
+void fm_runtime_b136_post681(uint32_t out[11]);
