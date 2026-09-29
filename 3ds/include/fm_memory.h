@@ -69,6 +69,11 @@ typedef struct FMMemoryQuickState
 
     uint32_t dma_dpcr;
     uint32_t dma_dicr;
+
+    uint16_t spu_xfer_addr;
+    uint16_t spu_xfer_data;
+    uint16_t spu_ctrl;
+    uint16_t spu_stat;
 } FMMemoryQuickState;
 
 void fm_memory_quick_save(FMMemoryQuickState *out);
