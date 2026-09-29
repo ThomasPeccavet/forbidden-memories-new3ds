@@ -931,7 +931,21 @@ static uint32_t g_q20_ra_474e0 = 0u;
 static uint32_t g_q20_sp_474e0 = 0u;
 static uint32_t g_q20_hit_463f8 = 0u;
 static uint32_t g_q20_hit_459d0 = 0u;
+static uint32_t g_q20_hit_45918 = 0u;
 static uint32_t g_q20_hit_45908 = 0u;
+
+/* B135.91 - read-only state split around 459D0 -> 45918 -> 45908. */
+static uint32_t g_459d0_cmd20 = 0u;
+static uint32_t g_459d0_other = 0u;
+static uint32_t g_459d0_20_stage0 = 0u;
+static uint32_t g_459d0_20_stage1 = 0u;
+static uint32_t g_459d0_20_stage_other = 0u;
+static uint32_t g_459d0_20_cb_busy = 0u;
+static uint32_t g_459d0_20_cb_free = 0u;
+static uint32_t g_45918_last_ra = 0u;
+static uint32_t g_45908_last_ra = 0u;
+static uint32_t g_45908_last_cb_busy = 0u;
+static uint32_t g_45908_last_cb_ptr = 0u;
 
 /* Read-only lifecycle trace for FUN_80047C18 and its queued 0x20/0x51 pair. */
 static uint32_t g_47c18_hits = 0u;
@@ -6445,8 +6459,55 @@ static int fm_execute_guest_vblank_callback(
             g_q20_sp_474e0 = irq_cpu.gpr[29];
         }
         if (phys == 0x000463F8u) ++g_q20_hit_463f8;
-        if (phys == 0x000459D0u) ++g_q20_hit_459d0;
-        if (phys == 0x00045908u) ++g_q20_hit_45908;
+
+        if (phys == 0x000459D0u)
+        {
+            ++g_q20_hit_459d0;
+
+            uint32_t qctx = fm_memory_read_word(0x8009C7E0u);
+            if (qctx >= 0x80000000u && qctx < 0x80200000u)
+            {
+                uint32_t cmd = fm_memory_read_byte(qctx + 0x7Cu);
+                uint32_t stage = fm_memory_read_byte(qctx + 0x7Du);
+
+                if (cmd == 0x20u)
+                {
+                    ++g_459d0_cmd20;
+                    if (stage == 0u) ++g_459d0_20_stage0;
+                    else if (stage == 1u)
+                    {
+                        ++g_459d0_20_stage1;
+                        if (fm_memory_read_byte(qctx + 0x1618u) != 0u)
+                            ++g_459d0_20_cb_busy;
+                        else
+                            ++g_459d0_20_cb_free;
+                    }
+                    else ++g_459d0_20_stage_other;
+                }
+                else
+                {
+                    ++g_459d0_other;
+                }
+            }
+        }
+
+        if (phys == 0x00045918u)
+        {
+            ++g_q20_hit_45918;
+            g_45918_last_ra = irq_cpu.gpr[31];
+        }
+
+        if (phys == 0x00045908u)
+        {
+            ++g_q20_hit_45908;
+            g_45908_last_ra = irq_cpu.gpr[31];
+
+            uint32_t qctx = fm_memory_read_word(0x8009C7E0u);
+            if (qctx >= 0x80000000u && qctx < 0x80200000u)
+                g_45908_last_cb_busy = fm_memory_read_byte(qctx + 0x1618u);
+
+            g_45908_last_cb_ptr = fm_memory_read_word(0x8009C470u);
+        }
 
         if (
             g_b33_cb_active
@@ -19360,6 +19421,22 @@ int main(void)
                 printf("474E0 RA:%08lX SP:%08lX\n",
                        (unsigned long)g_q20_ra_474e0,
                        (unsigned long)g_q20_sp_474e0);
+                printf("459D0 20/other:%lu/%lu st0/st1/stX:%lu/%lu/%lu\n",
+                       (unsigned long)g_459d0_cmd20,
+                       (unsigned long)g_459d0_other,
+                       (unsigned long)g_459d0_20_stage0,
+                       (unsigned long)g_459d0_20_stage1,
+                       (unsigned long)g_459d0_20_stage_other);
+                printf("459D0 st1 busy/free:%lu/%lu 45918:%lu RA:%08lX\n",
+                       (unsigned long)g_459d0_20_cb_busy,
+                       (unsigned long)g_459d0_20_cb_free,
+                       (unsigned long)g_q20_hit_45918,
+                       (unsigned long)g_45918_last_ra);
+                printf("45908:%lu RA:%08lX busy:%lu ptr:%08lX\n",
+                       (unsigned long)g_q20_hit_45908,
+                       (unsigned long)g_45908_last_ra,
+                       (unsigned long)g_45908_last_cb_busy,
+                       (unsigned long)g_45908_last_cb_ptr);
                 printf("47C18:%lu idx:%lu RA:%08lX q:%lu\n",
                        (unsigned long)g_47c18_hits,
                        (unsigned long)g_47c18_last_index,
