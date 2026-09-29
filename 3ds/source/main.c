@@ -20189,7 +20189,11 @@ int main(void)
                             "ws495c8 hits=%lu a0=%08lX ra=%08lX 47660=%lu a0/a1/a2=%08lX/%08lX/%08lX\n"
                             "wsloop samples=%lu idx=%lu q=%lu type=%02lX mark=%08lX q0=%02lX/%08lX q1=%02lX/%08lX q2=%02lX/%08lX\n"
                             "wsvb attempts/ok=%lu/%lu qbefore/after=%lu/%lu frame=%lu\n"
-                            "47910/47A58=%lu/%lu ctx=%08lX count0=%lu ptr43c=%08lX w=%08lX/%08lX/%08lX/%08lX\n",
+                            "47910/47A58=%lu/%lu ctx=%08lX count0=%lu ptr43c=%08lX w=%08lX/%08lX/%08lX/%08lX\n"
+                            "startup 401/43e/main=%lu/%lu/%lu forced=%lu/%lu 43ret=%lu\n"
+                            "43e mile 3c/4c/54/f8/54b/64/6c=%lu/%lu/%lu/%lu/%lu/%lu/%lu\n"
+                            "direct active/calls/ret=%lu/%lu/%lu pc=%08lX guestframes=%lu\n"
+                            "gpu fill/draw/copy/upload=%llu/%llu/%llu/%llu gp0=%llu\n",
                             (unsigned long)frame,
                             (unsigned long)(cpu ? cpu->pc : 0u),
                             (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -20316,7 +20320,30 @@ int main(void)
                             (unsigned long)g_47910_w0,
                             (unsigned long)g_47910_w1,
                             (unsigned long)g_47910_w2,
-                            (unsigned long)g_47910_w3);
+                            (unsigned long)g_47910_w3,
+                            (unsigned long)g_hit_401a4,
+                            (unsigned long)g_hit_intro_init,
+                            (unsigned long)g_hit_main_loop,
+                            (unsigned long)g_fast401_forced,
+                            (unsigned long)g_fast43e_forced,
+                            (unsigned long)g_b32_43e_returned,
+                            (unsigned long)g_b47_m_43f3c,
+                            (unsigned long)g_b47_m_43f4c,
+                            (unsigned long)g_b47_m_43f54,
+                            (unsigned long)g_b47_m_43ff8,
+                            (unsigned long)g_b47_m_44054,
+                            (unsigned long)g_b47_m_44064,
+                            (unsigned long)g_b47_m_4406c,
+                            (unsigned long)g_direct2df_active,
+                            (unsigned long)g_direct2df_calls,
+                            (unsigned long)g_direct2df_returns,
+                            (unsigned long)g_direct2df_last_pc,
+                            (unsigned long)g_b85_guest_frames,
+                            (unsigned long long)gpu_debug.packets_fill,
+                            (unsigned long long)gpu_debug.packets_draw,
+                            (unsigned long long)gpu_debug.packets_copy,
+                            (unsigned long long)gpu_debug.packets_upload,
+                            (unsigned long long)gpu_debug.gp0_words);
                         fclose(c4f);
                     }
                 }
