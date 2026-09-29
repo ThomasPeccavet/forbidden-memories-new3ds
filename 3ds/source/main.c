@@ -19583,6 +19583,57 @@ int main(void)
                     qmark2 = fm_memory_read_word(qctx2 + 0x90u);
                 }
 
+                {
+                    FILE *c4f = fopen("sdmc:/3ds/fm-new3ds/c4b8-diag.txt", "wb");
+                    if (c4f)
+                    {
+                        fprintf(c4f,
+                            "frame=%lu pc=%08lX ra=%08lX\n"
+                            "c4b8=%02lX changes=%lu change_pc=%08lX change_ra=%08lX\n"
+                            "fn1522=%lu fn1540=%lu fn1569=%lu fn15c18=%lu fn15c28=%lu fn12d60=%lu\n"
+                            "ra15c18=%08lX ra15c28=%08lX ra1522=%08lX before1522=%02lX eb24e=%02lX eb24c=%02lX\n"
+                            "svc474=%lu svc463=%lu svc459d=%lu svc45918=%lu svc45908=%lu\n"
+                            "459d_cmd20=%lu other=%lu st0=%lu st1=%lu stx=%lu busy=%lu free=%lu\n"
+                            "lastframes474=%lu 463=%lu 459d=%lu 45908=%lu\n",
+                            (unsigned long)frame,
+                            (unsigned long)(cpu ? cpu->pc : 0u),
+                            (unsigned long)(cpu ? cpu->gpr[31] : 0u),
+                            (unsigned long)fm_memory_read_byte(0x8009C4B8u),
+                            (unsigned long)g_4b8_changes,
+                            (unsigned long)g_4b8_last_change_pc,
+                            (unsigned long)g_4b8_last_change_ra,
+                            (unsigned long)g_4b8_hit_1522c,
+                            (unsigned long)g_4b8_hit_15400,
+                            (unsigned long)g_4b8_hit_1569c,
+                            (unsigned long)g_4b8_hit_15c18,
+                            (unsigned long)g_4b8_hit_15c28,
+                            (unsigned long)g_4b8_hit_12d60,
+                            (unsigned long)g_4b8_ra_15c18,
+                            (unsigned long)g_4b8_ra_15c28,
+                            (unsigned long)g_4b8_last_1522c_ra,
+                            (unsigned long)g_4b8_last_1522c_before,
+                            (unsigned long)g_4b8_last_eb24e,
+                            (unsigned long)g_4b8_last_eb24c,
+                            (unsigned long)g_q20_hit_474e0,
+                            (unsigned long)g_q20_hit_463f8,
+                            (unsigned long)g_q20_hit_459d0,
+                            (unsigned long)g_q20_hit_45918,
+                            (unsigned long)g_q20_hit_45908,
+                            (unsigned long)g_459d0_cmd20,
+                            (unsigned long)g_459d0_other,
+                            (unsigned long)g_459d0_20_stage0,
+                            (unsigned long)g_459d0_20_stage1,
+                            (unsigned long)g_459d0_20_stage_other,
+                            (unsigned long)g_459d0_20_cb_busy,
+                            (unsigned long)g_459d0_20_cb_free,
+                            (unsigned long)g_q20_last_frame_474e0,
+                            (unsigned long)g_q20_last_frame_463f8,
+                            (unsigned long)g_q20_last_frame_459d0,
+                            (unsigned long)g_q20_last_frame_45908);
+                        fclose(c4f);
+                    }
+                }
+
                 printf("\x1b[2J\x1b[H");
                 printf("Q20 ROOT CAUSE\n");
                 printf("4B8:%02lX chg:%lu pc:%08lX ra:%08lX\n",
