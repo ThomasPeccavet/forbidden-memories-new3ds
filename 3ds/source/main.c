@@ -6822,7 +6822,14 @@ static int fm_execute_guest_vblank_callback(
      * Normal VBlanks still finish in a handful of handoffs; the
      * larger ceiling only matters for the occasional long service.
      */
-    for (uint32_t handoff = 0; handoff < 2048u; ++handoff)
+    /*
+     * B136.06 - FUN_80047910 legitimately clears count0 entries.
+     * The observed scene has count0=4382, so 2048 still aborts the
+     * callback halfway through and leaves the VBlank gate asserted.
+     * 8192 comfortably covers that initializer plus the remaining
+     * resident service while staying bounded.
+     */
+    for (uint32_t handoff = 0; handoff < 8192u; ++handoff)
     {
         g_irq_exec_last_handoffs = handoff + 1u;
         g_irq_exec_last_pc = irq_cpu.pc;
