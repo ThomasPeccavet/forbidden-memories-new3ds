@@ -927,6 +927,8 @@ static uint32_t g_q20_diag_count = 0u;
 static uint32_t g_q20_diag_pc = 0u;
 static uint32_t g_q20_diag_words[12] = {0};
 static uint32_t g_q20_hit_474e0 = 0u;
+static uint32_t g_q20_ra_474e0 = 0u;
+static uint32_t g_q20_sp_474e0 = 0u;
 static uint32_t g_q20_hit_463f8 = 0u;
 static uint32_t g_q20_hit_459d0 = 0u;
 static uint32_t g_q20_hit_45908 = 0u;
@@ -5833,6 +5835,11 @@ static void fm_trace_dispatch(
 
         case 0x000474E0u:
             ++g_q20_hit_474e0;
+            if (cpu)
+            {
+                g_q20_ra_474e0 = cpu->gpr[31];
+                g_q20_sp_474e0 = cpu->gpr[29];
+            }
             break;
 
         case 0x00047C18u:
@@ -19339,6 +19346,9 @@ int main(void)
                        (unsigned long)g_q20_hit_463f8,
                        (unsigned long)g_q20_hit_459d0,
                        (unsigned long)g_q20_hit_45908);
+                printf("474E0 RA:%08lX SP:%08lX\n",
+                       (unsigned long)g_q20_ra_474e0,
+                       (unsigned long)g_q20_sp_474e0);
                 printf("47C18:%lu idx:%lu RA:%08lX q:%lu\n",
                        (unsigned long)g_47c18_hits,
                        (unsigned long)g_47c18_last_index,
