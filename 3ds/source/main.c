@@ -6772,7 +6772,16 @@ static int fm_execute_guest_vblank_callback(
     g_irq_exec_last_interp_reason = 0;
     g_irq_exec_last_handoffs = 0;
 
-    for (uint32_t handoff = 0; handoff < 128u; ++handoff)
+    /*
+     * B136.03 - 128 handoffs was not enough for the legitimate
+     * 47910/47A58 resident-queue path. Aborting there left the
+     * VBlank reentrancy gate set to 1 forever, so every later IRQ
+     * skipped 474E0. Let the real callback reach its own return.
+     *
+     * Normal VBlanks still finish in a handful of handoffs; the
+     * larger ceiling only matters for the occasional long service.
+     */
+    for (uint32_t handoff = 0; handoff < 2048u; ++handoff)
     {
         g_irq_exec_last_handoffs = handoff + 1u;
         g_irq_exec_last_pc = irq_cpu.pc;
