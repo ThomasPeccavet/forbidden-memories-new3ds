@@ -20236,6 +20236,9 @@ int main(void)
 
 
 #if FM_PERF_PROFILE
+            uint32_t post681[11] = {0};
+            fm_runtime_b136_post681(post681);
+
             /*
              * Persistent manual-debug snapshot.
              *
@@ -20286,7 +20289,18 @@ int main(void)
                         "c484=%08lX\n"
                         "libcd_c218=%lu\n"
                         "libcd_c2b8=%lu\n"
-                        "libcd_c720=%lu\n",
+                        "libcd_c720=%lu\n"
+                        "post681_7b53c=%lu\n"
+                        "post681_40350=%lu\n"
+                        "post681_403d0=%lu\n"
+                        "post681_42bd8=%lu\n"
+                        "post681_43a78=%lu\n"
+                        "post681_47f60=%lu\n"
+                        "post681_12c88=%lu\n"
+                        "post681_43cd4=%lu\n"
+                        "post681_43dc8=%lu\n"
+                        "post681_159f4=%lu\n"
+                        "post681_2cf60=%lu\n",
                         (unsigned long)frame,
                         (unsigned long)(cpu ? cpu->pc : 0u),
                         (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -20324,7 +20338,18 @@ int main(void)
                         (unsigned long)fm_memory_read_word(0x8009C484u),
                         (unsigned long)g_cdinit_hit_c218,
                         (unsigned long)g_cdinit_hit_c2b8,
-                        (unsigned long)g_cdinit_hit_c720
+                        (unsigned long)g_cdinit_hit_c720,
+                        (unsigned long)post681[0],
+                        (unsigned long)post681[1],
+                        (unsigned long)post681[2],
+                        (unsigned long)post681[3],
+                        (unsigned long)post681[4],
+                        (unsigned long)post681[5],
+                        (unsigned long)post681[6],
+                        (unsigned long)post681[7],
+                        (unsigned long)post681[8],
+                        (unsigned long)post681[9],
+                        (unsigned long)post681[10]
                     );
                     fclose(dbg);
                 }
