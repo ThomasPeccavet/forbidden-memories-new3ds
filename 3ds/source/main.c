@@ -4035,6 +4035,7 @@ static void fm_trace_dispatch(
     switch (phys)
     {
         case 0x00012D60u:
+            ++g_4b8_hit_12d60;
             b13560_snapshot(cpu, 1u);
             b13561_checkpoint_base(cpu, 0);
 
@@ -5039,6 +5040,7 @@ static void fm_trace_dispatch(
          */
         case 0x0001569Cu:
             ++g_b49_fn_1569c;
+            ++g_4b8_hit_1569c;
             if (cpu) g_b49_ra_1569c = cpu->gpr[31];
             break;
 
@@ -5895,10 +5897,6 @@ static void fm_trace_dispatch(
             ++g_4b8_hit_15400;
             break;
 
-        case 0x0001569Cu:
-            ++g_4b8_hit_1569c;
-            break;
-
         case 0x00015C18u:
             ++g_4b8_hit_15c18;
             if (cpu) g_4b8_ra_15c18 = cpu->gpr[31];
@@ -5907,10 +5905,6 @@ static void fm_trace_dispatch(
         case 0x00015C28u:
             ++g_4b8_hit_15c28;
             if (cpu) g_4b8_ra_15c28 = cpu->gpr[31];
-            break;
-
-        case 0x00012D60u:
-            ++g_4b8_hit_12d60;
             break;
 
         case 0x000474E0u:
