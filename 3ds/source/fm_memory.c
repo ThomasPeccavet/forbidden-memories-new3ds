@@ -4144,33 +4144,6 @@ uint32_t fm_memory_read_word(
 
     /*
      * --------------------------------------------------------
-     * DMA4 SPU
-     * --------------------------------------------------------
-     */
-
-    if (phys == PSX_DMA4_MADR)
-    {
-        g_dma4_madr = value & 0x00FFFFFFu;
-        return;
-    }
-
-    if (phys == PSX_DMA4_BCR)
-    {
-        g_dma4_bcr = value;
-        return;
-    }
-
-    if (phys == PSX_DMA4_CHCR)
-    {
-        g_dma4_chcr =
-            value;
-
-        fm_dma4_try_start();
-        return;
-    }
-
-    /*
-     * --------------------------------------------------------
      * DMA6 OTC
      * --------------------------------------------------------
      */
@@ -4463,6 +4436,40 @@ void fm_memory_write_word(
             value;
 
         fm_dma2_try_start();
+
+        return;
+    }
+
+    /*
+     * --------------------------------------------------------
+     * DMA4 SPU
+     * --------------------------------------------------------
+     */
+
+    if (phys == PSX_DMA4_MADR)
+    {
+        g_dma4_madr =
+            value
+            &
+            0x00FFFFFFu;
+
+        return;
+    }
+
+    if (phys == PSX_DMA4_BCR)
+    {
+        g_dma4_bcr =
+            value;
+
+        return;
+    }
+
+    if (phys == PSX_DMA4_CHCR)
+    {
+        g_dma4_chcr =
+            value;
+
+        fm_dma4_try_start();
 
         return;
     }
