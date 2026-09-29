@@ -1047,6 +1047,21 @@ static uint32_t g_b13594_low_resume = 0u;
 static uint32_t g_b13594_low_queue_before = 0u;
 static uint32_t g_b13594_low_queue_after = 0u;
 
+/* B135.95 - high-level LibCD job queue liveness. */
+static uint32_t g_qmgr_hit_7ed88 = 0u;
+static uint32_t g_qmgr_hit_7b78c = 0u;
+static uint32_t g_qmgr_hit_7bdd4 = 0u;
+static uint32_t g_qmgr_hit_7b21c = 0u;
+static uint32_t g_qmgr_hit_7c3d8 = 0u;
+static uint32_t g_qmgr_hit_7c548 = 0u;
+static uint32_t g_qmgr_hit_7b28c = 0u;
+static uint32_t g_qmgr_hit_7ae58 = 0u;
+static uint32_t g_qmgr_last_cmd = 0u;
+static uint32_t g_qmgr_last_handle = 0u;
+static uint32_t g_qmgr_last_event = 0u;
+static uint32_t g_qmgr_last_7ed88_ra = 0u;
+static uint32_t g_qmgr_last_7bdd4_ra = 0u;
+
 /* B36: les callbacks LibCD sont asynchrones sur PS1. Leur execution ne
  * doit donc pas detruire le contexte CPU interrompu. */
 static uint32_t g_b33_saved_gpr[32];
@@ -5935,6 +5950,49 @@ static void fm_trace_dispatch(
 
                 break;
             }
+            break;
+
+        case 0x0007ED88u:
+            ++g_qmgr_hit_7ed88;
+            if (cpu) g_qmgr_last_7ed88_ra = cpu->gpr[31];
+            g_qmgr_last_cmd = cpu ? (cpu->gpr[4] & 0xFFu) : 0u;
+            break;
+
+        case 0x0007B78Cu:
+            ++g_qmgr_hit_7b78c;
+            g_qmgr_last_cmd = cpu ? (cpu->gpr[4] & 0xFFu) : 0u;
+            break;
+
+        case 0x0007BDD4u:
+            ++g_qmgr_hit_7bdd4;
+            if (cpu)
+            {
+                g_qmgr_last_handle = cpu->gpr[4];
+                g_qmgr_last_7bdd4_ra = cpu->gpr[31];
+            }
+            break;
+
+        case 0x0007B21Cu:
+            ++g_qmgr_hit_7b21c;
+            break;
+
+        case 0x0007C3D8u:
+            ++g_qmgr_hit_7c3d8;
+            if (cpu) g_qmgr_last_cmd = cpu->gpr[4] & 0xFFu;
+            break;
+
+        case 0x0007C548u:
+            ++g_qmgr_hit_7c548;
+            if (cpu) g_qmgr_last_cmd = cpu->gpr[4] & 0xFFu;
+            break;
+
+        case 0x0007B28Cu:
+            ++g_qmgr_hit_7b28c;
+            if (cpu) g_qmgr_last_event = cpu->gpr[4] & 0xFFu;
+            break;
+
+        case 0x0007AE58u:
+            ++g_qmgr_hit_7ae58;
             break;
 
         case 0x00079C8Cu:
@@ -19773,7 +19831,10 @@ int main(void)
                             "cdsync79c8c=%lu cdstate74a2c=%lu cdirq79728=%lu\n"
                             "bec=%02lX bed=%02lX cmd=%02lX irqflag=%04lX irq_nonzero=%lu\n"
                             "loop=%lu deadline=%lu bec2=%lu bec5=%lu ra79c8c=%08lX ra79728=%08lX\n"
-                            "low7a1d4=%lu cmd=%02lX cb=%08lX resume=%08lX qbefore=%lu qafter=%lu\n",
+                            "low7a1d4=%lu cmd=%02lX cb=%08lX resume=%08lX qbefore=%lu qafter=%lu\n"
+                            "qmgr ed88/b78c/bdd4/b21c/c3d8/c548/b28c/ae58=%lu/%lu/%lu/%lu/%lu/%lu/%lu/%lu\n"
+                            "qstate count=%lu head=%lu cur=%lu hist=%lu cd0=%lu cb0=%lu cf4=%lu ccc=%02lX cd4=%02lX\n"
+                            "qcur handle=%08lX cmd=%02lX cb=%08lX retry=%08lX lastcmd=%02lX lasthandle=%08lX event=%02lX\n",
                             (unsigned long)frame,
                             (unsigned long)(cpu ? cpu->pc : 0u),
                             (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -19828,7 +19889,31 @@ int main(void)
                             (unsigned long)g_b13594_low_callback,
                             (unsigned long)g_b13594_low_resume,
                             (unsigned long)g_b13594_low_queue_before,
-                            (unsigned long)g_b13594_low_queue_after);
+                            (unsigned long)g_b13594_low_queue_after,
+                            (unsigned long)g_qmgr_hit_7ed88,
+                            (unsigned long)g_qmgr_hit_7b78c,
+                            (unsigned long)g_qmgr_hit_7bdd4,
+                            (unsigned long)g_qmgr_hit_7b21c,
+                            (unsigned long)g_qmgr_hit_7c3d8,
+                            (unsigned long)g_qmgr_hit_7c548,
+                            (unsigned long)g_qmgr_hit_7b28c,
+                            (unsigned long)g_qmgr_hit_7ae58,
+                            (unsigned long)fm_memory_read_word(0x800F7270u),
+                            (unsigned long)fm_memory_read_word(0x800F7268u),
+                            (unsigned long)fm_memory_read_word(0x800F726Cu),
+                            (unsigned long)fm_memory_read_word(0x800F72F8u),
+                            (unsigned long)fm_memory_read_word(0x80094CD0u),
+                            (unsigned long)fm_memory_read_word(0x80094CB0u),
+                            (unsigned long)fm_memory_read_word(0x80094CF4u),
+                            (unsigned long)fm_memory_read_byte(0x80094CCCu),
+                            (unsigned long)fm_memory_read_byte(0x80094CD4u),
+                            (unsigned long)fm_memory_read_word(0x800F71A8u + (fm_memory_read_word(0x800F726Cu) & 7u) * 0x18u),
+                            (unsigned long)fm_memory_read_byte(0x800F71ACu + (fm_memory_read_word(0x800F726Cu) & 7u) * 0x18u),
+                            (unsigned long)fm_memory_read_word(0x800F71B8u + (fm_memory_read_word(0x800F726Cu) & 7u) * 0x18u),
+                            (unsigned long)fm_memory_read_word(0x800F71BCu + (fm_memory_read_word(0x800F726Cu) & 7u) * 0x18u),
+                            (unsigned long)g_qmgr_last_cmd,
+                            (unsigned long)g_qmgr_last_handle,
+                            (unsigned long)g_qmgr_last_event);
                         fclose(c4f);
                     }
                 }
