@@ -19585,6 +19585,22 @@ int main(void)
 
                 printf("\x1b[2J\x1b[H");
                 printf("Q20 ROOT CAUSE\n");
+                printf("4B8:%02lX chg:%lu pc:%08lX ra:%08lX\n",
+                       (unsigned long)fm_memory_read_byte(0x8009C4B8u),
+                       (unsigned long)g_4b8_changes,
+                       (unsigned long)g_4b8_last_change_pc,
+                       (unsigned long)g_4b8_last_change_ra);
+                printf("4B8 fn 1522/1540/1569:%lu/%lu/%lu 15C18/28:%lu/%lu\n",
+                       (unsigned long)g_4b8_hit_1522c,
+                       (unsigned long)g_4b8_hit_15400,
+                       (unsigned long)g_4b8_hit_1569c,
+                       (unsigned long)g_4b8_hit_15c18,
+                       (unsigned long)g_4b8_hit_15c28);
+                printf("4B8 RA set/clr:%08lX/%08lX EB24E/C:%02lX/%02lX\n",
+                       (unsigned long)g_4b8_ra_15c18,
+                       (unsigned long)g_4b8_ra_15c28,
+                       (unsigned long)g_4b8_last_eb24e,
+                       (unsigned long)g_4b8_last_eb24c);
                 printf("PC:%08lX RA:%08lX frame:%lu\n",
                        (unsigned long)(cpu ? cpu->pc : 0u),
                        (unsigned long)(cpu ? cpu->gpr[31] : 0u),
