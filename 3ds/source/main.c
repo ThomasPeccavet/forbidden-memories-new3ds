@@ -933,6 +933,10 @@ static uint32_t g_q20_hit_463f8 = 0u;
 static uint32_t g_q20_hit_459d0 = 0u;
 static uint32_t g_q20_hit_45918 = 0u;
 static uint32_t g_q20_hit_45908 = 0u;
+static uint32_t g_q20_last_frame_474e0 = 0u;
+static uint32_t g_q20_last_frame_463f8 = 0u;
+static uint32_t g_q20_last_frame_459d0 = 0u;
+static uint32_t g_q20_last_frame_45908 = 0u;
 
 /* B135.91 - read-only state split around 459D0 -> 45918 -> 45908. */
 static uint32_t g_459d0_cmd20 = 0u;
@@ -6509,6 +6513,7 @@ static int fm_execute_guest_vblank_callback(
         if (phys == 0x000474E0u)
         {
             ++g_q20_hit_474e0;
+            g_q20_last_frame_474e0 = frame;
             /*
              * 474E0 normally runs in this isolated VBlank CPU context.
              * Capture the guest call-site registers here as well as in
@@ -6518,11 +6523,16 @@ static int fm_execute_guest_vblank_callback(
             g_q20_ra_474e0 = irq_cpu.gpr[31];
             g_q20_sp_474e0 = irq_cpu.gpr[29];
         }
-        if (phys == 0x000463F8u) ++g_q20_hit_463f8;
+        if (phys == 0x000463F8u)
+        {
+            ++g_q20_hit_463f8;
+            g_q20_last_frame_463f8 = frame;
+        }
 
         if (phys == 0x000459D0u)
         {
             ++g_q20_hit_459d0;
+            g_q20_last_frame_459d0 = frame;
 
             uint32_t qctx = fm_memory_read_word(0x8009C7E0u);
             if (qctx >= 0x80000000u && qctx < 0x80200000u)
@@ -6560,6 +6570,7 @@ static int fm_execute_guest_vblank_callback(
         if (phys == 0x00045908u)
         {
             ++g_q20_hit_45908;
+            g_q20_last_frame_45908 = frame;
             g_45908_last_ra = irq_cpu.gpr[31];
 
             uint32_t qctx = fm_memory_read_word(0x8009C7E0u);
@@ -19513,6 +19524,21 @@ int main(void)
                        (unsigned long)g_4b8_ra_15c28,
                        (unsigned long)g_4b8_last_eb24e,
                        (unsigned long)g_4b8_last_eb24c);
+                printf("IRQ calls/ok/fail/native:%lu/%lu/%lu/%lu sig:%lu\n",
+                       (unsigned long)g_irq_exec_calls,
+                       (unsigned long)g_irq_exec_ok,
+                       (unsigned long)g_irq_exec_fail,
+                       (unsigned long)g_hit_vblank_cb,
+                       (unsigned long)g_vblank_bridge_sig_ok);
+                printf("IRQ last code/phys/handoff:%ld/%08lX/%lu\n",
+                       (long)g_irq_exec_last_code,
+                       (unsigned long)g_irq_exec_last_phys,
+                       (unsigned long)g_irq_exec_last_handoffs);
+                printf("SVC last frame 474/463/459D/45908:%lu/%lu/%lu/%lu\n",
+                       (unsigned long)g_q20_last_frame_474e0,
+                       (unsigned long)g_q20_last_frame_463f8,
+                       (unsigned long)g_q20_last_frame_459d0,
+                       (unsigned long)g_q20_last_frame_45908);
                 printf("47C18:%lu idx:%lu RA:%08lX q:%lu\n",
                        (unsigned long)g_47c18_hits,
                        (unsigned long)g_47c18_last_index,
