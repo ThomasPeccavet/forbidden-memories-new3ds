@@ -4,6 +4,7 @@
 #include <3ds.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #ifndef FM_PERF_PROFILE
@@ -105,6 +106,140 @@ static uint8_t *g_ram = NULL;
 static size_t g_ram_size = 0;
 
 static uint8_t g_scratch[PSX_SCRATCH_SIZE];
+
+/*
+ * B136.0 - exact guest RAM write watch.
+ *
+ * Generated stores set g_debug_last_store_pc immediately before calling
+ * cpu->write_{byte,half,word}. Record writes touching the state words that
+ * currently gate the 43E3C / 80168160 startup path. No gameplay state is
+ * modified.
+ */
+extern uint32_t g_debug_last_store_pc;
+
+#define FM_MEMORY_WATCH_CAP 96u
+
+typedef struct FMMemoryWatchEvent
+{
+    uint32_t seq;
+    uint32_t store_pc;
+    uint32_t addr;
+    uint32_t old_value;
+    uint32_t new_value;
+    uint8_t size;
+} FMMemoryWatchEvent;
+
+static FMMemoryWatchEvent g_memory_watch[FM_MEMORY_WATCH_CAP];
+static uint32_t g_memory_watch_seq = 0u;
+static uint32_t g_memory_watch_count = 0u;
+
+static int fm_memory_watch_overlap(uint32_t phys, uint32_t size)
+{
+    static const uint32_t watched[] = {
+        0x0009C424u,
+        0x0009C428u,
+        0x0009C43Cu,
+        0x0009C440u,
+        0x0009C454u,
+        0x0009C460u,
+        0x0009C484u
+    };
+
+    uint32_t end = phys + size;
+    for (unsigned i = 0u; i < sizeof(watched) / sizeof(watched[0]); ++i)
+    {
+        if (watched[i] >= phys && watched[i] < end)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void fm_memory_watch_store(uint32_t phys, uint32_t size, uint32_t value)
+{
+#if FM_PERF_PROFILE
+    if (!g_ram || size == 0u || size > 4u || phys >= PSX_RAM_MIRROR_END)
+    {
+        return;
+    }
+
+    phys &= 0x001FFFFFu;
+    if (!fm_memory_watch_overlap(phys, size) || phys + size > g_ram_size)
+    {
+        return;
+    }
+
+    uint32_t old_value = 0u;
+    for (uint32_t i = 0u; i < size; ++i)
+    {
+        old_value |= ((uint32_t)g_ram[phys + i]) << (i * 8u);
+    }
+
+    uint32_t mask = size == 4u ? 0xFFFFFFFFu : ((1u << (size * 8u)) - 1u);
+    uint32_t new_value = value & mask;
+    if (old_value == new_value)
+    {
+        return;
+    }
+
+    uint32_t slot = g_memory_watch_seq % FM_MEMORY_WATCH_CAP;
+    g_memory_watch[slot].seq = g_memory_watch_seq + 1u;
+    g_memory_watch[slot].store_pc = g_debug_last_store_pc;
+    g_memory_watch[slot].addr = 0x80000000u | phys;
+    g_memory_watch[slot].old_value = old_value;
+    g_memory_watch[slot].new_value = new_value;
+    g_memory_watch[slot].size = (uint8_t)size;
+    ++g_memory_watch_seq;
+    if (g_memory_watch_count < FM_MEMORY_WATCH_CAP)
+    {
+        ++g_memory_watch_count;
+    }
+#else
+    (void)phys; (void)size; (void)value;
+#endif
+}
+
+void fm_memory_watch_dump(const char *path)
+{
+#if FM_PERF_PROFILE
+    if (!path)
+    {
+        return;
+    }
+
+    FILE *f = fopen(path, "wb");
+    if (!f)
+    {
+        return;
+    }
+
+    fprintf(f, "events_total=%lu\nevents_kept=%lu\n",
+            (unsigned long)g_memory_watch_seq,
+            (unsigned long)g_memory_watch_count);
+
+    uint32_t first = g_memory_watch_seq > g_memory_watch_count
+        ? g_memory_watch_seq - g_memory_watch_count
+        : 0u;
+
+    for (uint32_t n = first; n < g_memory_watch_seq; ++n)
+    {
+        const FMMemoryWatchEvent *e = &g_memory_watch[n % FM_MEMORY_WATCH_CAP];
+        fprintf(f,
+                "seq=%lu pc=%08lX addr=%08lX size=%u old=%08lX new=%08lX\n",
+                (unsigned long)e->seq,
+                (unsigned long)e->store_pc,
+                (unsigned long)e->addr,
+                (unsigned)e->size,
+                (unsigned long)e->old_value,
+                (unsigned long)e->new_value);
+    }
+
+    fclose(f);
+#else
+    (void)path;
+#endif
+}
 
 
 /*
@@ -3200,6 +3335,8 @@ void fm_memory_write_byte(
             addr
         );
 
+    fm_memory_watch_store(phys, 1u, (uint32_t)value);
+
     /* B92 - hot RAM fast path. */
     if (
         g_ram
@@ -3565,6 +3702,8 @@ void fm_memory_write_half(
         fm_phys(
             addr
         );
+
+    fm_memory_watch_store(phys, 2u, (uint32_t)value);
 
     /* B92 - hot RAM fast path before timer/DMA decoding. */
     if (
@@ -4045,6 +4184,8 @@ void fm_memory_write_word(
         fm_phys(
             addr
         );
+
+    fm_memory_watch_store(phys, 4u, value);
 
     /* B92 - hot RAM fast path before all MMIO tests. */
     if (
