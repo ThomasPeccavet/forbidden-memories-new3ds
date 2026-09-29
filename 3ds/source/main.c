@@ -2451,6 +2451,7 @@ static uint32_t g_b50_c460_after = 0u;
 static uint32_t g_b50_c484_before = 0u;
 static uint32_t g_b50_c484_after = 0u;
 static uint32_t g_b50_remaining = 0u;
+static uint32_t g_b50_last_trigger_ra = 0u;
 
 
 /*
@@ -8885,6 +8886,7 @@ static void fm_cd_hle_reset(void)
     g_b50_c484_before = 0u;
     g_b50_c484_after = 0u;
     g_b50_remaining = 0u;
+    g_b50_last_trigger_ra = 0u;
 
 
     g_b51_rearm_count = 0u;
@@ -13890,11 +13892,15 @@ int main(void)
                 if (
                     phys == 0x00043CD4u
                     &&
-                    !g_b50_cleanup_triggered
-                    &&
                     !g_b35_finalizer_active
                     &&
                     g_b32_getsec_ok != 0u
+                    &&
+                    (
+                        g_b50_cleanup_triggered == 0u
+                        ||
+                        cpu->gpr[31] != g_b50_last_trigger_ra
+                    )
                 )
                 {
                     const uint32_t req =
@@ -13929,6 +13935,7 @@ int main(void)
                     )
                     {
                         ++g_b50_cleanup_triggered;
+                        g_b50_last_trigger_ra = cpu->gpr[31];
                         g_b50_cleanup_active = 1u;
 
                         /*
@@ -20300,7 +20307,15 @@ int main(void)
                         "post681_43cd4=%lu\n"
                         "post681_43dc8=%lu\n"
                         "post681_159f4=%lu\n"
-                        "post681_2cf60=%lu\n",
+                        "post681_2cf60=%lu\n"
+                        "b50_triggers=%lu\n"
+                        "b50_done=%lu\n"
+                        "b50_last_ra=%08lX\n"
+                        "b50_remaining=%08lX\n"
+                        "b50_c460_before=%08lX\n"
+                        "b50_c460_after=%08lX\n"
+                        "b50_c484_before=%08lX\n"
+                        "b50_c484_after=%08lX\n",
                         (unsigned long)frame,
                         (unsigned long)(cpu ? cpu->pc : 0u),
                         (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -20349,7 +20364,15 @@ int main(void)
                         (unsigned long)post681[7],
                         (unsigned long)post681[8],
                         (unsigned long)post681[9],
-                        (unsigned long)post681[10]
+                        (unsigned long)post681[10],
+                        (unsigned long)g_b50_cleanup_triggered,
+                        (unsigned long)g_b50_cleanup_done,
+                        (unsigned long)g_b50_last_trigger_ra,
+                        (unsigned long)g_b50_remaining,
+                        (unsigned long)g_b50_c460_before,
+                        (unsigned long)g_b50_c460_after,
+                        (unsigned long)g_b50_c484_before,
+                        (unsigned long)g_b50_c484_after
                     );
                     fclose(dbg);
                 }
