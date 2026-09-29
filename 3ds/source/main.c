@@ -2563,6 +2563,13 @@ static uint32_t g_b136_73dc8_hits = 0u;
 static uint32_t g_b136_73dc8_last_a0 = 0u;
 static uint32_t g_b136_73dc8_last_ra = 0u;
 
+static uint32_t g_b136_77108_hits = 0u;
+static uint32_t g_b136_77108_last_a0 = 0u;
+static uint32_t g_b136_77108_last_ra = 0u;
+static uint32_t g_b136_772a8_hits = 0u;
+static uint32_t g_b136_772a8_last_a0 = 0u;
+static uint32_t g_b136_772a8_last_ra = 0u;
+
 /*
  * Trace cible du petit cycle observe dans le dernier build :
  *
@@ -4864,6 +4871,24 @@ static void fm_trace_dispatch(
                 }
 
                 g_b31_req_snap = 1u;
+            }
+            break;
+
+        case 0x00077108u:
+            ++g_b136_77108_hits;
+            if (cpu)
+            {
+                g_b136_77108_last_a0 = cpu->gpr[4];
+                g_b136_77108_last_ra = cpu->gpr[31];
+            }
+            break;
+
+        case 0x000772A8u:
+            ++g_b136_772a8_hits;
+            if (cpu)
+            {
+                g_b136_772a8_last_a0 = cpu->gpr[4];
+                g_b136_772a8_last_ra = cpu->gpr[31];
             }
             break;
 
@@ -8982,6 +9007,13 @@ static void fm_cd_hle_reset(void)
     g_b136_73dc8_hits = 0u;
     g_b136_73dc8_last_a0 = 0u;
     g_b136_73dc8_last_ra = 0u;
+
+    g_b136_77108_hits = 0u;
+    g_b136_77108_last_a0 = 0u;
+    g_b136_77108_last_ra = 0u;
+    g_b136_772a8_hits = 0u;
+    g_b136_772a8_last_a0 = 0u;
+    g_b136_772a8_last_ra = 0u;
 
     g_hit_7fcbc = 0;
     g_hit_82158 = 0;
@@ -20436,7 +20468,13 @@ int main(void)
                         "bios_ev0_class=%08lX\n"
                         "bios_ev0_spec=%08lX\n"
                         "bios_ev0_mode=%08lX\n"
-                        "bios_ev0_func=%08lX\n",
+                        "bios_ev0_func=%08lX\n"
+                        "producer_77108_hits=%lu\n"
+                        "producer_77108_a0=%08lX\n"
+                        "producer_77108_ra=%08lX\n"
+                        "producer_772a8_hits=%lu\n"
+                        "producer_772a8_a0=%08lX\n"
+                        "producer_772a8_ra=%08lX\n",
                         (unsigned long)frame,
                         (unsigned long)(cpu ? cpu->pc : 0u),
                         (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -20553,7 +20591,13 @@ int main(void)
                         (unsigned long)bios_event_diag[8],
                         (unsigned long)bios_event_diag[9],
                         (unsigned long)bios_event_diag[10],
-                        (unsigned long)bios_event_diag[11]
+                        (unsigned long)bios_event_diag[11],
+                        (unsigned long)g_b136_77108_hits,
+                        (unsigned long)g_b136_77108_last_a0,
+                        (unsigned long)g_b136_77108_last_ra,
+                        (unsigned long)g_b136_772a8_hits,
+                        (unsigned long)g_b136_772a8_last_a0,
+                        (unsigned long)g_b136_772a8_last_ra
                     );
                     fclose(dbg);
                 }
