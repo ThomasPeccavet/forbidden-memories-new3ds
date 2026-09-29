@@ -2577,6 +2577,12 @@ static uint32_t g_b136_76098_last_a0 = 0u;
 static uint32_t g_b136_76098_last_a1 = 0u;
 static uint32_t g_b136_76098_last_ra = 0u;
 
+static uint32_t g_b136_75afc_hits = 0u;
+static uint32_t g_b136_75afc_last_a0 = 0u;
+static uint32_t g_b136_75afc_last_a1 = 0u;
+static uint32_t g_b136_75afc_last_a2 = 0u;
+static uint32_t g_b136_75afc_last_ra = 0u;
+
 /*
  * Trace cible du petit cycle observe dans le dernier build :
  *
@@ -4878,6 +4884,17 @@ static void fm_trace_dispatch(
                 }
 
                 g_b31_req_snap = 1u;
+            }
+            break;
+
+        case 0x00075AFCu:
+            ++g_b136_75afc_hits;
+            if (cpu)
+            {
+                g_b136_75afc_last_a0 = cpu->gpr[4];
+                g_b136_75afc_last_a1 = cpu->gpr[5];
+                g_b136_75afc_last_a2 = cpu->gpr[6];
+                g_b136_75afc_last_ra = cpu->gpr[31];
             }
             break;
 
@@ -9043,6 +9060,12 @@ static void fm_cd_hle_reset(void)
     g_b136_76098_last_a0 = 0u;
     g_b136_76098_last_a1 = 0u;
     g_b136_76098_last_ra = 0u;
+
+    g_b136_75afc_hits = 0u;
+    g_b136_75afc_last_a0 = 0u;
+    g_b136_75afc_last_a1 = 0u;
+    g_b136_75afc_last_a2 = 0u;
+    g_b136_75afc_last_ra = 0u;
 
     g_hit_7fcbc = 0;
     g_hit_82158 = 0;
@@ -20515,7 +20538,15 @@ int main(void)
                         "producer_93ff0=%08lX\n"
                         "dma4_transfers=%lu\n"
                         "dma4_event_bridge=%lu\n"
-                        "dma4_event_ready=%lu\n",
+                        "dma4_event_ready=%lu\n"
+                        "spu_75afc_hits=%lu\n"
+                        "spu_75afc_a0=%08lX\n"
+                        "spu_75afc_a1=%08lX\n"
+                        "spu_75afc_a2=%08lX\n"
+                        "spu_75afc_ra=%08lX\n"
+                        "spu_ptr_madr=%08lX\n"
+                        "spu_ptr_bcr=%08lX\n"
+                        "spu_ptr_chcr=%08lX\n",
                         (unsigned long)frame,
                         (unsigned long)(cpu ? cpu->pc : 0u),
                         (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -20648,7 +20679,15 @@ int main(void)
                         (unsigned long)fm_memory_read_word(0x80093FF0u),
                         (unsigned long)dma4_diag[2],
                         (unsigned long)dma4_diag[0],
-                        (unsigned long)dma4_diag[3]
+                        (unsigned long)dma4_diag[3],
+                        (unsigned long)g_b136_75afc_hits,
+                        (unsigned long)g_b136_75afc_last_a0,
+                        (unsigned long)g_b136_75afc_last_a1,
+                        (unsigned long)g_b136_75afc_last_a2,
+                        (unsigned long)g_b136_75afc_last_ra,
+                        (unsigned long)fm_memory_read_word(0x80093FBCu),
+                        (unsigned long)fm_memory_read_word(0x80093FC0u),
+                        (unsigned long)fm_memory_read_word(0x80093FC4u)
                     );
                     fclose(dbg);
                 }
