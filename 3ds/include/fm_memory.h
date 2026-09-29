@@ -142,3 +142,5 @@ typedef struct FMDmaDebugStats
 void fm_memory_dma_debug(
     FMDmaDebugStats *out
 );
+
+void fm_memory_dma4_write_diag(uint32_t out[6]);
