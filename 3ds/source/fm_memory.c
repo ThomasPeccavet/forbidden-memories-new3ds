@@ -3062,6 +3062,24 @@ uint8_t fm_memory_read_byte(
 
     /*
      * --------------------------------------------------------
+     * BIOS ROM region byte
+     * --------------------------------------------------------
+     *
+     * The dynamic overlay loaded at 0x80168000 reads
+     * 0xBFC7FF52 with LBU and branches on ASCII region tags.
+     * This French SLES build expects the European BIOS tag 'E'
+     * (0x45).  The 3DS backend does not map a full BIOS ROM, so
+     * without this tiny compatibility read the address falls
+     * through as unmapped and returns 0, selecting the wrong
+     * overlay state-machine path.
+     */
+    if (phys == 0x1FC7FF52u)
+    {
+        return 0x45u; /* 'E' = Europe */
+    }
+
+    /*
+     * --------------------------------------------------------
      * Scratchpad
      * --------------------------------------------------------
      */
