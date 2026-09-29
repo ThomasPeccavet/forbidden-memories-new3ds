@@ -1369,7 +1369,6 @@ void psx_check_interrupts_dispatch_entry(
     {
         case 0x0007B53Cu: ++g_b136_post681_7b53c; break;
         case 0x00040350u: ++g_b136_post681_40350; break;
-        case 0x000403D0u: ++g_b136_post681_403d0; break;
         case 0x00042BD8u: ++g_b136_post681_42bd8; break;
         case 0x00043A78u: ++g_b136_post681_43a78; break;
         case 0x00047F60u: ++g_b136_post681_47f60; break;
@@ -1447,6 +1446,7 @@ void psx_check_interrupts_dispatch_entry(
             break;
 
         case 0x000403D0u:
+            ++g_b136_post681_403d0;
             ++g_dialogue_create_trace.constructor_calls;
             if (cpu && cpu->gpr[5] == 2u)
             {
