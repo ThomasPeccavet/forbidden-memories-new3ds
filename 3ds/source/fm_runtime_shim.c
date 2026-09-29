@@ -45,6 +45,19 @@ static uint32_t g_b13565_e_12d60 = 0u;
 static uint32_t g_b13565_e_85d98 = 0u;
 static uint32_t g_b13565_e_85d08 = 0u;
 static uint32_t g_b13565_last_entry = 0u;
+
+/* B136.1 - generated entries after 80168160 returns 0. */
+static uint32_t g_b136_post681_7b53c = 0u;
+static uint32_t g_b136_post681_40350 = 0u;
+static uint32_t g_b136_post681_403d0 = 0u;
+static uint32_t g_b136_post681_42bd8 = 0u;
+static uint32_t g_b136_post681_43a78 = 0u;
+static uint32_t g_b136_post681_47f60 = 0u;
+static uint32_t g_b136_post681_12c88 = 0u;
+static uint32_t g_b136_post681_43cd4 = 0u;
+static uint32_t g_b136_post681_43dc8 = 0u;
+static uint32_t g_b136_post681_159f4 = 0u;
+static uint32_t g_b136_post681_2cf60 = 0u;
 static FMDialogueEntryTrace g_dialogue_entry_trace;
 static FMDialogueCreateTrace g_dialogue_create_trace;
 static FMDialogueLayerTrace g_dialogue_layer_trace;
@@ -1354,6 +1367,18 @@ void psx_check_interrupts_dispatch_entry(
 
     switch (phys)
     {
+        case 0x0007B53Cu: ++g_b136_post681_7b53c; break;
+        case 0x00040350u: ++g_b136_post681_40350; break;
+        case 0x000403D0u: ++g_b136_post681_403d0; break;
+        case 0x00042BD8u: ++g_b136_post681_42bd8; break;
+        case 0x00043A78u: ++g_b136_post681_43a78; break;
+        case 0x00047F60u: ++g_b136_post681_47f60; break;
+        case 0x00012C88u: ++g_b136_post681_12c88; break;
+        case 0x00043CD4u: ++g_b136_post681_43cd4; break;
+        case 0x00043DC8u: ++g_b136_post681_43dc8; break;
+        case 0x000159F4u: ++g_b136_post681_159f4; break;
+        case 0x0002CF60u: ++g_b136_post681_2cf60; break;
+
         case 0x00012C50u:
             ++g_b13565_e_12c50;
             break;
@@ -5384,4 +5409,21 @@ void gte_precision_store_word(
 {
     (void)addr;
     (void)reg;
+}
+
+
+void fm_runtime_b136_post681(uint32_t out[11])
+{
+    if (!out) return;
+    out[0] = g_b136_post681_7b53c;
+    out[1] = g_b136_post681_40350;
+    out[2] = g_b136_post681_403d0;
+    out[3] = g_b136_post681_42bd8;
+    out[4] = g_b136_post681_43a78;
+    out[5] = g_b136_post681_47f60;
+    out[6] = g_b136_post681_12c88;
+    out[7] = g_b136_post681_43cd4;
+    out[8] = g_b136_post681_43dc8;
+    out[9] = g_b136_post681_159f4;
+    out[10] = g_b136_post681_2cf60;
 }
