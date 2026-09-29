@@ -6097,12 +6097,64 @@ static void fm_service_vblank_callback_bridge(
  * utilisee. On s'arrete AVANT de tenter de l'executer.
  */
 /*
- * Shared LibCD backend entry points used by both the main CPU dispatcher
- * and the isolated VBlank CPU context.  The original game calls LibCD
- * from inside its VBlank service path, so every CPU context must observe
- * the same emulated controller.
+ * Shared LibCD controller backend.
+ *
+ * These are deliberately defined before the isolated VBlank executor:
+ * the real game services its resident queue from LAB_80012BD8, so LibCD
+ * calls originating there and calls from the main CPU must enter the
+ * exact same controller implementation.
  */
-static uint32_t fm_bcd_to_u32(uint8_t value);
+static uint32_t fm_bcd_to_u32(uint8_t value)
+{
+    return
+        ((value >> 4) * 10u)
+        +
+        (value & 0x0Fu);
+}
+
+static void fm_b33_fill_cd_result(CPUState *cpu, uint32_t command)
+{
+    if (!cpu)
+    {
+        return;
+    }
+
+    for (unsigned i = 0; i < 16u; ++i)
+    {
+        cpu->write_byte(g_b33_result_scratch + i, 0u);
+    }
+
+    /* Status "OK/ready" utilise par nos autres HLE LibCD. */
+    cpu->write_byte(g_b33_result_scratch + 0u, 0x02u);
+
+    /*
+     * CdlGetlocL (0x10) : FUN_800142AC convertit les 3 premiers
+     * octets BCD en LBA. Fournir la position host courante permet
+     * au vrai callback de conserver un etat coherent.
+     */
+    if (command == 0x10u)
+    {
+        uint32_t abs_sector = g_cd_lba + 150u;
+        uint32_t minute = abs_sector / (60u * 75u);
+        uint32_t rem = abs_sector % (60u * 75u);
+        uint32_t second = rem / 75u;
+        uint32_t frame_cd = rem % 75u;
+
+        cpu->write_byte(
+            g_b33_result_scratch + 0u,
+            (uint8_t)(((minute / 10u) << 4) | (minute % 10u))
+        );
+        cpu->write_byte(
+            g_b33_result_scratch + 1u,
+            (uint8_t)(((second / 10u) << 4) | (second % 10u))
+        );
+        cpu->write_byte(
+            g_b33_result_scratch + 2u,
+            (uint8_t)(((frame_cd / 10u) << 4) | (frame_cd % 10u))
+        );
+    }
+}
+
 static int fm_b33_schedule_cd_callback(
     CPUState *cpu,
     uint32_t command,
@@ -6110,7 +6162,106 @@ static int fm_b33_schedule_cd_callback(
     uint32_t resume_pc,
     uint32_t params,
     uint32_t context
-);
+)
+{
+    if (!cpu)
+    {
+        return 0;
+    }
+
+    g_b33_cb_cmd = command & 0xFFu;
+    g_b33_cb_addr = callback;
+    g_b33_cb_resume = resume_pc;
+    g_b33_last_params = params;
+    g_b33_last_ctx = context;
+
+    fm_b33_fill_cd_result(cpu, command);
+
+    /*
+     * B66 - reproduire la partie INTERNE de LibCD que notre HLE B33
+     * court-circuitait.
+     *
+     * FUN_80079728 fait ceci lors d'un interrupt type 2 :
+     *   DAT_80094BEC = 2;
+     *   copie des 8 octets de resultat vers DAT_800F7130.
+     *
+     * Le callback utilisateur est appele seulement APRES cet update.
+     */
+    g_b66_last_cmd = command & 0xFFu;
+    g_b66_last_sync_before =
+        cpu->read_byte(0x80094BECu);
+
+    cpu->write_byte(
+        0x80094BECu,
+        2u
+    );
+
+    cpu->write_byte(
+        0x8009492Du,
+        (uint8_t)(command & 0xFFu)
+    );
+
+    for (unsigned i = 0; i < 8u; ++i)
+    {
+        cpu->write_byte(
+            0x800F7130u + i,
+            cpu->read_byte(
+                g_b33_result_scratch + i
+            )
+        );
+    }
+
+    g_b66_last_sync_after =
+        cpu->read_byte(0x80094BECu);
+
+    ++g_b66_complete_publish;
+
+    /* Pas de callback : la commande est simplement acceptee. */
+    if (
+        callback < 0x80010000u
+        || callback >= 0x801E0000u
+    )
+    {
+        ++g_b33_cb_skipped;
+        cpu->gpr[2] = 1u;
+        cpu->pc = resume_pc;
+        cpu->gpr[31] = resume_pc;
+        cpu->gpr[0] = 0u;
+        return 1;
+    }
+
+    /* Une seule profondeur suffit pour le chemin succes (event 2). */
+    if (g_b33_cb_active)
+    {
+        ++g_b33_cb_skipped;
+        cpu->gpr[2] = 1u;
+        cpu->pc = resume_pc;
+        cpu->gpr[31] = resume_pc;
+        cpu->gpr[0] = 0u;
+        return 1;
+    }
+
+    for (unsigned i = 0; i < 32u; ++i)
+    {
+        g_b33_saved_gpr[i] = cpu->gpr[i];
+    }
+    ++g_b33_ctx_saved;
+
+    g_b33_cb_active = 1u;
+    ++g_b33_cb_started;
+
+    /*
+     * Les callbacks du moteur testent a0 == 2 pour CdlComplete
+     * et a0 == 5 pour l'erreur/retry. a1 pointe sur le resultat.
+     */
+    cpu->gpr[4] = 2u;
+    cpu->gpr[5] = g_b33_result_scratch;
+    cpu->pc = callback;
+    cpu->gpr[31] = g_b33_cb_sentinel;
+    cpu->gpr[0] = 0u;
+
+    return 1;
+}
 
 
 static int fm_execute_guest_vblank_callback(
@@ -7709,13 +7860,7 @@ static void fm_capture_guest_string(
 }
 
 
-static uint32_t fm_bcd_to_u32(uint8_t value)
-{
-    return
-        ((value >> 4) * 10u)
-        +
-        (value & 0x0Fu);
-}
+
 
 
 static void fm_cd_hle_reset(void)
@@ -9849,157 +9994,10 @@ static int load_preview(uint16_t *pixels)
  * B33 - immediate LibCD callback bridge
  * ============================================================
  */
-static void fm_b33_fill_cd_result(CPUState *cpu, uint32_t command)
-{
-    if (!cpu)
-    {
-        return;
-    }
-
-    for (unsigned i = 0; i < 16u; ++i)
-    {
-        cpu->write_byte(g_b33_result_scratch + i, 0u);
-    }
-
-    /* Status "OK/ready" utilise par nos autres HLE LibCD. */
-    cpu->write_byte(g_b33_result_scratch + 0u, 0x02u);
-
-    /*
-     * CdlGetlocL (0x10) : FUN_800142AC convertit les 3 premiers
-     * octets BCD en LBA. Fournir la position host courante permet
-     * au vrai callback de conserver un etat coherent.
-     */
-    if (command == 0x10u)
-    {
-        uint32_t abs_sector = g_cd_lba + 150u;
-        uint32_t minute = abs_sector / (60u * 75u);
-        uint32_t rem = abs_sector % (60u * 75u);
-        uint32_t second = rem / 75u;
-        uint32_t frame_cd = rem % 75u;
-
-        cpu->write_byte(
-            g_b33_result_scratch + 0u,
-            (uint8_t)(((minute / 10u) << 4) | (minute % 10u))
-        );
-        cpu->write_byte(
-            g_b33_result_scratch + 1u,
-            (uint8_t)(((second / 10u) << 4) | (second % 10u))
-        );
-        cpu->write_byte(
-            g_b33_result_scratch + 2u,
-            (uint8_t)(((frame_cd / 10u) << 4) | (frame_cd % 10u))
-        );
-    }
-}
 
 
-static int fm_b33_schedule_cd_callback(
-    CPUState *cpu,
-    uint32_t command,
-    uint32_t callback,
-    uint32_t resume_pc,
-    uint32_t params,
-    uint32_t context
-)
-{
-    if (!cpu)
-    {
-        return 0;
-    }
 
-    g_b33_cb_cmd = command & 0xFFu;
-    g_b33_cb_addr = callback;
-    g_b33_cb_resume = resume_pc;
-    g_b33_last_params = params;
-    g_b33_last_ctx = context;
 
-    fm_b33_fill_cd_result(cpu, command);
-
-    /*
-     * B66 - reproduire la partie INTERNE de LibCD que notre HLE B33
-     * court-circuitait.
-     *
-     * FUN_80079728 fait ceci lors d'un interrupt type 2 :
-     *   DAT_80094BEC = 2;
-     *   copie des 8 octets de resultat vers DAT_800F7130.
-     *
-     * Le callback utilisateur est appele seulement APRES cet update.
-     */
-    g_b66_last_cmd = command & 0xFFu;
-    g_b66_last_sync_before =
-        cpu->read_byte(0x80094BECu);
-
-    cpu->write_byte(
-        0x80094BECu,
-        2u
-    );
-
-    cpu->write_byte(
-        0x8009492Du,
-        (uint8_t)(command & 0xFFu)
-    );
-
-    for (unsigned i = 0; i < 8u; ++i)
-    {
-        cpu->write_byte(
-            0x800F7130u + i,
-            cpu->read_byte(
-                g_b33_result_scratch + i
-            )
-        );
-    }
-
-    g_b66_last_sync_after =
-        cpu->read_byte(0x80094BECu);
-
-    ++g_b66_complete_publish;
-
-    /* Pas de callback : la commande est simplement acceptee. */
-    if (
-        callback < 0x80010000u
-        || callback >= 0x801E0000u
-    )
-    {
-        ++g_b33_cb_skipped;
-        cpu->gpr[2] = 1u;
-        cpu->pc = resume_pc;
-        cpu->gpr[31] = resume_pc;
-        cpu->gpr[0] = 0u;
-        return 1;
-    }
-
-    /* Une seule profondeur suffit pour le chemin succes (event 2). */
-    if (g_b33_cb_active)
-    {
-        ++g_b33_cb_skipped;
-        cpu->gpr[2] = 1u;
-        cpu->pc = resume_pc;
-        cpu->gpr[31] = resume_pc;
-        cpu->gpr[0] = 0u;
-        return 1;
-    }
-
-    for (unsigned i = 0; i < 32u; ++i)
-    {
-        g_b33_saved_gpr[i] = cpu->gpr[i];
-    }
-    ++g_b33_ctx_saved;
-
-    g_b33_cb_active = 1u;
-    ++g_b33_cb_started;
-
-    /*
-     * Les callbacks du moteur testent a0 == 2 pour CdlComplete
-     * et a0 == 5 pour l'erreur/retry. a1 pointe sur le resultat.
-     */
-    cpu->gpr[4] = 2u;
-    cpu->gpr[5] = g_b33_result_scratch;
-    cpu->pc = callback;
-    cpu->gpr[31] = g_b33_cb_sentinel;
-    cpu->gpr[0] = 0u;
-
-    return 1;
-}
 
 
 /*
