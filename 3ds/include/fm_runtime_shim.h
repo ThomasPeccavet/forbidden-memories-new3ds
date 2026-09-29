@@ -363,3 +363,7 @@ uint32_t fm_bios_hook_addr(void);
 
 /* B136.1: generated-entry counters for the sequence after 80168160. */
 void fm_runtime_b136_post681(uint32_t out[11]);
+
+
+/* B136.5: BIOS event diagnostics for CD readiness gate. */
+void fm_runtime_b136_bios_event_diag(uint32_t out[12]);
