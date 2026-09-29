@@ -1030,6 +1030,13 @@ static uint32_t g_46750_loop_mark = 0u;
 static uint32_t g_46750_q_type[3] = {0u,0u,0u};
 static uint32_t g_46750_q_mark[3] = {0u,0u,0u};
 
+/* B136.02 - allow the real VBlank service to preempt 46750's wait loop. */
+static uint32_t g_46750_vb_preempt_attempts = 0u;
+static uint32_t g_46750_vb_preempt_ok = 0u;
+static uint32_t g_46750_vb_q_before = 0u;
+static uint32_t g_46750_vb_q_after = 0u;
+static uint32_t g_46750_vb_last_frame = 0u;
+
 
 static uint32_t g_b32_43e_returned = 0;
 static uint32_t g_b32_43e_return_frame = 0;
@@ -13227,6 +13234,40 @@ int main(void)
                     & 0x1FFFFFFFu;
 
                 /*
+                 * B136.02 - PS1 IRQ preemption inside FUN_80046750.
+                 *
+                 * 47C18 intentionally queues a 0x20 command with mark 0x10.
+                 * 46750 waits for the resident VBlank service to consume it.
+                 * On hardware the VBlank IRQ can interrupt this tight loop.
+                 * Our translated block otherwise monopolizes the guest CPU,
+                 * so explicitly run the already-validated isolated VBlank
+                 * callback when we observe that exact wait state.
+                 */
+                if (phys == 0x00046810u)
+                {
+                    uint32_t qctx = fm_memory_read_word(0x8009C7E0u);
+                    if (qctx >= 0x80000000u && qctx < 0x80200000u)
+                    {
+                        uint32_t qn = fm_memory_read_half(qctx + 0x4Cu);
+                        uint32_t qt = qn ? fm_memory_read_byte(qctx + 0x80u) : 0u;
+                        uint32_t qm = qn ? fm_memory_read_word(qctx + 0x90u) : 0u;
+
+                        if (qn != 0u && qt == 0x20u && qm == 0x10u)
+                        {
+                            ++g_46750_vb_preempt_attempts;
+                            g_46750_vb_q_before = qn;
+                            g_46750_vb_last_frame = frame;
+
+                            if (fm_execute_guest_vblank_callback(cpu, frame))
+                                ++g_46750_vb_preempt_ok;
+
+                            g_46750_vb_q_after =
+                                fm_memory_read_half(qctx + 0x4Cu);
+                        }
+                    }
+                }
+
+                /*
                  * B130: diagnostic handoff timer is disabled in release.
                  */
 #if !defined(NDEBUG)
@@ -20071,7 +20112,8 @@ int main(void)
                             "cdinit c218/c2b8/c720/a878/d224=%lu/%lu/%lu/%lu/%lu changes=%lu %lu->%lu pc=%08lX ra=%08lX\n"
                             "ws46750 hits=%lu pc46810=%lu ra=%08lX q=%lu type=%02lX mark=%08lX\n"
                             "ws495c8 hits=%lu a0=%08lX ra=%08lX 47660=%lu a0/a1/a2=%08lX/%08lX/%08lX\n"
-                            "wsloop samples=%lu idx=%lu q=%lu type=%02lX mark=%08lX q0=%02lX/%08lX q1=%02lX/%08lX q2=%02lX/%08lX\n",
+                            "wsloop samples=%lu idx=%lu q=%lu type=%02lX mark=%08lX q0=%02lX/%08lX q1=%02lX/%08lX q2=%02lX/%08lX\n"
+                            "wsvb attempts/ok=%lu/%lu qbefore/after=%lu/%lu frame=%lu\n",
                             (unsigned long)frame,
                             (unsigned long)(cpu ? cpu->pc : 0u),
                             (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -20184,7 +20226,12 @@ int main(void)
                             (unsigned long)g_46750_q_type[1],
                             (unsigned long)g_46750_q_mark[1],
                             (unsigned long)g_46750_q_type[2],
-                            (unsigned long)g_46750_q_mark[2]);
+                            (unsigned long)g_46750_q_mark[2],
+                            (unsigned long)g_46750_vb_preempt_attempts,
+                            (unsigned long)g_46750_vb_preempt_ok,
+                            (unsigned long)g_46750_vb_q_before,
+                            (unsigned long)g_46750_vb_q_after,
+                            (unsigned long)g_46750_vb_last_frame);
                         fclose(c4f);
                     }
                 }
