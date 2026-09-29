@@ -17219,6 +17219,41 @@ int main(void)
             printf("BUILD B135.87-BLACK-CLEAN (SAFE B135.71)\n");
 #endif
 
+            if (g_q20_diag_hits != 0u)
+            {
+                FILE *q20f = fopen("sdmc:/3ds/fm-new3ds/q20-diag.txt", "wb");
+                if (q20f)
+                {
+                    fprintf(q20f,
+                        "hits=%lu ctx=%08lX count=%lu pc=%08lX\n"
+                        "w0=%08lX w1=%08lX w2=%08lX w3=%08lX\n"
+                        "w4=%08lX w5=%08lX w6=%08lX w7=%08lX\n"
+                        "w8=%08lX w9=%08lX w10=%08lX w11=%08lX\n"
+                        "svc474e0=%lu svc463f8=%lu svc459d0=%lu svc45908=%lu\n",
+                        (unsigned long)g_q20_diag_hits,
+                        (unsigned long)g_q20_diag_ctx,
+                        (unsigned long)g_q20_diag_count,
+                        (unsigned long)g_q20_diag_pc,
+                        (unsigned long)g_q20_diag_words[0],
+                        (unsigned long)g_q20_diag_words[1],
+                        (unsigned long)g_q20_diag_words[2],
+                        (unsigned long)g_q20_diag_words[3],
+                        (unsigned long)g_q20_diag_words[4],
+                        (unsigned long)g_q20_diag_words[5],
+                        (unsigned long)g_q20_diag_words[6],
+                        (unsigned long)g_q20_diag_words[7],
+                        (unsigned long)g_q20_diag_words[8],
+                        (unsigned long)g_q20_diag_words[9],
+                        (unsigned long)g_q20_diag_words[10],
+                        (unsigned long)g_q20_diag_words[11],
+                        (unsigned long)g_q20_hit_474e0,
+                        (unsigned long)g_q20_hit_463f8,
+                        (unsigned long)g_q20_hit_459d0,
+                        (unsigned long)g_q20_hit_45908);
+                    fclose(q20f);
+                }
+            }
+
             printf(
                 "Q20 hit:%lu ctx:%08lX n:%lu pc:%08lX\n"
                 "Q20 %08lX %08lX %08lX %08lX\n"
