@@ -1,150 +1,209 @@
 # État courant — New Nintendo 3DS
 
-Dernière mise à jour : **21 septembre 2026**.
+Dernière mise à jour : **29 septembre 2026**.
 
 ## Résumé
 
-Le backend New 3DS/Azahar a dépassé le jalon du menu principal. Le jeu affiche
-désormais le menu français, accepte la navigation et la validation, lance une
-nouvelle partie, permet de saisir puis valider le nom du joueur et progresse
-jusqu'à la première cinématique / aux premiers dialogues.
+Le projet a déjà atteint menu, nouvelle partie, saisie du nom, dialogues, carte
+et duel dans différentes itérations B135. Le travail courant vise maintenant à
+reconstruire un chemin startup plus fidèle, avec moins de bypass et davantage de
+modèles matériels réels.
 
-Le verrou actif est maintenant :
-
-> **la performance : le chemin fonctionnel actuel tourne à seulement quelques FPS
-> dans les tests récents.**
-
-La première cinématique atteinte présente également encore un rendu incorrect,
-mais ce défaut vient après le problème de cadence : avant de continuer à patcher
-les transitions, il faut comprendre où le temps d'exécution est réellement perdu.
-
-## Révision de référence
+Le verrou actif est désormais identifié comme une chaîne précise :
 
 ~~~text
-912036e9355873d652790a97e160819f031724d9
-UP TO FIRST CINEMATIC AND CHAT
+second FUN_80043CD4
+  -> FUN_80014478
+  -> FUN_800777D8(0)
+  -> TestEvent(F1000000)
+  -> événement BIOS F0000009 / 0x20
+  -> synchronisation SPU
+  -> DMA4
+  -> relance ReadN
 ~~~
 
-Cette révision inclut le chemin fonctionnel jusqu'à la première cinématique ainsi
-que plusieurs étapes de profiling/optimisation B100+.
+Le correctif SPU minimal vient d'être intégré et doit encore être testé.
 
-## Chemin actuellement validé
+## Branche active
 
-- PS-X EXE chargé à 0x80010000 ;
-- entrée guest 0x800128CC ;
-- code résident ARM11 + fallback R3000A ;
-- BIOS, VBlank, pad et IRQ suffisants pour progresser ;
-- lectures CD réelles et file async suffisantes pour le chemin observé ;
-- GTE/helpers nécessaires au chemin courant ;
-- DMA2 / GPU waits bridgés pour les cas observés ;
-- GP0/GP1 et rasteriseur logiciel actifs ;
-- logo Konami et écran titre affichés ;
-- SU.mrg chargé et exécuté ;
-- menu principal affiché ;
-- navigation et validation fonctionnelles ;
-- « Nlle partie » atteinte ;
-- saisie du nom affichée ;
-- écriture et validation du nom fonctionnelles ;
-- première cinématique / premiers dialogues atteints.
+~~~text
+diag/b135.90-main-menu-items
+~~~
 
-## Ce qui a changé depuis B75
+## Startup validé
 
-B75 avait prouvé que le menu SU existait mais restait invisible. Depuis :
+Le chemin Europe/PAL est restauré :
 
-- le chemin de rendu a été corrigé suffisamment pour afficher le menu ;
-- la navigation du menu est utilisable ;
-- la transition nouvelle partie fonctionne ;
-- l'écran de nom est fonctionnel ;
-- le nom peut être écrit puis validé ;
-- le jeu poursuit son exécution après validation ;
-- le chemin atteint désormais la première cinématique / les premiers dialogues.
+~~~text
+bios_region_bfc7ff52=45
+ov68160_enter=1
+ov68160_return=1
+ov68160_v0=00000000
+~~~
 
-Le problème de menu invisible ne doit donc plus être réinvestigué comme priorité.
+Le startup poursuit ensuite jusqu'au second `FUN_80043CD4`.
 
-## Performance — problème principal
+## Point de blocage
 
-Des pistes ont déjà été intégrées :
+Trace typique :
 
-### B105 — présentation
+~~~text
+post681_43cd4=2
+post681_43dc8=0
+post681_159f4=0
 
-- mesure du temps guest/rendu/VBlank/boucle ;
-- LUT RGB555 → BGR888 ;
-- suppression du memset complet à chaque frame.
+c460=01C00016
+c484=00000000
+~~~
 
-### B106 — présentation 3DS
+La requête active est :
 
-- flush/swap uniquement du framebuffer supérieur ;
-- séparation du coût avant présentation, présentation et attente VBlank.
+~~~text
+remaining = 0x2000
+buffer    = 0x801E1639
+LBA       = 0x3172D
+callback  = 0x80014A4C
+cmd       = 0x06 (ReadN)
+~~~
 
-### B107 — profil release
+## Pipeline CD : ce qui est prouvé
 
-- -O3 ;
-- NDEBUG ;
-- PSX_NO_DEBUG_TOOLS ;
-- -fomit-frame-pointer ;
-- reconstruction des shards PSXRecomp en release.
+La chaîne précédente fonctionne :
 
-### B108 / B110 — timing et hotspots
+~~~text
+b34_start=62
+b34_done=62
+b32_calls=62
+b32_ok=62
+b32_fail=0
+~~~
 
-- instrumentation du VSync guest ;
-- statistiques de boucle ;
-- mesure de plages guest ;
-- classement des plages les plus coûteuses.
+Le watcher a prouvé que la nouvelle requête est correctement créée par le chemin
+autour de `800142F8`.
 
-Malgré ces optimisations, le ralentissement reste visible. Cela indique que la
-cause principale est probablement ailleurs que dans la simple conversion du
-framebuffer.
+Il ne faut donc pas corriger ce problème en forçant le compteur remaining ou
+`C460`.
 
-## Hypothèses à départager
+## Gate BIOS
 
-1. trop de temps passé dans le fallback R3000A ;
-2. une fonction guest / un callback exécuté anormalement souvent ;
-3. un wait PS1 bypassé de manière à créer une boucle active ;
-4. trop de travail GPU logiciel par frame ;
-5. coût important de copie/composition VRAM ;
-6. mauvais modèle VBlank/VSync provoquant plusieurs frames logiques par frame hôte ;
-7. bridge CD/DMA/GPU au timing incorrect ;
-8. instrumentation encore trop présente sur le chemin chaud.
+Le code atteint :
 
-## Prochaine instrumentation
+~~~text
+FUN_800777D8(0)
+  -> FUN_80073DC8(F1000000)
+~~~
 
-Mesurer au minimum :
+`80073DC8` correspond à `TestEvent`.
 
-- durée totale d'une frame hôte ;
-- durée passée dans le dispatcher ;
-- nombre d'instructions interprétées ;
-- nombre et durée des fallbacks R3000A ;
-- top 5 des plages PC guest par temps cumulé ;
-- temps du VBlank callback ;
-- temps du rendu logiciel ;
-- temps de copie/present ;
-- temps réellement passé à attendre VBlank ;
-- nombre de commandes GP0 / primitives par frame.
+Événement :
 
-Critère de succès :
+~~~text
+used    = 1
+enabled = 1
+ready   = 0
+class   = F0000009
+spec    = 00000020
+mode    = 00002000
+~~~
 
-> pouvoir attribuer au moins 80 % du temps d'une frame à un ou deux composants
-> précis avant toute nouvelle optimisation.
+Le consommateur est donc valide. Le problème se situe dans le producteur.
 
-## Cinématique
+## SPU / DMA4
 
-La première cinématique est atteinte, mais son rendu n'est pas encore correct.
-Les travaux récents indiquent notamment des besoins autour du draw offset / draw
-area PS1, de la page framebuffer, du mode d'affichage, de RGB24/MDEC et de la
-composition de surfaces.
+La routine de transfert est bien appelée :
 
-Cette partie doit être reprise juste après le diagnostic FPS afin d'éviter de
-confondre défaut de rendu et défaut de timing.
+~~~text
+FUN_80075AFC(3, 801DC000, 0x200)
+hits = 63
+~~~
+
+Pointeurs confirmés :
+
+~~~text
+MADR = 1F8010C0
+BCR  = 1F8010C4
+CHCR = 1F8010C8
+~~~
+
+Mais avant de programmer DMA4, Psy-Q attend l'état SPU :
+
+~~~text
+spu_base=1F801C00
+spu_mode=0
+spu_reg_1a6=0000
+spu_reg_1aa=0000
+spu_reg_1ae=0000
+~~~
+
+Pour le mode 0, la condition attendue est :
+
+~~~text
+(SPU + 0x1AA) & 0x30 == 0x20
+~~~
+
+Comme le runtime ne modélisait pas le SPU, cette condition n'était jamais vraie.
+
+## Correctifs intégrés mais pas encore validés
+
+### DMA4 minimal
+
+Ajout de :
+- MADR/BCR/CHCR canal 4 ;
+- START et completion synchrone de bring-up ;
+- flag DICR canal 4 ;
+- compteur de completion ;
+- bridge vers l'événement BIOS exact.
+
+### SPU minimal
+
+Ajout des registres utilisés par Psy-Q :
+
+~~~text
+1F801DA6 transfer address
+1F801DA8 transfer data
+1F801DAA control
+1F801DAE status
+~~~
+
+Le modèle reflète les bits de mode de transfert nécessaires aux wait loops.
+Il ne produit pas encore d'audio.
+
+## Prochain critère de succès
+
+Après build PROFILE :
+
+~~~text
+dma4_madr_writes > 0
+dma4_bcr_writes  > 0
+dma4_chcr_writes > 0
+dma4_transfers    > 0
+dma4_event_bridge > 0
+~~~
+
+Ensuite :
+- `req10` doit descendre sous `0x2000` ou atteindre zéro ;
+- `C460` doit progresser ;
+- `post681_43dc8` et `post681_159f4` doivent devenir non nuls.
+
+## Performance
+
+Les problèmes de performance observés dans les branches fonctionnelles restent
+réels, mais **ils ne sont pas le verrou immédiat de cette branche startup**.
+
+Le profiling B105-B135 reste utile une fois la chaîne de démarrage propre
+rétablie.
 
 ## Ce qui reste non validé
 
-- cadence fluide/acceptable ;
-- cinématique fidèle ;
-- progression stable jusqu'au premier duel sur 3DS ;
-- émulation CD/IRQ/DMA générale sans bridges de bring-up ;
-- GTE complet ;
-- audio SPU/XA ;
-- memory card / sauvegarde ;
-- performance et stabilité sur New 3DS physique.
+- correction SPU minimale ;
+- passage du DMA4 ;
+- livraison de l'événement BIOS ;
+- progression du ReadN à 0x3172D ;
+- sortie du second 80043CD4 ;
+- reprise complète du startup ;
+- audio SPU réel ;
+- XA ;
+- sauvegarde ;
+- fidélité générale sans bridges.
 
-Le runtime PC reste la référence fonctionnelle.
+Voir [B136_STARTUP_CD_SPU_DMA4.md](B136_STARTUP_CD_SPU_DMA4.md).
