@@ -6096,6 +6096,23 @@ static void fm_service_vblank_callback_bridge(
  * Sentinel RA : une adresse residentielle volontairement non
  * utilisee. On s'arrete AVANT de tenter de l'executer.
  */
+/*
+ * Shared LibCD backend entry points used by both the main CPU dispatcher
+ * and the isolated VBlank CPU context.  The original game calls LibCD
+ * from inside its VBlank service path, so every CPU context must observe
+ * the same emulated controller.
+ */
+static uint32_t fm_bcd_to_u32(uint8_t value);
+static int fm_b33_schedule_cd_callback(
+    CPUState *cpu,
+    uint32_t command,
+    uint32_t callback,
+    uint32_t resume_pc,
+    uint32_t params,
+    uint32_t context
+);
+
+
 static int fm_execute_guest_vblank_callback(
     CPUState *cpu,
     uint32_t frame
@@ -6180,6 +6197,108 @@ static int fm_execute_guest_vblank_callback(
         }
 
         uint32_t phys = irq_cpu.pc & 0x1FFFFFFFu;
+
+        /*
+         * The resident queue service (800474E0 -> 800463F8 ->
+         * 800459D0) runs from LAB_80012BD8, i.e. from this isolated
+         * VBlank CPU.  Previously only the main dispatcher knew how to
+         * hand FUN_8007BA00 to our LibCD hardware model.  Consequently a
+         * CD request started by the real VBlank service fell through into
+         * the incomplete guest hardware path and never reached its normal
+         * completion callback (LAB_80045908).
+         *
+         * This is not a queue-completion bridge: execute the exact same
+         * LibCD backend for the exact guest call, independent of which
+         * CPU context issued it.
+         */
+        if (phys == 0x000474E0u) ++g_q20_hit_474e0;
+        if (phys == 0x000463F8u) ++g_q20_hit_463f8;
+        if (phys == 0x000459D0u) ++g_q20_hit_459d0;
+        if (phys == 0x00045908u) ++g_q20_hit_45908;
+
+        if (
+            g_b33_cb_active
+            &&
+            irq_cpu.pc == g_b33_cb_sentinel
+        )
+        {
+            uint32_t resume_pc = g_b33_cb_resume;
+            uint32_t completed_cmd = g_b33_cb_cmd & 0xFFu;
+
+            g_b33_cb_active = 0u;
+            ++g_b33_cb_done;
+
+            for (unsigned i = 0; i < 32u; ++i)
+            {
+                irq_cpu.gpr[i] = g_b33_saved_gpr[i];
+            }
+            ++g_b33_ctx_restored;
+
+            irq_cpu.gpr[2] = 1u;
+            irq_cpu.pc = resume_pc;
+            irq_cpu.gpr[0] = 0u;
+
+            if (completed_cmd == 0x06u)
+            {
+                g_b34_ready_pending = 1u;
+                g_b34_ready_arm_frame = frame + 1u;
+            }
+
+            continue;
+        }
+
+        if (phys == 0x0007BA00u)
+        {
+            uint32_t mode = irq_cpu.gpr[4] & 0xFFu;
+            uint32_t params = irq_cpu.gpr[5];
+            uint32_t command = irq_cpu.gpr[6] & 0xFFu;
+            uint32_t callback = irq_cpu.gpr[7];
+            uint32_t resume_pc = irq_cpu.gpr[31];
+            uint32_t context = irq_cpu.read_word(irq_cpu.gpr[29] + 16u);
+
+            ++g_b33_raw_calls;
+            g_b34_last_mode = mode;
+            g_b34_last_command = command;
+            g_cd_last_cmd = command;
+
+            if (command == 0x02u && params != 0u)
+            {
+                uint32_t minute = fm_bcd_to_u32(irq_cpu.read_byte(params + 0u));
+                uint32_t second = fm_bcd_to_u32(irq_cpu.read_byte(params + 1u));
+                uint32_t frame_cd = fm_bcd_to_u32(irq_cpu.read_byte(params + 2u));
+                uint32_t absolute_sector =
+                    ((minute * 60u + second) * 75u) + frame_cd;
+
+                g_cd_lba =
+                    absolute_sector >= 150u
+                        ? absolute_sector - 150u
+                        : 0u;
+
+                g_cd_pos = 2048u;
+            }
+
+            if (command == 0x06u)
+            {
+                g_cd_reading = 1;
+                g_cd_pos = 2048u;
+                g_cd_error = 0;
+            }
+            else if (command == 0x09u)
+            {
+                g_cd_reading = 0;
+            }
+
+            fm_b33_schedule_cd_callback(
+                &irq_cpu,
+                command,
+                callback,
+                resume_pc,
+                params,
+                context
+            );
+
+            continue;
+        }
 
         if (phys == 0x0003CE34u)
         {
