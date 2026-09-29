@@ -6866,6 +6866,24 @@ static int fm_execute_guest_vblank_callback(
 
         uint32_t phys = irq_cpu.pc & 0x1FFFFFFFu;
 
+        if (phys == 0x00047910u || phys == 0x00047A58u)
+        {
+            uint32_t qctx = fm_memory_read_word(0x8009C7E0u);
+            if (phys == 0x00047910u) ++g_47910_hits;
+            if (phys == 0x00047A58u) ++g_47a58_hits;
+            g_47910_ctx = qctx;
+
+            if (qctx >= 0x80000000u && qctx < 0x80200000u)
+            {
+                g_47910_count0 = fm_memory_read_half(qctx + 0u);
+                g_47910_ptr43c = fm_memory_read_word(qctx + 0x43Cu);
+                g_47910_w0 = fm_memory_read_word(qctx + 0u);
+                g_47910_w1 = fm_memory_read_word(qctx + 4u);
+                g_47910_w2 = fm_memory_read_word(qctx + 8u);
+                g_47910_w3 = fm_memory_read_word(qctx + 12u);
+            }
+        }
+
         prev_non_sentinel_pc = irq_cpu.pc;
         prev_non_sentinel_phys = phys;
         prev_non_sentinel_ra = irq_cpu.gpr[31];
