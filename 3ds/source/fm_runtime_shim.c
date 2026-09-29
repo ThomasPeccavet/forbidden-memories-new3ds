@@ -480,6 +480,9 @@ static uint32_t g_b136_bios_deliver_spec = 0u;
 static uint32_t g_b136_bios_test_hits = 0u;
 static uint32_t g_b136_bios_test_handle = 0u;
 
+static uint32_t g_b136_dma4_event_bridge = 0u;
+static uint32_t g_b136_dma4_event_miss = 0u;
+
 
 static int fm_bios_event_index(
     uint32_t handle
@@ -2680,6 +2683,34 @@ int fm_bios_try_hle(
                     fm_bios_event_index(
                         cpu->gpr[4]
                     );
+
+                /*
+                 * B136.6 - DMA4/SPU completion -> Psy-Q event readiness.
+                 *
+                 * The game opens F0000009/0x20 in mode 0x2000 and polls it
+                 * through TestEvent.  On hardware this is delivered by the
+                 * SPU DMA completion callback chain.  Our SPU audio path is
+                 * not implemented yet, but fm_memory now models DMA4 START
+                 * and completion.  Consume that completion only for the
+                 * exact event the game registered.
+                 */
+                if (
+                    index >= 0
+                    &&
+                    g_bios_events[index].used
+                    &&
+                    g_bios_events[index].enabled
+                    &&
+                    g_bios_events[index].class_id == 0xF0000009u
+                    &&
+                    g_bios_events[index].spec == 0x00000020u
+                    &&
+                    fm_memory_dma4_take_completion() != 0u
+                )
+                {
+                    g_bios_events[index].ready = 1u;
+                    ++g_b136_dma4_event_bridge;
+                }
 
 
                 if (
@@ -5458,4 +5489,14 @@ void fm_runtime_b136_bios_event_diag(uint32_t out[12])
     out[9] = g_bios_events[0].spec;
     out[10] = g_bios_events[0].mode;
     out[11] = g_bios_events[0].func;
+}
+
+
+void fm_runtime_b136_dma4_diag(uint32_t out[4])
+{
+    if (!out) return;
+    out[0] = g_b136_dma4_event_bridge;
+    out[1] = g_b136_dma4_event_miss;
+    out[2] = fm_memory_dma4_transfer_count();
+    out[3] = g_bios_events[0].ready;
 }
