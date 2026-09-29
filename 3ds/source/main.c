@@ -17229,7 +17229,9 @@ int main(void)
                         "w0=%08lX w1=%08lX w2=%08lX w3=%08lX\n"
                         "w4=%08lX w5=%08lX w6=%08lX w7=%08lX\n"
                         "w8=%08lX w9=%08lX w10=%08lX w11=%08lX\n"
-                        "svc474e0=%lu svc463f8=%lu svc459d0=%lu svc45908=%lu\n",
+                        "svc474e0=%lu svc463f8=%lu svc459d0=%lu svc45908=%lu\n"
+                        "curType=%02X curPhase=%02X flags40=%04X cd460=%08lX cd47c=%08lX cd464=%02X\n"
+                        "cb488=%08lX cb49c=%08lX\n",
                         (unsigned long)g_q20_diag_hits,
                         (unsigned long)g_q20_diag_ctx,
                         (unsigned long)g_q20_diag_count,
@@ -17249,7 +17251,25 @@ int main(void)
                         (unsigned long)g_q20_hit_474e0,
                         (unsigned long)g_q20_hit_463f8,
                         (unsigned long)g_q20_hit_459d0,
-                        (unsigned long)g_q20_hit_45908);
+                        (unsigned long)g_q20_hit_45908,
+                        (unsigned)fm_memory_read_byte(g_q20_diag_ctx + 0x7Cu),
+                        (unsigned)fm_memory_read_byte(g_q20_diag_ctx + 0x7Du),
+                        (unsigned)fm_memory_read_half(g_q20_diag_ctx + 0x40u),
+                        (unsigned long)fm_memory_read_word(0x8009C460u),
+                        (unsigned long)fm_memory_read_word(0x8009C47Cu),
+                        (unsigned)fm_memory_read_byte(0x8009C464u),
+                        (unsigned long)fm_memory_read_word(0x8009C488u),
+                        (unsigned long)fm_memory_read_word(0x8009C49Cu));
+
+                    fprintf(q20f, "cb46b28:");
+                    for (unsigned di = 0u; di < 44u; ++di)
+                        fprintf(q20f, " %08lX",
+                            (unsigned long)fm_memory_read_word(0x80046B28u + di * 4u));
+                    fprintf(q20f, "\ncb46b84:");
+                    for (unsigned di = 0u; di < 21u; ++di)
+                        fprintf(q20f, " %08lX",
+                            (unsigned long)fm_memory_read_word(0x80046B84u + di * 4u));
+                    fprintf(q20f, "\n");
                     fclose(q20f);
                 }
             }
