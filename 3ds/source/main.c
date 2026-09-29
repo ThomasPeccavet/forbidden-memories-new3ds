@@ -20330,6 +20330,8 @@ int main(void)
                 }
             }
 
+            fm_memory_watch_dump("sdmc:/3ds/fm-new3ds/memory-watch.txt");
+
             /*
              * Temporary compact native-queue diagnostic.
              * Read-only: keep the lower screen stable so the runner can
