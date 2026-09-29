@@ -947,6 +947,24 @@ static uint32_t g_45908_last_ra = 0u;
 static uint32_t g_45908_last_cb_busy = 0u;
 static uint32_t g_45908_last_cb_ptr = 0u;
 
+/* B135.92 - trace the real producers/consumers of DAT_8009C4B8. */
+static uint32_t g_4b8_hit_1522c = 0u;
+static uint32_t g_4b8_hit_15400 = 0u;
+static uint32_t g_4b8_hit_1569c = 0u;
+static uint32_t g_4b8_hit_15c18 = 0u;
+static uint32_t g_4b8_hit_15c28 = 0u;
+static uint32_t g_4b8_hit_12d60 = 0u;
+static uint32_t g_4b8_ra_15c18 = 0u;
+static uint32_t g_4b8_ra_15c28 = 0u;
+static uint32_t g_4b8_last_1522c_ra = 0u;
+static uint32_t g_4b8_last_1522c_before = 0u;
+static uint32_t g_4b8_last_eb24e = 0u;
+static uint32_t g_4b8_last_eb24c = 0u;
+static uint32_t g_4b8_observed = 0xFFFFFFFFu;
+static uint32_t g_4b8_changes = 0u;
+static uint32_t g_4b8_last_change_pc = 0u;
+static uint32_t g_4b8_last_change_ra = 0u;
+
 /* Read-only lifecycle trace for FUN_80047C18 and its queued 0x20/0x51 pair. */
 static uint32_t g_47c18_hits = 0u;
 static uint32_t g_47c18_last_ra = 0u;
@@ -3999,6 +4017,21 @@ static void fm_trace_dispatch(
         ++g_trace_count;
     }
 
+    {
+        uint32_t b = fm_memory_read_byte(0x8009C4B8u);
+        if (g_4b8_observed == 0xFFFFFFFFu)
+        {
+            g_4b8_observed = b;
+        }
+        else if (b != g_4b8_observed)
+        {
+            g_4b8_observed = b;
+            ++g_4b8_changes;
+            g_4b8_last_change_pc = cpu ? cpu->pc : 0u;
+            g_4b8_last_change_ra = cpu ? cpu->gpr[31] : 0u;
+        }
+    }
+
     switch (phys)
     {
         case 0x00012D60u:
@@ -5845,6 +5878,39 @@ static void fm_trace_dispatch(
 
                 break;
             }
+            break;
+
+        case 0x0001522Cu:
+            ++g_4b8_hit_1522c;
+            if (cpu)
+            {
+                g_4b8_last_1522c_ra = cpu->gpr[31];
+                g_4b8_last_1522c_before = fm_memory_read_byte(0x8009C4B8u);
+                g_4b8_last_eb24e = fm_memory_read_byte(0x800EB24Eu);
+                g_4b8_last_eb24c = fm_memory_read_byte(0x800EB24Cu);
+            }
+            break;
+
+        case 0x00015400u:
+            ++g_4b8_hit_15400;
+            break;
+
+        case 0x0001569Cu:
+            ++g_4b8_hit_1569c;
+            break;
+
+        case 0x00015C18u:
+            ++g_4b8_hit_15c18;
+            if (cpu) g_4b8_ra_15c18 = cpu->gpr[31];
+            break;
+
+        case 0x00015C28u:
+            ++g_4b8_hit_15c28;
+            if (cpu) g_4b8_ra_15c28 = cpu->gpr[31];
+            break;
+
+        case 0x00012D60u:
+            ++g_4b8_hit_12d60;
             break;
 
         case 0x000474E0u:
@@ -19437,6 +19503,22 @@ int main(void)
                        (unsigned long)g_45908_last_ra,
                        (unsigned long)g_45908_last_cb_busy,
                        (unsigned long)g_45908_last_cb_ptr);
+                printf("4B8:%02lX chg:%lu pc:%08lX ra:%08lX\n",
+                       (unsigned long)fm_memory_read_byte(0x8009C4B8u),
+                       (unsigned long)g_4b8_changes,
+                       (unsigned long)g_4b8_last_change_pc,
+                       (unsigned long)g_4b8_last_change_ra);
+                printf("4B8 fn 1522/1540/1569:%lu/%lu/%lu 15C18/28:%lu/%lu\n",
+                       (unsigned long)g_4b8_hit_1522c,
+                       (unsigned long)g_4b8_hit_15400,
+                       (unsigned long)g_4b8_hit_1569c,
+                       (unsigned long)g_4b8_hit_15c18,
+                       (unsigned long)g_4b8_hit_15c28);
+                printf("4B8 RA set/clr:%08lX/%08lX EB24E/C:%02lX/%02lX\n",
+                       (unsigned long)g_4b8_ra_15c18,
+                       (unsigned long)g_4b8_ra_15c28,
+                       (unsigned long)g_4b8_last_eb24e,
+                       (unsigned long)g_4b8_last_eb24c);
                 printf("47C18:%lu idx:%lu RA:%08lX q:%lu\n",
                        (unsigned long)g_47c18_hits,
                        (unsigned long)g_47c18_last_index,
