@@ -975,6 +975,22 @@ static uint32_t g_4b8_changes = 0u;
 static uint32_t g_4b8_last_change_pc = 0u;
 static uint32_t g_4b8_last_change_ra = 0u;
 
+/* B135.93 - CdSync / CD IRQ liveness diagnostics. */
+static uint32_t g_cdsync_hit_79c8c = 0u;
+static uint32_t g_cdsync_hit_74a2c = 0u;
+static uint32_t g_cdsync_hit_79728 = 0u;
+static uint32_t g_cdsync_last_ra_79c8c = 0u;
+static uint32_t g_cdsync_last_ra_79728 = 0u;
+static uint32_t g_cdsync_last_bec = 0u;
+static uint32_t g_cdsync_last_bed = 0u;
+static uint32_t g_cdsync_last_cmd = 0u;
+static uint32_t g_cdsync_last_loop = 0u;
+static uint32_t g_cdsync_last_deadline = 0u;
+static uint32_t g_cdsync_last_irqflag = 0u;
+static uint32_t g_cdsync_bec2_seen = 0u;
+static uint32_t g_cdsync_bec5_seen = 0u;
+static uint32_t g_cdsync_irqflag_nonzero = 0u;
+
 /* Read-only lifecycle trace for FUN_80047C18 and its queued 0x20/0x51 pair. */
 static uint32_t g_47c18_hits = 0u;
 static uint32_t g_47c18_last_ra = 0u;
@@ -5906,6 +5922,33 @@ static void fm_trace_dispatch(
 
                 break;
             }
+            break;
+
+        case 0x00079C8Cu:
+            ++g_cdsync_hit_79c8c;
+            if (cpu) g_cdsync_last_ra_79c8c = cpu->gpr[31];
+            g_cdsync_last_bec = fm_memory_read_byte(0x80094BECu);
+            g_cdsync_last_bed = fm_memory_read_byte(0x80094BEDu);
+            g_cdsync_last_cmd = fm_memory_read_byte(0x8009492Du);
+            g_cdsync_last_loop = fm_memory_read_word(0x800F714Cu);
+            g_cdsync_last_deadline = fm_memory_read_word(0x800F7148u);
+            g_cdsync_last_irqflag = fm_memory_read_half(0x80092E22u);
+            if (g_cdsync_last_bec == 2u) ++g_cdsync_bec2_seen;
+            if (g_cdsync_last_bec == 5u) ++g_cdsync_bec5_seen;
+            break;
+
+        case 0x00074A2Cu:
+            ++g_cdsync_hit_74a2c;
+            g_cdsync_last_irqflag = fm_memory_read_half(0x80092E22u);
+            if (g_cdsync_last_irqflag != 0u) ++g_cdsync_irqflag_nonzero;
+            break;
+
+        case 0x00079728u:
+            ++g_cdsync_hit_79728;
+            if (cpu) g_cdsync_last_ra_79728 = cpu->gpr[31];
+            g_cdsync_last_bec = fm_memory_read_byte(0x80094BECu);
+            g_cdsync_last_bed = fm_memory_read_byte(0x80094BEDu);
+            g_cdsync_last_cmd = fm_memory_read_byte(0x8009492Du);
             break;
 
         case 0x0001522Cu:
@@ -19594,7 +19637,10 @@ int main(void)
                             "ra15c18=%08lX ra15c28=%08lX ra1522=%08lX before1522=%02lX eb24e=%02lX eb24c=%02lX\n"
                             "svc474=%lu svc463=%lu svc459d=%lu svc45918=%lu svc45908=%lu\n"
                             "459d_cmd20=%lu other=%lu st0=%lu st1=%lu stx=%lu busy=%lu free=%lu\n"
-                            "lastframes474=%lu 463=%lu 459d=%lu 45908=%lu\n",
+                            "lastframes474=%lu 463=%lu 459d=%lu 45908=%lu\n"
+                            "cdsync79c8c=%lu cdstate74a2c=%lu cdirq79728=%lu\n"
+                            "bec=%02lX bed=%02lX cmd=%02lX irqflag=%04lX irq_nonzero=%lu\n"
+                            "loop=%lu deadline=%lu bec2=%lu bec5=%lu ra79c8c=%08lX ra79728=%08lX\n",
                             (unsigned long)frame,
                             (unsigned long)(cpu ? cpu->pc : 0u),
                             (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -19629,7 +19675,21 @@ int main(void)
                             (unsigned long)g_q20_last_frame_474e0,
                             (unsigned long)g_q20_last_frame_463f8,
                             (unsigned long)g_q20_last_frame_459d0,
-                            (unsigned long)g_q20_last_frame_45908);
+                            (unsigned long)g_q20_last_frame_45908,
+                            (unsigned long)g_cdsync_hit_79c8c,
+                            (unsigned long)g_cdsync_hit_74a2c,
+                            (unsigned long)g_cdsync_hit_79728,
+                            (unsigned long)g_cdsync_last_bec,
+                            (unsigned long)g_cdsync_last_bed,
+                            (unsigned long)g_cdsync_last_cmd,
+                            (unsigned long)g_cdsync_last_irqflag,
+                            (unsigned long)g_cdsync_irqflag_nonzero,
+                            (unsigned long)g_cdsync_last_loop,
+                            (unsigned long)g_cdsync_last_deadline,
+                            (unsigned long)g_cdsync_bec2_seen,
+                            (unsigned long)g_cdsync_bec5_seen,
+                            (unsigned long)g_cdsync_last_ra_79c8c,
+                            (unsigned long)g_cdsync_last_ra_79728);
                         fclose(c4f);
                     }
                 }
