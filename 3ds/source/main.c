@@ -2555,6 +2555,14 @@ static uint32_t g_b53_fast43cd4_hits = 0u;
 static uint32_t g_b53_fast43cd4_last_in = 0u;
 static uint32_t g_b53_fast43cd4_last_out = 0u;
 
+/* B136.4 - trace CD low-level readiness gate used by 80014478. */
+static uint32_t g_b136_777d8_hits = 0u;
+static uint32_t g_b136_777d8_last_a0 = 0u;
+static uint32_t g_b136_777d8_last_ra = 0u;
+static uint32_t g_b136_73dc8_hits = 0u;
+static uint32_t g_b136_73dc8_last_a0 = 0u;
+static uint32_t g_b136_73dc8_last_ra = 0u;
+
 /*
  * Trace cible du petit cycle observe dans le dernier build :
  *
@@ -4856,6 +4864,24 @@ static void fm_trace_dispatch(
                 }
 
                 g_b31_req_snap = 1u;
+            }
+            break;
+
+        case 0x000777D8u:
+            ++g_b136_777d8_hits;
+            if (cpu)
+            {
+                g_b136_777d8_last_a0 = cpu->gpr[4];
+                g_b136_777d8_last_ra = cpu->gpr[31];
+            }
+            break;
+
+        case 0x00073DC8u:
+            ++g_b136_73dc8_hits;
+            if (cpu)
+            {
+                g_b136_73dc8_last_a0 = cpu->gpr[4];
+                g_b136_73dc8_last_ra = cpu->gpr[31];
             }
             break;
 
@@ -8949,6 +8975,13 @@ static void fm_cd_hle_reset(void)
     g_b53_fast43cd4_hits = 0u;
     g_b53_fast43cd4_last_in = 0u;
     g_b53_fast43cd4_last_out = 0u;
+
+    g_b136_777d8_hits = 0u;
+    g_b136_777d8_last_a0 = 0u;
+    g_b136_777d8_last_ra = 0u;
+    g_b136_73dc8_hits = 0u;
+    g_b136_73dc8_last_a0 = 0u;
+    g_b136_73dc8_last_ra = 0u;
 
     g_hit_7fcbc = 0;
     g_hit_82158 = 0;
@@ -20380,7 +20413,16 @@ int main(void)
                         "reqgen_cb=%08lX\n"
                         "reqgen_user=%08lX\n"
                         "reqgen_ready_at_create=%lu\n"
-                        "reqgen_getsec_at_create=%lu\n",
+                        "reqgen_getsec_at_create=%lu\n"
+                        "gate_777d8_hits=%lu\n"
+                        "gate_777d8_a0=%08lX\n"
+                        "gate_777d8_ra=%08lX\n"
+                        "gate_73dc8_hits=%lu\n"
+                        "gate_73dc8_a0=%08lX\n"
+                        "gate_73dc8_ra=%08lX\n"
+                        "gate_93f40=%08lX\n"
+                        "gate_93f48=%08lX\n"
+                        "gate_93fec=%08lX\n",
                         (unsigned long)frame,
                         (unsigned long)(cpu ? cpu->pc : 0u),
                         (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -20476,7 +20518,16 @@ int main(void)
                         (unsigned long)g_b136_reqgen_callback,
                         (unsigned long)g_b136_reqgen_user,
                         (unsigned long)g_b136_reqgen_ready_started,
-                        (unsigned long)g_b136_reqgen_getsec_ok
+                        (unsigned long)g_b136_reqgen_getsec_ok,
+                        (unsigned long)g_b136_777d8_hits,
+                        (unsigned long)g_b136_777d8_last_a0,
+                        (unsigned long)g_b136_777d8_last_ra,
+                        (unsigned long)g_b136_73dc8_hits,
+                        (unsigned long)g_b136_73dc8_last_a0,
+                        (unsigned long)g_b136_73dc8_last_ra,
+                        (unsigned long)fm_memory_read_word(0x80093F40u),
+                        (unsigned long)fm_memory_read_word(0x80093F48u),
+                        (unsigned long)fm_memory_read_word(0x80093FECu)
                     );
                     fclose(dbg);
                 }
