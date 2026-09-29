@@ -20315,7 +20315,37 @@ int main(void)
                         "b50_c460_before=%08lX\n"
                         "b50_c460_after=%08lX\n"
                         "b50_c484_before=%08lX\n"
-                        "b50_c484_after=%08lX\n",
+                        "b50_c484_after=%08lX\n"
+                        "req10=%08lX\n"
+                        "req18=%08lX\n"
+                        "req1c=%08lX\n"
+                        "req20=%08lX\n"
+                        "req24=%08lX\n"
+                        "req2c=%08lX\n"
+                        "req34=%08lX\n"
+                        "req40=%08lX\n"
+                        "req44=%04lX\n"
+                        "req46=%02lX\n"
+                        "req47=%02lX\n"
+                        "b33_async=%lu\n"
+                        "b33_cb_start=%lu\n"
+                        "b33_cb_done=%lu\n"
+                        "b34_pending=%lu\n"
+                        "b34_active=%lu\n"
+                        "b34_start=%lu\n"
+                        "b34_done=%lu\n"
+                        "b34_before=%08lX\n"
+                        "b34_after=%08lX\n"
+                        "b32_calls=%lu\n"
+                        "b32_ok=%lu\n"
+                        "b32_fail=%lu\n"
+                        "b32_lba=%08lX\n"
+                        "b32_remaining=%08lX\n"
+                        "b13594_low_calls=%lu\n"
+                        "b13594_low_cmd=%08lX\n"
+                        "qmgr_7b78c=%lu\n"
+                        "qmgr_7c548=%lu\n"
+                        "qmgr_last_cmd=%08lX\n",
                         (unsigned long)frame,
                         (unsigned long)(cpu ? cpu->pc : 0u),
                         (unsigned long)(cpu ? cpu->gpr[31] : 0u),
@@ -20372,7 +20402,37 @@ int main(void)
                         (unsigned long)g_b50_c460_before,
                         (unsigned long)g_b50_c460_after,
                         (unsigned long)g_b50_c484_before,
-                        (unsigned long)g_b50_c484_after
+                        (unsigned long)g_b50_c484_after,
+                        (unsigned long)fm_memory_read_word(0x800EB1B8u + 0x10u),
+                        (unsigned long)fm_memory_read_word(0x800EB1B8u + 0x18u),
+                        (unsigned long)fm_memory_read_word(0x800EB1B8u + 0x1Cu),
+                        (unsigned long)fm_memory_read_word(0x800EB1B8u + 0x20u),
+                        (unsigned long)fm_memory_read_word(0x800EB1B8u + 0x24u),
+                        (unsigned long)fm_memory_read_word(0x800EB1B8u + 0x2Cu),
+                        (unsigned long)fm_memory_read_word(0x800EB1B8u + 0x34u),
+                        (unsigned long)fm_memory_read_word(0x800EB1B8u + 0x40u),
+                        (unsigned long)fm_memory_read_half(0x800EB1B8u + 0x44u),
+                        (unsigned long)fm_memory_read_byte(0x800EB1B8u + 0x46u),
+                        (unsigned long)fm_memory_read_byte(0x800EB1B8u + 0x47u),
+                        (unsigned long)g_b33_async_calls,
+                        (unsigned long)g_b33_cb_started,
+                        (unsigned long)g_b33_cb_done,
+                        (unsigned long)g_b34_ready_pending,
+                        (unsigned long)g_b34_ready_active,
+                        (unsigned long)g_b34_ready_started,
+                        (unsigned long)g_b34_ready_done,
+                        (unsigned long)g_b34_ready_before,
+                        (unsigned long)g_b34_ready_after,
+                        (unsigned long)g_b32_getsec_calls,
+                        (unsigned long)g_b32_getsec_ok,
+                        (unsigned long)g_b32_getsec_fail,
+                        (unsigned long)g_b32_last_lba,
+                        (unsigned long)g_b32_last_remaining,
+                        (unsigned long)g_b13594_low_calls,
+                        (unsigned long)g_b13594_low_cmd,
+                        (unsigned long)g_qmgr_hit_7b78c,
+                        (unsigned long)g_qmgr_hit_7c548,
+                        (unsigned long)g_qmgr_last_cmd
                     );
                     fclose(dbg);
                 }
