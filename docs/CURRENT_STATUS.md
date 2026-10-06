@@ -1,6 +1,14 @@
 # État courant — New Nintendo 3DS
 
-Dernière mise à jour : **29 septembre 2026**.
+Dernière mise à jour : **6 octobre 2026**.
+
+## Audit hors jeu du 6 octobre
+
+La branche `fix/b136-spu-dma4-mmio-audit` corrige quatre défauts reproduits :
+déclaration C du helper SPU, écritures SPU 16 bits perdues, écritures partielles
+DMA4 ignorées et état SPU/DMA4 non réinitialisé. Les tests host du vrai module
+mémoire passent en CLEAN et PROFILE. **Le démarrage du jeu reste à retester.**
+Voir [preuves et limites de l'audit](B136_MMIO_AUDIT.md).
 
 ## Résumé
 

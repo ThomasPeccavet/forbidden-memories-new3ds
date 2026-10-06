@@ -104,6 +104,9 @@
 #define PSX_SPU_CTRL        (PSX_SPU_BASE + 0x1AAu)
 #define PSX_SPU_STAT        (PSX_SPU_BASE + 0x1AEu)
 
+static uint16_t fm_spu_read_half(uint32_t phys);
+static void fm_spu_write_half(uint32_t phys, uint16_t value);
+
 
 /*
  * ============================================================
@@ -2804,6 +2807,18 @@ static void fm_dma_register_write32_masked(
 {
     switch (base)
     {
+        case PSX_DMA4_MADR:
+        case PSX_DMA4_BCR:
+        case PSX_DMA4_CHCR:
+            /* Share masking, diagnostics and START handling with SW.
+             * SB/SH must preserve the untouched register lanes. */
+            fm_memory_write_word(
+                base,
+                (fm_dma_register_read32(base) & ~write_mask)
+                    | (value & write_mask)
+            );
+            return;
+
         case PSX_DMA2_MADR:
         {
             uint32_t merged =
@@ -3168,6 +3183,23 @@ void fm_memory_init(
 
     g_dma2_chcr =
         0;
+
+    g_dma4_madr = 0u;
+    g_dma4_bcr = 0u;
+    g_dma4_chcr = 0u;
+    g_dma4_transfer_count = 0u;
+    g_dma4_completion_pending = 0u;
+    g_dma4_madr_writes = 0u;
+    g_dma4_bcr_writes = 0u;
+    g_dma4_chcr_writes = 0u;
+    g_dma4_last_madr_write = 0u;
+    g_dma4_last_bcr_write = 0u;
+    g_dma4_last_chcr_write = 0u;
+
+    g_spu_xfer_addr = 0u;
+    g_spu_xfer_data = 0u;
+    g_spu_ctrl = 0u;
+    g_spu_stat = 0u;
 
     g_dma6_madr =
         0;
@@ -3874,6 +3906,18 @@ void fm_memory_write_half(
         );
 
     fm_memory_watch_store(phys, 2u, (uint32_t)value);
+
+    /* Psy-Q programs these 16-bit registers with SH, not only SW. */
+    if (
+        phys == PSX_SPU_XFER_ADDR
+        || phys == PSX_SPU_XFER_DATA
+        || phys == PSX_SPU_CTRL
+        || phys == PSX_SPU_STAT
+    )
+    {
+        fm_spu_write_half(phys, value);
+        return;
+    }
 
     /* B92 - hot RAM fast path before timer/DMA decoding. */
     if (
