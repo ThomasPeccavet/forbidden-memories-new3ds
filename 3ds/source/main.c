@@ -20713,6 +20713,106 @@ int main(void)
                         (unsigned long)fm_memory_read_half(fm_memory_read_word(0x80093FB8u) + 0x1AAu),
                         (unsigned long)fm_memory_read_half(fm_memory_read_word(0x80093FB8u) + 0x1AEu)
                     );
+                    /* B136.7: read-only black-screen evidence. Sample at the
+                     * existing 120-host-frame debug cadence, never per GP0. */
+                    {
+                        FMGpuQuickState video_gpu = {0};
+                        uint32_t video_nz[6] = {0};
+                        uint32_t video_hash[6] = {0};
+                        fm_gpu_quick_save(&video_gpu);
+                        for (unsigned vp = 0u; vp < 5u; ++vp)
+                        {
+                            unsigned vx = vp < 4u ? ((vp & 1u) ? 320u : 0u)
+                                : video_gpu.display_x;
+                            unsigned vy = vp < 4u ? ((vp & 2u) ? 256u : 0u)
+                                : video_gpu.display_y;
+                            if (vx <= 704u && vy <= 272u)
+                                b13578_sample_page(vram, vx, vy,
+                                    &video_hash[vp], &video_nz[vp]);
+                        }
+                        if (g_b84_latch_valid)
+                        {
+                            video_hash[5] = 2166136261u;
+                            for (unsigned vy = 0u; vy < 240u; vy += 8u)
+                                for (unsigned vx = 0u; vx < 320u; vx += 8u)
+                                {
+                                    uint16_t pixel = composite[vy * 320u + vx];
+                                    if ((pixel & 0x7FFFu) != 0u) ++video_nz[5];
+                                    video_hash[5] = (video_hash[5] ^ pixel) * 16777619u;
+                                }
+                        }
+                        fprintf(dbg,
+                            "video_probe=B136.7\nvideo_mode=%08lX\n"
+                            "video_disabled=%ld\nvideo_has_frame=%lu\n"
+                            "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
+                            "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
+                            "video_gp1=%lu,%lu\nvideo_latch=%u,%u\n"
+                            "video_latch_valid=%lu\nvideo_pick=%lu\n"
+                            "video_latches=%lu\nvideo_presents=%lu\n"
+                            "video_menu_init=%lu\nvideo_menu_update=%lu\n"
+                            "video_menu_destroy=%lu\nvideo_menu_force=%lu\n",
+                            (unsigned long)video_gpu.display_mode,
+                            (long)video_gpu.display_disabled,
+                            (unsigned long)video_gpu.has_frame,
+                            (unsigned long)video_gpu.parser_state,
+                            (unsigned long)video_gpu.cmd_have,
+                            (unsigned long)video_gpu.cmd_need,
+                            (long)video_gpu.draw_x1, (long)video_gpu.draw_y1,
+                            (long)video_gpu.draw_x2, (long)video_gpu.draw_y2,
+                            (long)video_gpu.offset_x, (long)video_gpu.offset_y,
+                            (unsigned long)video_gpu.display_x,
+                            (unsigned long)video_gpu.display_y,
+                            g_b84_latch_x, g_b84_latch_y,
+                            (unsigned long)g_b84_latch_valid,
+                            (unsigned long)g_b13578_last_pick,
+                            (unsigned long)g_b84_latch_count,
+                            (unsigned long)g_b86_present_count,
+                            (unsigned long)g_b73_hit_menu_init,
+                            (unsigned long)g_b73_hit_menu_update,
+                            (unsigned long)g_b73_hit_menu_destroy,
+                            (unsigned long)g_b73_menu_force_count);
+                        for (unsigned vp = 0u; vp < 6u; ++vp)
+                            fprintf(dbg, "video_page%u_nz=%lu\nvideo_page%u_hash=%08lX\n",
+                                vp, (unsigned long)video_nz[vp],
+                                vp, (unsigned long)video_hash[vp]);
+
+                        /* Keep the last 16 diagnostic refreshes so the brief
+                         * title/menu appearance can be compared with black.
+                         * Fixed-size host-only ring, rewritten each refresh. */
+                        static char video_ring[16][512];
+                        static unsigned video_next = 0u, video_count = 0u;
+                        snprintf(video_ring[video_next], sizeof(video_ring[0]),
+                            "frame=%lu pc=%08lX gp0=%llu disabled=%ld mode=%08lX "
+                            "gp1=%lu,%lu latch=%u,%u valid=%lu pick=%lu "
+                            "nz=%lu/%lu/%lu/%lu/%lu/%lu "
+                            "menu=%lu/%lu/%lu c460=%08lX\n",
+                            (unsigned long)frame, (unsigned long)(cpu ? cpu->pc : 0u),
+                            (unsigned long long)fm_gpu_gp0_count(),
+                            (long)video_gpu.display_disabled,
+                            (unsigned long)video_gpu.display_mode,
+                            (unsigned long)video_gpu.display_x,
+                            (unsigned long)video_gpu.display_y,
+                            g_b84_latch_x, g_b84_latch_y,
+                            (unsigned long)g_b84_latch_valid,
+                            (unsigned long)g_b13578_last_pick,
+                            (unsigned long)video_nz[0], (unsigned long)video_nz[1],
+                            (unsigned long)video_nz[2], (unsigned long)video_nz[3],
+                            (unsigned long)video_nz[4], (unsigned long)video_nz[5],
+                            (unsigned long)g_b73_hit_menu_init,
+                            (unsigned long)g_b73_hit_menu_update,
+                            (unsigned long)g_b73_hit_menu_destroy,
+                            (unsigned long)fm_memory_read_word(0x8009C460u));
+                        video_next = (video_next + 1u) % 16u;
+                        if (video_count < 16u) ++video_count;
+                        FILE *video_file = fopen("sdmc:/3ds/fm-new3ds/video-watch.txt", "wb");
+                        if (video_file)
+                        {
+                            for (unsigned vi = 0u; vi < video_count; ++vi)
+                                fputs(video_ring[(video_next + 16u - video_count + vi) % 16u],
+                                    video_file);
+                            fclose(video_file);
+                        }
+                    }
                     fclose(dbg);
                 }
             }

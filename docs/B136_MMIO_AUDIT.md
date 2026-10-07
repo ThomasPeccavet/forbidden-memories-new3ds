@@ -63,6 +63,35 @@ Ces limites ne sont pas corrigées arbitrairement pour masquer le blocage.
 Les corrections présentes réparent le transport MMIO du modèle déjà intégré.
 Elles ne prouvent pas encore que le startup du jeu passe.
 
+## Essai utilisateur du 7 octobre et sonde vidéo B136.7
+
+Le cold boot après correction a franchi le blocage précédent : 214 DMA4,
+2 livraisons via le bridge, 491 lectures CD réussies et zéro échec, req10=0,
+C460=0, post681_43dc8=1 et post681_159f4=2. L'événement ready=0 après TestEvent
+est compatible avec sa consommation. Cela valide la progression observée,
+pas le pipeline audio ni la suppression de tous les bridges.
+
+Observation visuelle : logo Konami, noir, titre/menu brièvement visible puis
+noir. La cause vidéo reste inconnue. B136.7 ajoute uniquement des diagnostics
+PROFILE, au rythme existant d'une collecte toutes les 120 frames hôte :
+
+- `debug-latest.txt` : vrais registres GPU via quick-save en lecture seule,
+  draw-area/offset, parser, page GP1, latch, compteurs du cycle de vie du menu,
+  hashes et occupation échantillonnée des pages ;
+- `video-watch.txt` : historique borné aux 16 dernières collectes, réécrit
+  à chaque collecte ; aucun état du jeu ni choix de framebuffer n'est modifié.
+
+Indices des pages : 0=(0,0), 1=(320,0), 2=(0,256), 3=(320,256),
+4=vue exacte GP1 si bornée, 5=composite hôte si latch valide.
+`nz` compte des pixels RGB non nuls sur une grille 8x8 (maximum 1200) ;
+un zéro est une observation échantillonnée, pas une preuve que chaque pixel
+est noir. Le mode RGB24 devra être interprété séparément.
+
+Prochain essai : même branche PROFILE, démarrage à froid, laisser l'écran
+devenir noir et attendre 10 secondes pour rafraîchir les TXT. Envoyer les
+deux fichiers. Comparer image GPU, composite hôte et activité du menu avant
+de choisir un correctif de rendu.
+
 ## Prochain essai avec le PC
 
 Compiler cette branche : `make -C 3ds PROFILE=1 -j2`. Le labo pointe encore
