@@ -117,6 +117,26 @@ sans changer le rendu. Le journal ne conserve que les 96 derniers changements.
 Essai : cold boot PROFILE, attendre dix secondes après le noir, fermer
 Azahar, envoyer memory-watch.txt et les 80 dernières lignes de debug-latest.txt.
 
+## B136.9 : corruption du verrou par le résultat CD
+
+La trace utilisateur termine par current=target=FF, flags=10, puis C4B8
+est remis à zéro. Les stores attribués à 80014924/8007C5E8/8007C6B8 sont
+en réalité des écritures HLE portant un ancien PC guest : le bridge utilisait
+8009C4B4 comme scratch et effaçait 16 octets. Il écrasait ainsi C4B8 et
+les couleurs C4B9..C4C3, pendant et après les fondus. Cette attribution
+rectifie l'hypothèse du paragraphe B136.8 sur les writers.
+
+B136.9 place le résultat dans le vrai tampon sync LibCD 800F7130 (déjà
+attendu par les consommateurs guest), initialise seulement ses 8 octets
+et conserve le tampon ready 800F7138 adjacent. Les callbacks reçoivent ce
+même tampon ; la copie redondante vers lui est supprimée. Aucun forçage
+du verrou et aucun changement du bridge de fondu n'est ajouté.
+
+Le test host compile le writer C de production et vérifie les réponses
+Pause/GetlocL ainsi que des sentinelles sur le CdlLOC, le verrou, les couleurs
+et le tampon ready. La version antérieure échoue sur ces assertions.
+Le résultat visuel nécessite encore un cold boot Azahar.
+
 ## Prochain essai avec le PC
 
 Compiler cette branche : `make -C 3ds PROFILE=1 -j2`. Le labo pointe encore

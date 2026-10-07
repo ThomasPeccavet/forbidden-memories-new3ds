@@ -1,6 +1,15 @@
 # État courant — New Nintendo 3DS
 
-Dernière mise à jour : **6 octobre 2026**.
+Dernière mise à jour : **7 octobre 2026**.
+
+## Correction B136.9 après essai Azahar
+
+Le correctif SPU/DMA4 permet d'atteindre le titre et le menu, puis l'écran
+devient noir. La trace B136.8 et le code identifient une corruption hôte :
+le bridge CD efface 16 octets à 8009C4B4, dont le verrou de rendu C4B8 et
+ses couleurs. B136.9 utilise le tampon LibCD sync 800F7130 sur 8 octets,
+sans toucher au tampon ready adjacent. Test C du writer réel avec sentinelles
+ajouté. La disparition de l'écran noir reste à confirmer sur le jeu.
 
 ## Audit hors jeu du 6 octobre
 

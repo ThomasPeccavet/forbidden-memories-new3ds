@@ -1082,7 +1082,10 @@ static uint32_t g_b32_43e_return_frame = 0;
  * au RA du caller de la fonction d'enqueue.
  */
 static const uint32_t g_b33_cb_sentinel = 0x8000FFC0u;
-static const uint32_t g_b33_result_scratch = 0x8009C4B4u;
+/* B136.9: canonical eight-byte LibCD sync result. 8009C4B4 is only
+ * the game's CdlLOC: clearing 16 bytes there corrupts the render gate
+ * at +4 and its colors. Keep the adjacent ready result at F7138 intact. */
+static const uint32_t g_b33_result_scratch = 0x800F7130u;
 static uint32_t g_b33_cb_active = 0;
 static uint32_t g_b33_cb_resume = 0;
 static uint32_t g_b33_cb_addr = 0;
@@ -6780,7 +6783,7 @@ static void fm_b33_fill_cd_result(CPUState *cpu, uint32_t command)
         return;
     }
 
-    for (unsigned i = 0; i < 16u; ++i)
+    for (unsigned i = 0; i < 8u; ++i)
     {
         cpu->write_byte(g_b33_result_scratch + i, 0u);
     }
@@ -6864,15 +6867,7 @@ static int fm_b33_schedule_cd_callback(
         (uint8_t)(command & 0xFFu)
     );
 
-    for (unsigned i = 0; i < 8u; ++i)
-    {
-        cpu->write_byte(
-            0x800F7130u + i,
-            cpu->read_byte(
-                g_b33_result_scratch + i
-            )
-        );
-    }
+    /* fm_b33_fill_cd_result already populated the canonical sync result. */
 
     g_b66_last_sync_after =
         cpu->read_byte(0x80094BECu);
@@ -20746,7 +20741,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.8\nvideo_mode=%08lX\n"
+                            "video_probe=B136.9\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
