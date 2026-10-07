@@ -20142,7 +20142,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.18\nvideo_mode=%08lX\n"
+                            "video_probe=B136.19\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20210,7 +20210,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.18\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.19\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"
@@ -20289,6 +20289,39 @@ int main(void)
                                     (unsigned long)fm_memory_read_half(text_obj + 8u),
                                     (unsigned long)fm_memory_read_word(text_obj + 0x24u));
                             }
+                            /* B136.19: post-name animation uses the native model
+                             * pipeline (5CDEC/53924), not the opening STR movie.
+                             * Read its load and visibility gates without forcing
+                             * readiness or changing guest state. */
+                            fprintf(intro_file,
+                                "scene=sub:%02lX pipeline:%02lX phase:%02lX current:%02lX intro:%02lX/%02lX\n",
+                                (unsigned long)fm_memory_read_byte(0x8009C60Bu),
+                                (unsigned long)fm_memory_read_byte(0x8009C324u),
+                                (unsigned long)fm_memory_read_byte(0x8009C32Au),
+                                (unsigned long)fm_memory_read_byte(0x8009C337u),
+                                (unsigned long)fm_memory_read_byte(0x8009C394u),
+                                (unsigned long)fm_memory_read_byte(0x8009C395u));
+                            for (unsigned mi = 0u; mi < 3u; ++mi)
+                            {
+                                uint32_t model = 0x800F4178u + mi * 0xE20u;
+                                fprintf(intro_file,
+                                    "model%u=id:%04lX load:%02lX ready:%02lX tint:%08lX parts:%02lX object:%08lX data:%08lX packets:%08lX anim:%04lX\n",
+                                    mi,
+                                    (unsigned long)fm_memory_read_half(model + 0xDF8u),
+                                    (unsigned long)fm_memory_read_byte(model + 0xE14u),
+                                    (unsigned long)fm_memory_read_byte(model + 0xE1Fu),
+                                    (unsigned long)fm_memory_read_word(model + 0xDC0u),
+                                    (unsigned long)fm_memory_read_byte(model + 0xE1Bu),
+                                    (unsigned long)fm_memory_read_word(model + 0xD18u),
+                                    (unsigned long)fm_memory_read_word(model + 0xDE0u),
+                                    (unsigned long)fm_memory_read_word(model + 0xDF0u),
+                                    (unsigned long)fm_memory_read_half(model + 0xE06u));
+                            }
+                            fprintf(intro_file,
+                                "scene_overlay=%08lX/%08lX/%08lX\n",
+                                (unsigned long)fm_memory_read_word(0x80180004u),
+                                (unsigned long)fm_memory_read_word(0x8018019Cu),
+                                (unsigned long)fm_memory_read_word(0x80180420u));
                             fm_media_dump(intro_file);
                             fclose(intro_file);
                         }
