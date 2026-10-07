@@ -2,11 +2,22 @@
 
 Dernière mise à jour : **7 octobre 2026**.
 
+## B136.11 : distinguer le STR du titre interactif
+
+L'essai B136.10 révèle une attente STR avant le titre SU : attendre START
+à cet endroit était une régression. Le premier STR non pris en charge est
+à nouveau terminé automatiquement. Le titre interactif attend ensuite
+START dans 80180390. Le bridge B75 est supprimé : après 24 updates, il
+rendait prématurément visibles les entrées que SU initialise masquées,
+pendant que « Appuyer sur START » reste affiché. Animation et visibilité
+appartiennent au code guest. Les fondus restent sans mutation hôte.
+Le rendu B136.11 et l'attente de START doivent encore être validés sur Azahar.
+
 ## Correction B136.9 après essai Azahar
 
 Essai utilisateur du 7 octobre : les écrans s'enchaînent et C4B8 reste à 1.
 Deux défauts restent visibles : passage au menu sans START et fonds superposés.
-B136.10 désarme le skip STR automatique, réserve la demande à un front START,
+B136.10 désarmait le skip STR automatique, réservait la demande à un front START,
 retire le saut hôte vers l'état menu et remplace le bridge de fondu par une
 observation : seul 8001522C applique désormais la progression et le nettoyage.
 Le comportement visuel reste à tester. Le décodage STR/MDEC est incomplet.

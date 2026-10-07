@@ -139,6 +139,25 @@ Le résultat visuel nécessite encore un cold boot Azahar.
 
 ## Prochain essai avec le PC
 
+### B136.11 : correction du diagnostic titre et retrait B75
+
+L'essai B136.10 reste à 8006A53C/8006A54C/80078B58 avec title=80/80,
+str=0/0, menu_init=0. Après START : menu_init=1 et title=00/81. Le STR
+précède donc l'écran interactif SU. Le désarmement automatique était une
+régression ; le premier flux non pris en charge est à nouveau terminé
+automatiquement, comme en B136.9. Pas de rétablissement du saut vers état 8.
+
+L'overlay variant_0 8018001C initialise les 11 entrées sans bit 0x40.
+80180390 garde ces entrées cachées tant que le prompt 8018478C reste visible,
+puis START masque le prompt et lance l'animation. B75, lui, intervenait
+après 24 updates et posait 0x40, les positions finales et c5=0 sans tester
+le prompt. Il pouvait afficher simultanément les deux états. B136.11
+supprime intégralement cette mutation et ses compteurs devenus inutiles.
+
+Les traces vidéo ajoutent prompt/items (visibilité selon flags & C0), c4/c5
+dans debug-latest, pour vérifier avant et après START. Les 37 tests host
+passent ; l'essai réel reste requis. Le STR/MDEC complet est toujours absent.
+
 ### B136.10 : transition titre et fin de fondu natives
 
 B136.9 confirme le rendu continu (gate=1, 7178 paquets draw). Le premier

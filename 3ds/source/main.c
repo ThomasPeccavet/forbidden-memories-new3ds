@@ -590,9 +590,10 @@ static int b110_get_rank(
  * Sur 3DS, notre chaîne CD streaming STR n'alimente pas encore
  * FUN_80078B58. Pour débloquer le jalon graphique sans afficher
  * d'image artificielle, START demande la fin du flux actif.
- * B136.10 : aucune demande automatique au boot.
+ * B136.11 : terminer automatiquement le premier STR non pris en charge
+ * avant le titre interactif SU. Ses boutons attendent le START guest.
  */
-static int g_str_intro_skip_pending = 0;
+static int g_str_intro_skip_pending = 1;
 static uint32_t g_str_intro_skip_count = 0;
 
 static uint32_t g_str_intro_last_base = 0;
@@ -1314,40 +1315,8 @@ static uint32_t g_b74_last_menu_draw_ra = 0u;
 static uint32_t g_b74_last_12f70_ra = 0u;
 
 
-/*
- * ============================================================
- * B75 - completion de l'animation d'entree du menu SU
- * ============================================================
- *
- * B74 prouve que le menu est reellement charge ET dessine :
- *
- *   C898 = 80180B4C
- *   callback draw appele des centaines de fois
- *   objets menu valides en RAM
- *
- * Mais les objets restent figes dans l'etat initial :
- *
- *   OBJ0 x=-160  from=-160  to=160  timer=16  flags=0x0088
- *   OBJ5 x= 480  from= 480  to=160  timer=16
- *
- * Le pseudo-C de 80180390 montre que l'animation normale doit :
- *   - decrementer +0x60 de 16 vers 0 ;
- *   - amener +0x30 vers +0x38 ;
- *   - poser le bit 0x40 sur le groupe visible ;
- *   - remettre DAT_801847C5 a 0 a la fin.
- *
- * Cette branche ne progresse pas dans notre runtime actuel.
- * B75 ne dessine rien artificiellement : il finalise uniquement
- * l'animation d'entree. La completion reproduit aussi l'effet exact
- * de FUN_80040734 pour chaque objet (variant +0x69, clear flag 0x10)
- * avant de rendre la main au VRAI callback menu.
- */
-static uint32_t g_b75_menu_entrance_bridge = 0u;
-static uint32_t g_b75_menu_entrance_frame = 0u;
-static uint32_t g_b75_last_c0 = 0u;
-static uint32_t g_b75_last_c5_before = 0u;
-static uint32_t g_b75_last_c5_after = 0u;
-static uint32_t g_b75_objects_settled = 0u;
+/* B136.11: removed B75. Hidden menu entries are intentional while
+ * the SU prompt is visible; 80180390 owns their visibility and animation. */
 
 
 /*
@@ -8594,7 +8563,7 @@ static void fm_cd_hle_reset(void)
     g_b108_vsync_waited = 0u;
     g_b108_vsync_last_target = 0u;
 
-    g_str_intro_skip_pending = 0;
+    g_str_intro_skip_pending = 1;
     g_str_intro_skip_count = 0;
 
     g_str_intro_last_base = 0;
@@ -12899,189 +12868,6 @@ int main(void)
                             fm_memory_read_word(qctx + 0x80u + qi * 4u);
                     }
                 }
-            }
-        }
-
-
-        /*
-         * ====================================================
-         * B75 - settle de l'animation d'entree du menu
-         * ====================================================
-         */
-        if (
-            game_running
-            &&
-            g_b73_hit_menu_init != 0u
-            &&
-            g_b73_hit_menu_update > 24u
-            &&
-            g_b75_menu_entrance_bridge == 0u
-            &&
-            fm_memory_read_word(0x8009C898u) == 0x80180B4Cu
-        )
-        {
-            uint32_t p0 =
-                fm_memory_read_word(0x80184794u);
-
-            uint32_t c0 =
-                fm_memory_read_byte(0x801847C0u);
-
-            uint32_t c5 =
-                fm_memory_read_byte(0x801847C5u);
-
-            /*
-             * Signature exacte vue en B74 :
-             * objet 0 hors ecran + timer d'entree encore a 16.
-             */
-            if (
-                p0 >= 0x80000000u
-                &&
-                p0 < 0x80200000u
-                &&
-                fm_memory_read_half(p0 + 0x60u) == 0x0010u
-                &&
-                (int16_t)fm_memory_read_half(p0 + 0x30u)
-                    ==
-                    (int16_t)fm_memory_read_half(p0 + 0x36u)
-            )
-            {
-                uint32_t settled = 0u;
-
-                g_b75_last_c0 = c0;
-                g_b75_last_c5_before = c5;
-
-                for (unsigned i = 0; i < 11u; ++i)
-                {
-                    uint32_t obj =
-                        fm_memory_read_word(
-                            0x80184794u
-                            +
-                            i * 4u
-                        );
-
-                    if (
-                        obj < 0x80000000u
-                        ||
-                        obj >= 0x80200000u
-                    )
-                    {
-                        continue;
-                    }
-
-                    uint16_t flags =
-                        fm_memory_read_half(
-                            obj + 0x08u
-                        );
-
-                    int visible_group;
-
-                    if (c0 < 5u)
-                    {
-                        visible_group =
-                            i < 5u;
-                    }
-                    else
-                    {
-                        visible_group =
-                            i >= 5u;
-                    }
-
-                    if (visible_group)
-                    {
-                        flags |= 0x0040u;
-                    }
-                    else
-                    {
-                        flags &= (uint16_t)~0x0040u;
-                    }
-
-                    /*
-                     * Match the real 80180390 completion path.
-                     *
-                     * During each entrance-animation tick the game calls:
-                     *
-                     *   FUN_80040734(obj, i*2 + (selected != i))
-                     *
-                     * and FUN_80040734 does exactly:
-                     *   obj[0x69] = variant;
-                     *   obj->flags &= ~0x0010;
-                     *
-                     * The old B75 skipped this step, leaving non-selected
-                     * menu objects with stale sprite/frame state. Reproduce
-                     * that exact state transition here before handing control
-                     * back to the real menu update.
-                     */
-                    uint8_t variant =
-                        (uint8_t)((i << 1) | (uint32_t)(c0 != i));
-
-                    fm_memory_write_byte(
-                        obj + 0x69u,
-                        variant
-                    );
-
-                    flags &= (uint16_t)~0x0010u;
-
-                    /*
-                     * Little-endian halfword writes using the byte
-                     * primitive already used throughout main.c.
-                     */
-                    fm_memory_write_byte(
-                        obj + 0x08u,
-                        (uint8_t)(flags & 0xFFu)
-                    );
-                    fm_memory_write_byte(
-                        obj + 0x09u,
-                        (uint8_t)(flags >> 8)
-                    );
-
-                    uint16_t target =
-                        fm_memory_read_half(
-                            obj + 0x38u
-                        );
-
-                    fm_memory_write_byte(
-                        obj + 0x30u,
-                        (uint8_t)(target & 0xFFu)
-                    );
-                    fm_memory_write_byte(
-                        obj + 0x31u,
-                        (uint8_t)(target >> 8)
-                    );
-
-                    fm_memory_write_byte(
-                        obj + 0x60u,
-                        0u
-                    );
-                    fm_memory_write_byte(
-                        obj + 0x61u,
-                        0u
-                    );
-
-                    ++settled;
-                }
-
-                /*
-                 * L'animation est maintenant terminee.
-                 * Le vrai 80180390 peut reprendre directement sa
-                 * branche interactive (navigation / validation).
-                 */
-                fm_memory_write_byte(
-                    0x801847C5u,
-                    0u
-                );
-
-                g_b75_last_c5_after =
-                    fm_memory_read_byte(
-                        0x801847C5u
-                    );
-
-                g_b75_objects_settled =
-                    settled;
-
-                g_b75_menu_entrance_frame =
-                    frame;
-
-                ++g_b75_menu_entrance_bridge;
             }
         }
 
@@ -20421,7 +20207,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.10\nvideo_mode=%08lX\n"
+                            "video_probe=B136.11\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20483,13 +20269,36 @@ int main(void)
                          * Fixed-size host-only ring, rewritten each refresh. */
                         static char video_ring[16][512];
                         static unsigned video_next = 0u, video_count = 0u;
+                        /* B136.11: distinguish SU prompt from menu visibility. */
+                        uint32_t menu_items_mask = 0u, menu_prompt_visible = 0u;
+                        if (fm_memory_read_word(0x8009C898u) == 0x80180B4Cu)
+                        {
+                            uint32_t prompt = fm_memory_read_word(0x8018478Cu);
+                            if (prompt >= 0x80000000u && prompt <= 0x801FFF90u)
+                                menu_prompt_visible =
+                                    (fm_memory_read_half(prompt + 8u) & 0xC0u) == 0xC0u;
+                            for (unsigned mi = 0u; mi < 11u; ++mi)
+                            {
+                                uint32_t item = fm_memory_read_word(0x80184794u + mi * 4u);
+                                if (item >= 0x80000000u && item <= 0x801FFF90u
+                                    && (fm_memory_read_half(item + 8u) & 0xC0u) == 0xC0u)
+                                    menu_items_mask |= 1u << mi;
+                            }
+                        }
+                        fprintf(dbg, "video_menu_prompt_visible=%lu\n"
+                            "video_menu_items_visible=%03lX\n"
+                            "video_menu_c4=%02lX\nvideo_menu_c5=%02lX\n",
+                            (unsigned long)menu_prompt_visible,
+                            (unsigned long)menu_items_mask,
+                            (unsigned long)fm_memory_read_byte(0x801847C4u),
+                            (unsigned long)fm_memory_read_byte(0x801847C5u));
                         snprintf(video_ring[video_next], sizeof(video_ring[0]),
                             "frame=%lu pc=%08lX gp0=%llu disabled=%ld mode=%08lX "
                             "gp1=%lu,%lu latch=%u,%u valid=%lu pick=%lu "
                             "nz=%lu/%lu/%lu/%lu/%lu/%lu "
                             "menu=%lu/%lu/%lu c460=%08lX "
                             "title=%02lX/%02lX str=%lu/%lu pad=%04lX "
-                            "fade=%02lX/%02lX/%02lX\n",
+                            "fade=%02lX/%02lX/%02lX prompt=%lu items=%03lX\n",
                             (unsigned long)frame, (unsigned long)(cpu ? cpu->pc : 0u),
                             (unsigned long long)fm_gpu_gp0_count(),
                             (long)video_gpu.display_disabled,
@@ -20513,7 +20322,9 @@ int main(void)
                             (unsigned long)(fm_memory_read_word(0x8009C72Cu) & 0xFFFFu),
                             (unsigned long)fm_memory_read_byte(0x800EB24Cu),
                             (unsigned long)fm_memory_read_byte(0x800EB24Du),
-                            (unsigned long)fm_memory_read_byte(0x800EB24Eu));
+                            (unsigned long)fm_memory_read_byte(0x800EB24Eu),
+                            (unsigned long)menu_prompt_visible,
+                            (unsigned long)menu_items_mask);
                         video_next = (video_next + 1u) % 16u;
                         if (video_count < 16u) ++video_count;
                         FILE *video_file = fopen("sdmc:/3ds/fm-new3ds/video-watch.txt", "wb");
@@ -21224,8 +21035,8 @@ int main(void)
             fm_update_game_state_debug();
 
             /*
-             * Consume an explicit START request through the existing STR
-             * completion path; cold boot no longer arms an automatic skip.
+             * Finish the first unsupported STR automatically. The SU
+             * title prompt then handles START through its normal update.
              */
             fm_try_force_intro_stream_end(
                 game_running
