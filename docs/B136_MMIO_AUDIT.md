@@ -139,6 +139,25 @@ Le résultat visuel nécessite encore un cold boot Azahar.
 
 ## Prochain essai avec le PC
 
+### B136.10 : transition titre et fin de fondu natives
+
+B136.9 confirme le rendu continu (gate=1, 7178 paquets draw). Le premier
+flux STR était automatiquement terminé car skip_pending démarrait à 1,
+même sans START. La demande démarre maintenant à 0 et n'est armée que par
+un front physique START pendant un flux actif. Le raccourci B73 qui écrivait
+directement les états menu est retiré ; 35EB0/44084 gardent leur nettoyage.
+
+La trace montre aussi des pas de fondu alternant guest/host et des fins à
+zéro consommées par le host sans appel 15C28. Le bridge n'implémentait pas
+tous les chemins du fondu. Le service guest 15400/1522C étant actif, le host
+observe seulement les octets et ne les modifie plus. Cette suppression
+cible une cause plausible des fonds superposés ; le résultat visuel n'est
+pas encore validé. Le STR/MDEC complet reste hors périmètre de cette passe.
+
+video-watch ajoute title=C6A0/C7A8, str=done/skip_count, pad=edge et
+fade=current/target/flags. Essai cold boot : attendre 10 secondes sans START,
+puis appuyer une fois et vérifier la transition et les deux fonds.
+
 Compiler cette branche : `make -C 3ds PROFILE=1 -j2`. Le labo pointe encore
 sur la branche de base ; il ne testera pas ce correctif tant que sa ref n'est
 pas changée ou que cette branche n'est pas intégrée.

@@ -17,10 +17,6 @@
 #include "fm_interp.h"
 #include "fm_gpu.h"
 
-#if FM_PERF_PROFILE
-extern uint32_t g_debug_last_store_pc;
-#endif
-
 #include "gpu_sw_renderer.h"
 
 /* B28 helpers exported by source/fm_gpu.c. */
@@ -593,11 +589,10 @@ static int b110_get_rank(
  *
  * Sur 3DS, notre chaîne CD streaming STR n'alimente pas encore
  * FUN_80078B58. Pour débloquer le jalon graphique sans afficher
- * d'image artificielle, on force UNE SEULE FOIS la fin du premier
- * flux vidéo. Les écrans suivants restent entièrement produits
- * par le code du jeu.
+ * d'image artificielle, START demande la fin du flux actif.
+ * B136.10 : aucune demande automatique au boot.
  */
-static int g_str_intro_skip_pending = 1;
+static int g_str_intro_skip_pending = 0;
 static uint32_t g_str_intro_skip_count = 0;
 
 static uint32_t g_str_intro_last_base = 0;
@@ -1282,9 +1277,7 @@ static uint32_t g_b72_last_40b48_ra = 0u;
  * de l'etat 8 apres l'impulsion START, afin que le vrai chargeur
  * CD et le vrai overlay prennent ensuite la main.
  */
-static uint32_t g_b73_menu_force_request = 0u;
 static uint32_t g_b73_menu_force_count = 0u;
-static uint32_t g_b73_menu_force_frame = 0u;
 
 static uint32_t g_b73_state60a_before = 0u;
 static uint32_t g_b73_state60a_after = 0u;
@@ -8221,29 +8214,9 @@ ot_done:
 }
 
 
-/*
- * ============================================================
- * Fade / transition bridge
- * ============================================================
- *
- * Le boot est actuellement bloqué avant FUN_8002DF60 :
- *
- *   FUN_80044084
- *     -> FUN_800158F4
- *       -> FUN_8001569C
- *         EB24D = FF
- *         EB24E = 80
- *       -> FUN_800158B4
- *          attend tant que (EB24E & 80) != 0
- *
- * Sur PS1, FUN_80015400 -> FUN_8001522C fait progresser EB24C
- * vers EB24D à chaque service de frame, puis efface bit7.
- *
- * Notre bring-up 3DS ne livre pas encore toute la chaîne
- * d'événements/IRQ de façon identique. On reproduit uniquement
- * cette machine de transition en RAM, sans fabriquer d'image.
- */
-
+/* B136.10: observe the fade only. The real 80015400 -> 8001522C
+ * service runs again after the CD scratch fix. A second host step could
+ * clear bit7 before the guest applies its completion/cleanup semantics. */
 static uint8_t g_fade_current = 0;
 static uint8_t g_fade_target = 0;
 static uint8_t g_fade_flags = 0;
@@ -8254,7 +8227,7 @@ static uint32_t g_fade_bridge_ticks = 0;
 static uint32_t g_fade_bridge_completions = 0;
 
 
-static void fm_service_fade_bridge(void)
+static void fm_observe_fade(void)
 {
     uint8_t current =
         fm_memory_read_byte(
@@ -8298,206 +8271,7 @@ static void fm_service_fade_bridge(void)
         scale;
 
 
-    /*
-     * Rien à faire si aucune transition n'est active.
-     */
-    if (
-        (
-            flags
-            &
-            0x80u
-        )
-        ==
-        0
-    )
-    {
-        return;
-    }
 
-
-    /*
-     * Le bit0 sélectionne un autre chemin (FUN_800150F4).
-     * Ne pas l'émuler ici : le bridge cible uniquement la
-     * transition linéaire qui bloque le boot.
-     */
-    if (
-        flags
-        &
-        0x01u
-    )
-    {
-        return;
-    }
-
-
-    uint32_t delta =
-        (uint32_t)step
-        *
-        scale;
-
-
-    /*
-     * Si le multiplicateur vaut zéro, ne pas inventer de vitesse.
-     * Le diagnostic l'affichera directement.
-     */
-    if (delta == 0u)
-    {
-        return;
-    }
-
-
-    ++g_fade_bridge_ticks;
-
-
-    if (current != target)
-    {
-        uint32_t next;
-
-
-        if (current < target)
-        {
-            next =
-                (uint32_t)current
-                +
-                delta;
-
-
-            if (next > target)
-            {
-                next =
-                    target;
-            }
-        }
-        else
-        {
-            if (delta >= current)
-            {
-                next =
-                    0;
-            }
-            else
-            {
-                next =
-                    (uint32_t)current
-                    -
-                    delta;
-            }
-
-
-            if (next < target)
-            {
-                next =
-                    target;
-            }
-        }
-
-
-        fm_memory_write_byte(
-            0x800EB24Cu,
-            (uint8_t)next
-        );
-
-
-        g_fade_current =
-            (uint8_t)next;
-
-
-        return;
-    }
-
-
-    /*
-     * Reproduire le cas de fin de transition observé dans
-     * FUN_8001522C.
-     */
-    uint8_t result_flags =
-        flags
-        &
-        0x7Fu;
-
-
-    /*
-     * La fonction originale nettoie d'abord 0x86.
-     */
-    uint8_t cleaned_flags =
-        flags
-        &
-        0x79u;
-
-
-    fm_memory_write_byte(
-        0x800EB24Eu,
-        cleaned_flags
-    );
-
-
-    if (current == 0xFFu)
-    {
-        /*
-         * FUN_80015C18()
-         */
-        fm_memory_write_byte(
-            0x8009C4B8u,
-            1u
-        );
-
-
-        fm_memory_write_byte(
-            0x8009C4C4u,
-            0u
-        );
-
-        fm_memory_write_byte(
-            0x8009C4C5u,
-            0u
-        );
-
-
-        /*
-         * Couleurs/états cibles -> courants.
-         */
-        fm_memory_write_byte(
-            0x8009C4BBu,
-            fm_memory_read_byte(
-                0x8009C4BEu
-            )
-        );
-
-        fm_memory_write_byte(
-            0x8009C4BAu,
-            fm_memory_read_byte(
-                0x8009C4BDu
-            )
-        );
-
-        fm_memory_write_byte(
-            0x8009C4B9u,
-            fm_memory_read_byte(
-                0x8009C4BCu
-            )
-        );
-
-
-        result_flags =
-            cleaned_flags;
-    }
-
-
-    /*
-     * Cas courant du boot :
-     * 80 -> 00 lorsque C atteint D=FF.
-     */
-    fm_memory_write_byte(
-        0x800EB24Eu,
-        result_flags
-    );
-
-
-    g_fade_flags =
-        result_flags;
-
-
-    ++g_fade_bridge_completions;
 }
 
 
@@ -8820,7 +8594,7 @@ static void fm_cd_hle_reset(void)
     g_b108_vsync_waited = 0u;
     g_b108_vsync_last_target = 0u;
 
-    g_str_intro_skip_pending = 1;
+    g_str_intro_skip_pending = 0;
     g_str_intro_skip_count = 0;
 
     g_str_intro_last_base = 0;
@@ -12708,108 +12482,14 @@ int main(void)
         }
 
 
-        /*
-         * ====================================================
-         * START titre sans bridge B72
-         * ====================================================
-         *
-         * START suit uniquement le chemin pad normal. Le front physique
-         * sert aussi a armer B73, sans maintenir artificiellement le bit
-         * pendant plusieurs frames.
-         */
-        int b73_title_stage =
-            (
-                g_str_intro_last_done != 0u
-                &&
-                g_title_graphics_ready != 0u
-            );
-
-        if (
-            (down & KEY_START)
-            &&
-            b73_title_stage
-            &&
-            g_b73_menu_force_count == 0u
-        )
+        /* B136.10: request STR completion only on a physical START edge.
+         * Let 35EB0/44084 perform the guest cleanup and menu transition;
+         * do not overwrite 60C/60D/60E or jump directly to state 8. */
+        if ((down & KEY_START) && game_running
+            && fm_memory_read_word(0x8009C818u) != 0u
+            && fm_memory_read_byte(0x8009C3EBu) == 0u)
         {
-            g_b73_menu_force_request = 1u;
-        }
-
-
-        /*
-         * ====================================================
-         * B73 - transition controlee vers l'etat resident 8
-         * ====================================================
-         *
-         * Table 80091F7C :
-         *   index 8 -> FUN_8002D75C
-         *
-         * Ce handler appelle le vrai chargeur SU puis l'overlay
-         * 8018001C/80180390. On ne forge donc ni image, ni menu.
-         */
-        if (
-            b73_title_stage
-            &&
-            g_b73_menu_force_request
-            &&
-            g_b73_menu_force_count == 0u
-        )
-        {
-            g_b73_state60a_before =
-                fm_memory_read_byte(
-                    0x8009C60Au
-                );
-
-            g_b73_state60d_before =
-                fm_memory_read_byte(
-                    0x8009C60Du
-                );
-
-            /*
-             * 60E devient l'index initial du menu dans 8018001C.
-             * 0 = premiere entree.
-             *
-             * 60C n'est pas exploite par le pseudo-C de 8018001C,
-             * mais 1 correspond a la convention d'entree normale.
-             */
-            fm_memory_write_byte(
-                0x8009C60Cu,
-                1u
-            );
-
-            fm_memory_write_byte(
-                0x8009C60Eu,
-                0u
-            );
-
-            /*
-             * Conserver la destination "menu" puis selectionner
-             * directement l'etat 8. Le dispatcher 8002DF60 ajoutera
-             * lui-meme ses bits de service 0x80/0x40.
-             */
-            fm_memory_write_byte(
-                0x8009C60Du,
-                8u
-            );
-
-            fm_memory_write_byte(
-                0x8009C60Au,
-                8u
-            );
-
-            g_b73_state60a_after =
-                fm_memory_read_byte(
-                    0x8009C60Au
-                );
-
-            g_b73_state60d_after =
-                fm_memory_read_byte(
-                    0x8009C60Du
-                );
-
-            g_b73_menu_force_frame = frame;
-            g_b73_menu_force_request = 0u;
-            ++g_b73_menu_force_count;
+            g_str_intro_skip_pending = 1;
         }
 
 
@@ -20741,7 +20421,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.9\nvideo_mode=%08lX\n"
+                            "video_probe=B136.10\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20807,7 +20487,9 @@ int main(void)
                             "frame=%lu pc=%08lX gp0=%llu disabled=%ld mode=%08lX "
                             "gp1=%lu,%lu latch=%u,%u valid=%lu pick=%lu "
                             "nz=%lu/%lu/%lu/%lu/%lu/%lu "
-                            "menu=%lu/%lu/%lu c460=%08lX\n",
+                            "menu=%lu/%lu/%lu c460=%08lX "
+                            "title=%02lX/%02lX str=%lu/%lu pad=%04lX "
+                            "fade=%02lX/%02lX/%02lX\n",
                             (unsigned long)frame, (unsigned long)(cpu ? cpu->pc : 0u),
                             (unsigned long long)fm_gpu_gp0_count(),
                             (long)video_gpu.display_disabled,
@@ -20823,7 +20505,15 @@ int main(void)
                             (unsigned long)g_b73_hit_menu_init,
                             (unsigned long)g_b73_hit_menu_update,
                             (unsigned long)g_b73_hit_menu_destroy,
-                            (unsigned long)fm_memory_read_word(0x8009C460u));
+                            (unsigned long)fm_memory_read_word(0x8009C460u),
+                            (unsigned long)fm_memory_read_byte(0x8009C6A0u),
+                            (unsigned long)fm_memory_read_byte(0x8009C7A8u),
+                            (unsigned long)fm_memory_read_byte(0x8009C3EBu),
+                            (unsigned long)g_str_intro_skip_count,
+                            (unsigned long)(fm_memory_read_word(0x8009C72Cu) & 0xFFFFu),
+                            (unsigned long)fm_memory_read_byte(0x800EB24Cu),
+                            (unsigned long)fm_memory_read_byte(0x800EB24Du),
+                            (unsigned long)fm_memory_read_byte(0x800EB24Eu));
                         video_next = (video_next + 1u) % 16u;
                         if (video_count < 16u) ++video_count;
                         FILE *video_file = fopen("sdmc:/3ds/fm-new3ds/video-watch.txt", "wb");
@@ -21529,21 +21219,13 @@ int main(void)
          */
         if (memory_status == 0)
         {
-#if FM_PERF_PROFILE
-            uint32_t fade_store_pc = g_debug_last_store_pc;
-            g_debug_last_store_pc = 0u; /* Host bridge, not a guest store. */
-#endif
-            fm_service_fade_bridge();
-#if FM_PERF_PROFILE
-            g_debug_last_store_pc = fade_store_pc;
-#endif
+            fm_observe_fade();
 
             fm_update_game_state_debug();
 
             /*
-             * Des que le vrai boot atteint le lecteur STR, sauter
-             * uniquement la premiere video pour viser directement
-             * l'ecran titre/menu et obtenir une image jouable.
+             * Consume an explicit START request through the existing STR
+             * completion path; cold boot no longer arms an automatic skip.
              */
             fm_try_force_intro_stream_end(
                 game_running
