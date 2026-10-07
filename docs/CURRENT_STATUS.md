@@ -2,6 +2,20 @@
 
 Dernière mise à jour : **7 octobre 2026**.
 
+## Nouvelle partie : titre/menu validés, introduction à diagnostiquer
+
+L'essai utilisateur B136.11 valide Konami, l'attente START, l'animation du menu,
+la nouvelle partie et la saisie du nom. Après validation, la boîte de dialogue
+apparaît sans texte et la zone de scène contient des données graphiques
+corrompues. C460 reste à 00080410 sur plusieurs collectes ; le GPU continue.
+Ce constat ne prouve pas encore une cause unique CD, script ou MDEC.
+
+B136.12 ajoute intro-diag.txt en PROFILE : requête active lue à 8009C2A8,
+états CD et DataReady, état/script/glyphes du traceur existant, tête de liste
+texte et compteurs STR/MDEC. Lecture seule, même cadence 120 frames ; aucun
+skip supplémentaire ou changement de rendu. Reproduire après le nom et
+collecter intro-diag.txt, debug-latest.txt complet et c4b8-diag.txt.
+
 ## B136.11 : distinguer le STR du titre interactif
 
 L'essai B136.10 révèle une attente STR avant le titre SU : attendre START
@@ -11,7 +25,7 @@ START dans 80180390. Le bridge B75 est supprimé : après 24 updates, il
 rendait prématurément visibles les entrées que SU initialise masquées,
 pendant que « Appuyer sur START » reste affiché. Animation et visibilité
 appartiennent au code guest. Les fondus restent sans mutation hôte.
-Le rendu B136.11 et l'attente de START doivent encore être validés sur Azahar.
+Le rendu B136.11 et l'attente de START sont validés par l'essai utilisateur.
 
 ## Correction B136.9 après essai Azahar
 

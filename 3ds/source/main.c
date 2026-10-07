@@ -20207,7 +20207,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.11\nvideo_mode=%08lX\n"
+                            "video_probe=B136.12\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20263,6 +20263,86 @@ int main(void)
                             (unsigned long)b130_dma.dma2_transfer_count,
                             (unsigned long)b130_dma.dma2_last_nodes,
                             (unsigned long)b130_dma.dma2_last_words);
+
+                        /* B136.12: persist post-name evidence at the existing
+                         * debug cadence. Observe the LIVE request and text path. */
+                        FILE *intro_file = fopen("sdmc:/3ds/fm-new3ds/intro-diag.txt", "wb");
+                        if (intro_file)
+                        {
+                            FMTextTrace intro_text = {0};
+                            fm_runtime_text_trace_get(&intro_text);
+                            uint32_t intro_req = fm_memory_read_word(0x8009C2A8u);
+                            int intro_req_valid = intro_req >= 0x80000000u
+                                && intro_req <= 0x801FFFB8u;
+                            fprintf(intro_file,
+                                "probe=B136.12\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "state=%02lX/%02lX/%02lX/%02lX\n"
+                                "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
+                                "request=%08lX valid=%d\n"
+                                "cd_reading=%d lba=%08lX error=%ld\n"
+                                "dataready=pending:%lu active:%lu start:%lu done:%lu\n"
+                                "sector=calls:%lu ok:%lu fail:%lu last_lba:%08lX\n",
+                                (unsigned long)frame, (unsigned long)(cpu ? cpu->pc : 0u),
+                                (unsigned long)(cpu ? cpu->gpr[31] : 0u),
+                                (unsigned long)fm_memory_read_byte(0x8009C60Au),
+                                (unsigned long)fm_memory_read_byte(0x8009C60Cu),
+                                (unsigned long)fm_memory_read_byte(0x8009C60Du),
+                                (unsigned long)fm_memory_read_byte(0x8009C60Eu),
+                                (unsigned long)fm_memory_read_word(0x8009C460u),
+                                (unsigned long)fm_memory_read_word(0x8009C484u),
+                                (unsigned long)fm_memory_read_byte(0x80094BECu),
+                                (unsigned long)fm_memory_read_byte(0x8009492Du),
+                                (unsigned long)intro_req, intro_req_valid,
+                                (int)g_cd_reading, (unsigned long)g_cd_lba, (long)g_cd_error,
+                                (unsigned long)g_b34_ready_pending,
+                                (unsigned long)g_b34_ready_active,
+                                (unsigned long)g_b34_ready_started,
+                                (unsigned long)g_b34_ready_done,
+                                (unsigned long)g_b32_getsec_calls,
+                                (unsigned long)g_b32_getsec_ok,
+                                (unsigned long)g_b32_getsec_fail,
+                                (unsigned long)g_b32_last_lba);
+                            if (intro_req_valid)
+                            {
+                                static const unsigned req_offsets[] =
+                                    {8u, 0x10u, 0x18u, 0x1Cu, 0x20u, 0x24u, 0x28u, 0x2Cu, 0x34u, 0x40u};
+                                for (unsigned ri = 0u; ri < sizeof(req_offsets)/sizeof(req_offsets[0]); ++ri)
+                                    fprintf(intro_file, "req%02X=%08lX\n", req_offsets[ri],
+                                        (unsigned long)fm_memory_read_word(intro_req + req_offsets[ri]));
+                                fprintf(intro_file, "req_type=%02lX\n",
+                                    (unsigned long)fm_memory_read_byte(intro_req + 0x46u));
+                            }
+                            fprintf(intro_file,
+                                "text_ctx=%08lX ptr=%08lX flags=%08lX id=%08lX state=%08lX\n"
+                                "text_next=%08lX object=%08lX glyph_write=%08lX last_char=%08lX\n"
+                                "str_base=%08lX done=%02lX skip=%lu\n"
+                                "mdec_reset/in/out/insync/outsync=%lu/%lu/%lu/%lu/%lu\n",
+                                (unsigned long)intro_text.script_ctx, (unsigned long)intro_text.script_ptr,
+                                (unsigned long)intro_text.script_flags, (unsigned long)intro_text.script_id,
+                                (unsigned long)intro_text.script_state, (unsigned long)intro_text.script_next_byte,
+                                (unsigned long)intro_text.text_object, (unsigned long)intro_text.glyph_write,
+                                (unsigned long)intro_text.last_char,
+                                (unsigned long)fm_memory_read_word(0x8009C818u),
+                                (unsigned long)fm_memory_read_byte(0x8009C3EBu),
+                                (unsigned long)g_str_intro_skip_count,
+                                (unsigned long)g_b104_mdec_reset, (unsigned long)g_b104_mdec_in,
+                                (unsigned long)g_b104_mdec_out, (unsigned long)g_b104_mdec_in_sync,
+                                (unsigned long)g_b104_mdec_out_sync);
+                            for (unsigned ti = 0u; ti < 7u; ++ti)
+                                fprintf(intro_file, "text_path%u=%lu/%lu\n", ti,
+                                    (unsigned long)intro_text.gen[ti], (unsigned long)intro_text.outer[ti]);
+                            int text_head = (int16_t)fm_memory_read_half(0x800F11CCu);
+                            fprintf(intro_file, "text_list_head=%d\n", text_head);
+                            if (text_head >= 0 && text_head < 0x60)
+                            {
+                                uint32_t text_obj = 0x800F1210u + (uint32_t)text_head * 0x70u;
+                                fprintf(intro_file, "text_list_obj=%08lX flags=%04lX callback=%08lX\n",
+                                    (unsigned long)text_obj,
+                                    (unsigned long)fm_memory_read_half(text_obj + 8u),
+                                    (unsigned long)fm_memory_read_word(text_obj + 0x24u));
+                            }
+                            fclose(intro_file);
+                        }
 
                         /* Keep the last 16 diagnostic refreshes so the brief
                          * title/menu appearance can be compared with black.

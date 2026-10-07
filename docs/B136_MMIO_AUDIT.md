@@ -192,3 +192,23 @@ Partir d'un démarrage à froid, sans quick-load. Collecter un nouveau
 
 Si une étape échoue, conserver la trace et corriger son producteur. Aucun
 forçage de C460, req10 ou ready n'est ajouté. Aucun gain FPS n'est revendiqué.
+
+
+## B136.12 : diagnostic de l'introduction après le nom
+
+L'essai B136.11 confirme le titre seul avant START et items=01F après START,
+puis destruction normale du menu. Après le nom, le GPU continue et C460
+reste 00080410. La capture montre une boîte de dialogue vide et des pixels
+corrompus dans la scène. Les derniers octets de fondu sont FF/FF/00 :
+pas de second bridge de fondu réintroduit.
+
+Le dump startup montrait une requête fixe 800EB1B8. Le nouveau fichier
+intro-diag.txt suit le pointeur réel 8009C2A8 utilisé par 80013B44, avec
+bornes RAM avant lecture des champs. Il persiste aussi le traceur texte
+existant (script, objet, glyphes, compteurs generated/outer), la tête CC,
+le contexte STR et les compteurs MDEC. Cadence 120 frames PROFILE, réécriture
+bornée en taille, aucun changement des flags ou du pipeline guest.
+
+La cause du texte et de la scène corrompus reste à déterminer. Les vidéos
+STR/MDEC ne sont pas complètement prises en charge ; cela ne permet pas
+d'attribuer automatiquement à MDEC le défaut de texte.
