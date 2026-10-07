@@ -23,6 +23,11 @@
 
 #include "gpu_sw_renderer.h"
 
+/* B136.20: keep the lower screen blank, including PROFILE builds.
+ * Compile away console formatting and argument evaluation. fprintf and
+ * snprintf remain enabled for the SD diagnostic files. */
+#define printf(...) ((void)0)
+
 /* B28 helpers exported by source/fm_gpu.c. */
 extern uint64_t fm_gpu_fill_suppressed_count(void);
 extern void fm_gpu_last_fill_info(
@@ -20142,7 +20147,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.19\nvideo_mode=%08lX\n"
+                            "video_probe=B136.20\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20210,7 +20215,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.19\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.20\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"
@@ -20289,10 +20294,9 @@ int main(void)
                                     (unsigned long)fm_memory_read_half(text_obj + 8u),
                                     (unsigned long)fm_memory_read_word(text_obj + 0x24u));
                             }
-                            /* B136.19: post-name animation uses the native model
-                             * pipeline (5CDEC/53924), not the opening STR movie.
-                             * Read its load and visibility gates without forcing
-                             * readiness or changing guest state. */
+                            /* Retain the model-state evidence for later native
+                             * 3D scenes. Main state 2 instead uses the scripted
+                             * 2D scene slots below (2D038/30228/2FCA4). */
                             fprintf(intro_file,
                                 "scene=sub:%02lX pipeline:%02lX phase:%02lX current:%02lX intro:%02lX/%02lX\n",
                                 (unsigned long)fm_memory_read_byte(0x8009C60Bu),
@@ -20322,6 +20326,39 @@ int main(void)
                                 (unsigned long)fm_memory_read_word(0x80180004u),
                                 (unsigned long)fm_memory_read_word(0x8018019Cu),
                                 (unsigned long)fm_memory_read_word(0x80180420u));
+                            fprintf(intro_file,
+                                "script_scene=handler:%08lX id:%04lX opcode:%04lX next:%04lX ptr:%08lX bg:%04lX text_obj:%08lX\n",
+                                (unsigned long)fm_memory_read_word(0x80091F7Cu +
+                                    (fm_memory_read_byte(0x8009C60Au) & 0x1Fu) * 4u),
+                                (unsigned long)fm_memory_read_half(0x8009C628u),
+                                (unsigned long)fm_memory_read_half(0x8009C610u),
+                                (unsigned long)fm_memory_read_half(0x8009C622u),
+                                (unsigned long)fm_memory_read_word(0x8009C624u),
+                                (unsigned long)fm_memory_read_half(0x8009C630u),
+                                (unsigned long)fm_memory_read_word(0x8009C614u));
+                            for (unsigned si = 0u; si < 3u; ++si)
+                            {
+                                uint32_t slot = 0x800EC220u + si * 0x14u;
+                                uint32_t obj = fm_memory_read_word(slot);
+                                fprintf(intro_file,
+                                    "scene_slot%u=obj:%08lX control:%08lX w2:%08lX w3:%08lX w4:%08lX\n",
+                                    si, (unsigned long)obj,
+                                    (unsigned long)fm_memory_read_word(slot + 4u),
+                                    (unsigned long)fm_memory_read_word(slot + 8u),
+                                    (unsigned long)fm_memory_read_word(slot + 12u),
+                                    (unsigned long)fm_memory_read_word(slot + 16u));
+                                if (obj >= 0x80000000u && obj <= 0x801FFF90u)
+                                    fprintf(intro_file,
+                                        "scene_obj%u=flags:%08lX/%04lX color:%08lX pos:%08lX/%08lX tex:%08lX/%08lX\n",
+                                        si,
+                                        (unsigned long)fm_memory_read_word(obj + 4u),
+                                        (unsigned long)fm_memory_read_half(obj + 8u),
+                                        (unsigned long)fm_memory_read_word(obj + 12u),
+                                        (unsigned long)fm_memory_read_word(obj + 0x30u),
+                                        (unsigned long)fm_memory_read_word(obj + 0x34u),
+                                        (unsigned long)fm_memory_read_word(obj + 0x40u),
+                                        (unsigned long)fm_memory_read_word(obj + 0x44u));
+                            }
                             fm_media_dump(intro_file);
                             fclose(intro_file);
                         }
