@@ -20147,7 +20147,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.20\nvideo_mode=%08lX\n"
+                            "video_probe=B136.21\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20215,7 +20215,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.20\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.21\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"
@@ -20348,6 +20348,7 @@ int main(void)
                                     (unsigned long)fm_memory_read_word(slot + 12u),
                                     (unsigned long)fm_memory_read_word(slot + 16u));
                                 if (obj >= 0x80000000u && obj <= 0x801FFF90u)
+                                {
                                     fprintf(intro_file,
                                         "scene_obj%u=flags:%08lX/%04lX color:%08lX pos:%08lX/%08lX tex:%08lX/%08lX\n",
                                         si,
@@ -20358,6 +20359,51 @@ int main(void)
                                         (unsigned long)fm_memory_read_word(obj + 0x34u),
                                         (unsigned long)fm_memory_read_word(obj + 0x40u),
                                         (unsigned long)fm_memory_read_word(obj + 0x44u));
+                                    uint32_t desc = fm_memory_read_word(obj + 0x4Cu);
+                                    fprintf(intro_file,
+                                        "scene_data%u=desc:%08lX sequence:%08lX base:%08lX frame:%04lX delay:%04lX anim:%08lX callback:%08lX\n",
+                                        si, (unsigned long)desc,
+                                        (unsigned long)fm_memory_read_word(obj + 0x50u),
+                                        (unsigned long)fm_memory_read_word(obj + 0x54u),
+                                        (unsigned long)fm_memory_read_half(obj + 0x58u),
+                                        (unsigned long)fm_memory_read_half(obj + 0x5Au),
+                                        (unsigned long)fm_memory_read_word(obj + 0x64u),
+                                        (unsigned long)fm_memory_read_word(obj + 0x24u));
+                                    if (desc >= 0x80000000u && desc <= 0x801FFFE0u)
+                                    {
+                                        fprintf(intro_file, "scene_desc%u=", si);
+                                        for (unsigned wi = 0u; wi < 8u; ++wi)
+                                            fprintf(intro_file, "%s%08lX", wi ? "/" : "",
+                                                (unsigned long)fm_memory_read_word(desc + wi * 4u));
+                                        fputc('\n', intro_file);
+                                    }
+                                }
+                            }
+                            FMDialogueLayerTrace scene_trace = {0};
+                            fm_runtime_dialogue_layer_trace(&scene_trace);
+                            fprintf(intro_file,
+                                "scene_render=walk:%lu nonempty:%lu object:%lu primitive:%lu head:%ld table:%08lX/%08lX\n",
+                                (unsigned long)scene_trace.category2_calls,
+                                (unsigned long)scene_trace.category2_with_head,
+                                (unsigned long)scene_trace.object_render_calls,
+                                (unsigned long)scene_trace.primitive_calls,
+                                (long)(int16_t)fm_memory_read_half(0x800F11C4u),
+                                (unsigned long)fm_memory_read_word(0x800923E4u),
+                                (unsigned long)fm_memory_read_word(0x8009C860u));
+                            /* The observed background objects select CLUTs at
+                             * x=640, y=208..210. Read their 256 entries without
+                             * modifying renderer state. */
+                            for (unsigned pi = 0u; pi < 3u; ++pi)
+                            {
+                                uint32_t nonzero = 0u, hash = 2166136261u;
+                                for (unsigned xi = 0u; xi < 256u; ++xi)
+                                {
+                                    uint16_t pixel = vram[(208u + pi) * 1024u + 640u + xi];
+                                    if (pixel & 0x7FFFu) ++nonzero;
+                                    hash = (hash ^ pixel) * 16777619u;
+                                }
+                                fprintf(intro_file, "scene_clut%u=nz:%lu hash:%08lX\n", pi,
+                                    (unsigned long)nonzero, (unsigned long)hash);
                             }
                             fm_media_dump(intro_file);
                             fclose(intro_file);
