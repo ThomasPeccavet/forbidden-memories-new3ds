@@ -7,6 +7,11 @@
 extern "C" {
 #endif
 
+typedef struct {
+    uint64_t decode_ms, first_ms, last_ms;
+    uint32_t frames;
+} MDECPerf;
+void mdec_perf_get(MDECPerf *out);
 void mdec_init(void);
 uint32_t mdec_read(uint32_t addr);
 void mdec_write(uint32_t addr, uint32_t value);

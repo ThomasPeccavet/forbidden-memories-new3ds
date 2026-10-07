@@ -10,6 +10,7 @@
 #include <string.h>
 uint32_t g_debug_last_store_pc;
 void fm_gpu_gp0_write(uint32_t v) { (void)v; assert(0); }
+void fm_gpu_gp0_words(const uint32_t *v, uint32_t n) { (void)v; (void)n; assert(0); }
 void fm_gpu_gp1_write(uint32_t v) { (void)v; assert(0); }
 uint32_t fm_gpu_status(void) { assert(0); return 0; }
 void fm_gpu_b13532_profile_reset(void) { assert(0); }
@@ -160,6 +161,49 @@ static void mdec_test(void)
     for (unsigned i = 0; i < 192; ++i) assert(fm_memory_read_word(0x1F801820) == 0x80808080);
     MDECDebugState m; mdec_debug_get_state(&m); assert(m.decode_macroblocks == 1 && m.decode_blocks == 6);
     assert(!m.dma_read_underflows);
+    /* Forward bursts split at the RAM mirror boundary; backward DMA retains
+     * the word path and decrements MADR. Both must deliver the same RGB bytes. */
+    for (unsigned backwards = 0; backwards < 2; ++backwards) {
+        fm_memory_write_word(0x1F801820, 0x30000006);
+        for (unsigned i = 0; i < 6; ++i) fm_memory_write_word(0x1F801820, 0xFE000000);
+        fm_memory_write_word(0x1F801090, backwards ? 4 : 0x1FFFFC);
+        fm_memory_write_word(0x1F801094, 192);
+        fm_memory_write_word(0x1F801098, 0x11000000 | (backwards ? 2 : 0));
+        for (unsigned i = 0; i < 192; ++i) {
+            unsigned addr = ((backwards ? 4 : 0x1FFFFC) + (backwards ? -4u * i : 4u * i)) & 0x1FFFFC;
+            assert(fm_memory_read_word(0x80000000 | addr) == 0x80808080);
+        }
+        assert(!(fm_memory_read_word(0x1F801098) & 0x01000000));
+        unsigned end = ((backwards ? 4 : 0x1FFFFC) + (backwards ? -4u * 192 : 4u * 192)) & 0x1FFFFC;
+        assert(fm_memory_read_word(0x1F801090) == end);
+    }
+    /* Bursts cannot read past the FIFO and match single-word reads at every
+     * supported output depth, including a final short burst. */
+    for (unsigned depth = 0; depth < 4; ++depth) {
+        uint32_t ref[192], burst[192]; unsigned words = depth < 2 ? 96 : (depth == 2 ? 192 : 128);
+        for (unsigned pass = 0; pass < 2; ++pass) {
+            mdec_write(0x1F801820, 0x20000006 | depth << 27);
+            for (unsigned i = 0; i < 6; ++i) mdec_write(0x1F801820, 0xFE000000);
+            /* Mono depth decodes six independent luma blocks. */
+            if (!pass) for (unsigned i = 0; i < words; ++i) ref[i] = mdec_dma_read_word();
+            else {
+                unsigned offset = 0;
+                while (offset < words) {
+                    unsigned n = mdec_dma_read_words(burst + offset, 7);
+                    assert(n && n <= 7); offset += n;
+                }
+                assert(offset == words && !memcmp(ref, burst, words * 4u));
+                assert(mdec_dma_read_words(burst, 1) == 0);
+            }
+        }
+    }
+    const uint8_t bytes[] = {1, 2, 3, 4};
+    assert(fm_memory_copy_to_ram(0xA0001000, bytes, 4));
+    assert(fm_memory_read_word(0x80001000) == 0x04030201);
+    assert(!fm_memory_copy_to_ram(0x801FFFFF, bytes, 4));
+    assert(!fm_memory_copy_to_ram(0x1F801820, bytes, 4));
+    assert(!fm_memory_gpu_send_words(0x801FFFFC, 2));
+    assert(!fm_memory_gpu_send_words(0x80001001, 1));
     fm_memory_init(ram, sizeof(ram)); assert(!fm_memory_mdec_take_callback(&cb, &gp));
     assert(fm_memory_read_word(0x1F801088) == 0 && fm_memory_read_word(0x1F801098) == 0);
 }

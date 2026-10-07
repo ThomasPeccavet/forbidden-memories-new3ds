@@ -296,3 +296,27 @@ refusée, savestates média non intégrés. Les fixtures ne prouvent pas la
 lecture du flux FR ni la vitesse de décodage sur 3DS. Essai utilisateur
 nécessaire depuis le boot puis nouvelle partie/nom ; collecter intro-diag
 et video-watch pour distinguer secteur, frame, VLC, MDEC, présentation et DSP.
+
+## B136.16 : débit des transferts STR / MDEC / GPU
+
+Vidéo d'ouverture validée par l'utilisateur sur B136.15, mais 5–10 FPS.
+Le compteur `mdec_in=155`, `out=3060` et environ 9 millions de mots GP0
+montrent l'importance du chemin des uploads. Ce n'est pas une mesure du
+bottleneck : B136.16 ajoute la durée réelle et le temps de décodage MDEC.
+
+- STR : memcpy RAM borné après réservation de toute la frame ; marqueurs,
+  disposition et backpressure conservés.
+- DMA0/1 : bursts contigus bornés à la RAM et au FIFO ; chemin par mot pour
+  les transferts inversés, MADR/CHCR/DICR/callback de fin identiques.
+- FIFO sortie MDEC : memcpy des mots disponibles, conservation du dernier
+  mot partiel, compteur et événement OUTPUT_DRAINED uniques.
+- GP0 : commandes conservées ; payload A0 copié par ligne avec l'API bulk
+  du renderer, qui maintient le dirty-state et le miroir supersamplé.
+  Dernier pixel impair, commandes après upload et wrap VRAM testés contre
+  le vrai chemin de production par mot, avec bursts de tailles variables.
+- Codec IDCT/RLE/quantification et timing CD inchangés. Aucun frame-skip.
+
+47 tests host. Le benchmark upload synthétique (100 frames / 20 stripes
+24x256) montre ~24 ms par mot, ~3 ms par bloc sur l'hôte. Gain de FPS à
+vérifier sous Azahar ; `movie_perf` distingue cadence couleur MDEC et coût
+codec. Sortie sonore et animation après le nom restent à traiter ensuite.

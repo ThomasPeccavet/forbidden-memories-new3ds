@@ -591,7 +591,7 @@ static int b110_get_rank(
  * STR intro skip - legacy explicit request
  * ============================================================
  *
- * B136.15: automatic skip is disabled. Raw STR sectors now feed the native
+ * B136.16: automatic skip is disabled. Raw STR sectors now feed the native
  * ring/Huffman/MDEC player. Fresh boots and resets start with no skip request.
  */
 static int g_str_intro_skip_pending = 0;
@@ -10055,6 +10055,7 @@ static int fm_hle_gpu_load_image(CPUState *cpu)
     fm_gpu_gp0_write((y << 16) | x);
     fm_gpu_gp0_write((h << 16) | w);
 
+    if (!fm_memory_gpu_send_words(srcp, (pixels + 1u) / 2u))
     for (uint32_t i = 0u; i < pixels; i += 2u)
     {
         uint32_t lo = cpu->read_half(srcp + i * 2u);
@@ -20137,7 +20138,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.15\nvideo_mode=%08lX\n"
+                            "video_probe=B136.16\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20205,7 +20206,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.15\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.16\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"

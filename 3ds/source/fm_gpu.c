@@ -5315,6 +5315,41 @@ void fm_gpu_init(
  * ============================================================
  */
 
+/* B136.16: preserve the GP0 stream, but copy upload payloads by VRAM row.
+ * The renderer owns dirty rows / any supersampled mirror; its bulk transfer
+ * keeps those coherent without two writes and a dirty call per pixel. */
+void fm_gpu_gp0_words(const uint32_t *words, uint32_t count)
+{
+    while (count) {
+        if (g_state != FM_GPU_VRAM_WRITE || !g_upload_pixels) {
+            uint32_t value;
+            memcpy(&value, words++, sizeof(value));
+            fm_gpu_gp0_write(value); --count;
+            continue;
+        }
+        uint32_t pixels = g_upload_pixels - g_upload_index;
+        uint32_t nwords = (pixels + 1u) / 2u;
+        if (nwords > count) nwords = count;
+        if (pixels > nwords * 2u) pixels = nwords * 2u;
+        const uint16_t *src = (const uint16_t *)words;
+        uint32_t copied = 0;
+        while (copied < pixels) {
+            unsigned col = g_upload_index % g_upload_w;
+            unsigned row = g_upload_index / g_upload_w;
+            unsigned n = g_upload_w - col;
+            if (n > pixels - copied) n = pixels - copied;
+            sw_vram_transfer_in((g_upload_x + col) & 1023u,
+                (g_upload_y + row) & 511u, n, 1, src + copied);
+            g_upload_index += n; copied += n;
+        }
+        g_gp0_count += nwords; g_upload_data_words += nwords;
+        words += nwords; count -= nwords;
+        if (g_upload_index >= g_upload_pixels) {
+            g_state = FM_GPU_IDLE; g_has_frame = 1;
+        }
+    }
+}
+
 void fm_gpu_gp0_write(
     uint32_t value
 )

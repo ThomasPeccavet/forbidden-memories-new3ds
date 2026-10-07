@@ -46,8 +46,8 @@ static int publish_frame(void)
     for (unsigned i = 0; i < str.count; ++i) {
         uint32_t header = base + (start + i) * 32u;
         uint32_t data = base + slots * 32u + (start + i) * STR_PAYLOAD;
-        for (unsigned n = 0; n < 32u; ++n) fm_memory_write_byte(header + n, str.headers[i][n]);
-        for (unsigned n = 0; n < STR_PAYLOAD; ++n) fm_memory_write_byte(data + n, str.data[i][n]);
+        fm_memory_copy_to_ram(header, str.headers[i], 32u);
+        fm_memory_copy_to_ram(data, str.data[i], STR_PAYLOAD);
         fm_memory_write_half(header, i == 0u ? 2u : 3u);
     }
     fm_memory_write_word(0x800F70D4u, start + str.count);
@@ -157,6 +157,13 @@ uint8_t fm_media_cd_read(uint32_t addr)
 void fm_media_dump(FILE *f)
 {
     MDECDebugState m; mdec_debug_get_state(&m);
+    MDECPerf perf; mdec_perf_get(&perf);
+    uint64_t elapsed = perf.last_ms - perf.first_ms;
+    fprintf(f, "movie_perf=decoded:%lu elapsed_ms:%llu decode_ms:%llu fps_x100:%llu\n",
+        (unsigned long)perf.frames, (unsigned long long)elapsed,
+        (unsigned long long)perf.decode_ms,
+        (unsigned long long)(elapsed && perf.frames > 1u
+            ? (perf.frames - 1u) * 100000ull / elapsed : 0));
     fprintf(f, "media_raw=%lu next=%08lX errors=%lu active=%d\n"
         "xa_decoded=%lu pcm_frames=%lu filtered=%lu dsp=%08lX queued=%lu\n"
         "str_sectors=%lu frames=%lu invalid=%lu stalls=%lu size=%lux%lu\n"

@@ -2,6 +2,34 @@
 
 Dernière mise à jour : **7 octobre 2026**.
 
+## B136.16 : transferts vidéo par blocs
+
+Essai utilisateur B136.15 : la vidéo entre Konami et le titre fonctionne,
+mais à environ 5–10 FPS. Le XA est décodé (387 secteurs / 780192 frames PCM)
+et ndspInit échoue avec D880A7FA ; sortie audio toujours non validée.
+La scène après le nom n'affiche pas encore la vidéo/animation attendue.
+La priorité utilisateur est maintenant la fluidité de la vidéo d'ouverture.
+
+B136.16 remplace les copies STR octet par octet par des copies RAM bornées,
+active les bursts DMA0/1 et copie le FIFO MDEC de sortie par bloc. Les uploads
+GPU DMA2 et LoadImage passent par un flux GP0 groupé : en phase A0, copie
+par ligne via le renderer, avec conservation du dirty-state et du miroir.
+Le chemin par mot reste disponible pour les DMA inversés, débordements RAM
+et sources LoadImage non alignées. Aucun saut de frame ni changement IDCT.
+
+47 tests host passent. Comparaison bit à bit des chemins GP0, uploads RGB24,
+stripes, transferts partiels, pixels impairs et débordements VRAM ; MDEC
+word/burst, DMA inversés et rebouclage RAM. Un benchmark synthétique sur
+l'hôte mesure environ 24 ms contre 3 ms pour les uploads de 100 images ;
+ce résultat ne prédit pas les FPS dans Azahar ou sur New3DS.
+
+intro-diag conserve `movie_perf=decoded/elapsed_ms/decode_ms/fps_x100` après
+la vidéo. FPS = cadence des décodages MDEC couleur entre le premier et le
+dernier, pas cadence du framebuffer Azahar. `decode_ms` mesure le codec
+seul ; `elapsed_ms` inclut lecture, lecteur/Huffman, uploads et attente.
+Retester depuis un boot neuf, laisser finir la vidéo sans START et collecter
+intro-diag au titre. L'amélioration réelle reste à confirmer sur cet essai.
+
 ## B136.15 : décodage XA et lecteur STR/MDEC
 
 L'utilisateur confirme le texte après validation du nom sur B136.14.

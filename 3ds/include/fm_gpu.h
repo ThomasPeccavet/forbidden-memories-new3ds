@@ -22,6 +22,9 @@ void fm_gpu_gp0_write(
     uint32_t value
 );
 
+/* Same GP0 stream, contiguous little-endian words (including commands). */
+void fm_gpu_gp0_words(const uint32_t *words, uint32_t count);
+
 /*
  * Port GP1 :
  *

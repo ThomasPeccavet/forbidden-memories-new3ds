@@ -17,6 +17,10 @@ void     fm_memory_write_half(uint32_t addr, uint16_t value);
 uint8_t  fm_memory_read_byte(uint32_t addr);
 void     fm_memory_write_byte(uint32_t addr, uint8_t value);
 
+/* B136.16: bounded RAM-only transfers; return zero on invalid spans. */
+int fm_memory_copy_to_ram(uint32_t address, const void *data, size_t size);
+int fm_memory_gpu_send_words(uint32_t address, uint32_t words);
+
 /* B136.0: dump exact writes touching startup state words. */
 void fm_memory_watch_dump(const char *path);
 

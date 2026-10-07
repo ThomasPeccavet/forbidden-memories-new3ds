@@ -2,6 +2,7 @@
 #include "psx_align.h"
 #include "pst_wire.h"
 #include "fm_mdec_clock.h"
+#include <3ds.h>
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -645,9 +646,12 @@ static void append_color_macroblock(const int16_t *crblk, const int16_t *cbblk,
  * this per display-frame to tell "MDEC is actively producing frames" (FMV)
  * from idle. */
 static volatile uint32_t g_mdec_decode_count = 0;
+static MDECPerf perf;
+void mdec_perf_get(MDECPerf *out) { if (out) *out = perf; }
 uint32_t mdec_get_decode_count(void) { return g_mdec_decode_count; }
 
 static void execute_decode(void) {
+    uint64_t start_ms = osGetTime();
     uint32_t pos = 0;
     uint32_t end = mdec.input_count;
     g_mdec_decode_count++;
@@ -691,6 +695,9 @@ static void execute_decode(void) {
     mdec.decode_input_pos = pos;
     /* FMV detector: stamp colour (15/24-bit) decodes only — streamed video.
      * The 4/8-bit luma path above is texture decompression, not video. */
+    uint64_t end_ms = osGetTime();
+    if (!perf.frames) perf.first_ms = end_ms;
+    perf.last_ms = end_ms; perf.decode_ms += end_ms - start_ms; ++perf.frames;
     mdec_last_color_decode_frame = fm_mdec_host_frame;
     mdec_last_color_decode_cycle = fm_mdec_host_cycles;
     trace_event(MDEC_EVT_DECODE_DONE, mdec.output_size);
@@ -792,6 +799,7 @@ uint64_t mdec_color_age_cycles(void) {
 }
 
 void mdec_init(void) {
+    memset(&perf, 0, sizeof(perf));
     free(mdec.input); free(mdec.output); /* 3DS soft reset releases old FIFOs. */
     memset(&mdec, 0, sizeof(mdec));
     memset(mdec_trace, 0, sizeof(mdec_trace));
@@ -924,7 +932,8 @@ uint32_t mdec_dma_write_words(const uint32_t *src, uint32_t max_words) {
             uint32_t n = max_words - moved;
             if (n > need_words) n = need_words;
             for (uint32_t i = 0; i < n; i++) {
-                uint32_t value = src[moved++];
+                uint32_t value;
+                memcpy(&value, src + moved++, sizeof(value));
                 mdec.input[mdec.input_count++] = (uint16_t)value;
                 if (mdec.input_count < mdec.expected_halfwords) {
                     mdec.input[mdec.input_count++] = (uint16_t)(value >> 16);
@@ -935,7 +944,8 @@ uint32_t mdec_dma_write_words(const uint32_t *src, uint32_t max_words) {
             }
             continue;
         }
-        write_data(src[moved++]);
+        uint32_t value; memcpy(&value, src + moved++, sizeof(value));
+        write_data(value);
     }
     return moved;
 }
@@ -971,10 +981,20 @@ uint32_t mdec_dma_read_word(void) {
 
 /* Drain up to `max_words` into a contiguous LE destination (DMA ch1). */
 uint32_t mdec_dma_read_words(uint32_t *dst, uint32_t max_words) {
-    uint32_t moved = 0;
-    while (moved < max_words && mdec.output_pos < mdec.output_size) {
-        dst[moved] = mdec_dma_read_word();
-        moved++;
+    uint32_t available = mdec.output_size - mdec.output_pos;
+    uint32_t moved = available / 4u;
+    if (moved > max_words) moved = max_words;
+    if (moved) {
+        memcpy(dst, mdec.output + mdec.output_pos, moved * 4u);
+        mdec.output_pos += moved * 4u; mdec.dma_out_words += moved;
+        if (mdec.output_pos >= mdec.output_size) {
+            trace_event(MDEC_EVT_OUTPUT_DRAINED, mdec.output_size);
+            clear_output();
+        }
+    }
+    if (moved < max_words && mdec.output_pos < mdec.output_size) {
+        uint32_t value = mdec_dma_read_word();
+        memcpy(dst + moved++, &value, sizeof(value));
     }
     return moved;
 }

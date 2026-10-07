@@ -1519,10 +1519,23 @@ static void fm_mdec_dma_service(void)
         if (!(reg[2] & 0x01000000u)) continue;
         uint32_t left = g_mdec_dma_remaining[ch];
         while (left && (ch == 0u ? mdec_dma_write_ready() : mdec_dma_read_ready())) {
-            if (!ch) mdec_dma_write_word(fm_dma_ram_read_word(reg[0]));
-            else fm_dma_ram_write_word(reg[0], mdec_dma_read_word());
-            reg[0] = (reg[0] + ((reg[2] & 2u) ? -4u : 4u)) & 0x001FFFFCu;
-            --left;
+            uint32_t moved = 0;
+            uint32_t offset = reg[0] & 0x001FFFFCu;
+            if (!(reg[2] & 2u) && g_ram && offset < g_ram_size) {
+                uint32_t span = (PSX_RAM_SIZE - offset) / 4u;
+                if (span > (g_ram_size - offset) / 4u) span = (g_ram_size - offset) / 4u;
+                if (span > left) span = left;
+                if (span) moved = ch
+                    ? mdec_dma_read_words((uint32_t *)(g_ram + offset), span)
+                    : mdec_dma_write_words((const uint32_t *)(g_ram + offset), span);
+            }
+            if (!moved) {
+                if (!ch) mdec_dma_write_word(fm_dma_ram_read_word(reg[0]));
+                else fm_dma_ram_write_word(reg[0], mdec_dma_read_word());
+                moved = 1;
+            }
+            reg[0] = (offset + ((reg[2] & 2u) ? -4u * moved : 4u * moved)) & 0x001FFFFCu;
+            left -= moved;
         }
         g_mdec_dma_remaining[ch] = left;
         if (!left) {
@@ -1533,6 +1546,25 @@ static void fm_mdec_dma_service(void)
     }
     g_mdec_dma_servicing = 0;
 }
+int fm_memory_copy_to_ram(uint32_t address, const void *data, size_t size)
+{
+    uint32_t phys = address & 0x1FFFFFFFu, offset = phys & 0x001FFFFFu;
+    if (!data || !g_ram || phys >= PSX_RAM_MIRROR_END
+        || offset > g_ram_size || size > g_ram_size - offset
+        || size > PSX_RAM_SIZE - offset) return 0;
+    memcpy(g_ram + offset, data, size);
+    return 1;
+}
+int fm_memory_gpu_send_words(uint32_t address, uint32_t words)
+{
+    uint32_t phys = address & 0x1FFFFFFFu, offset = phys & 0x001FFFFFu;
+    if ((address & 3u) || !g_ram || phys >= PSX_RAM_MIRROR_END
+        || offset > g_ram_size || words > (g_ram_size - offset) / 4u
+        || words > (PSX_RAM_SIZE - offset) / 4u) return 0;
+    fm_gpu_gp0_words((const uint32_t *)(g_ram + offset), words);
+    return 1;
+}
+
 static int fm_mdec_dma_register(uint32_t address)
 { return address >= 0x1F801080u && address < 0x1F8010A0u && (address & 15u) < 12u; }
 static uint32_t fm_mdec_dma_read(uint32_t address)
@@ -2241,7 +2273,10 @@ static int fm_dma2_block(void)
         &
         0x001FFFFCu;
 
-    for (
+    if (!step_backward && fm_memory_gpu_send_words(addr, words)) {
+        g_dma2_word_count += words;
+        addr = (addr + words * 4u) & 0x001FFFFCu;
+    } else for (
         uint32_t i = 0;
         i < words;
         ++i

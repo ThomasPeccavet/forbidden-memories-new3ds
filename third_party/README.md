@@ -9,7 +9,8 @@ these files; the port does not relicense them.
 
 3DS changes: replace the dependency on the full PC peripheral clock with
 two local telemetry counters (`fm_mdec_clock.h`), rename those counter
-references, and release old input/output FIFOs when soft resetting.
+references, release old input/output FIFOs when soft resetting, use bounded
+DMA bursts / bulk FIFO output, and expose a low-frequency decode timer.
 The RLE, quantization, IDCT and RGB output algorithms are unchanged.
 
 The separately written XA decoder follows the [XA format specification](https://psx-spx.consoledev.net/ps1/cdr/cdromformat/).
