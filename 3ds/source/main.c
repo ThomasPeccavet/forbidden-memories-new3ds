@@ -157,6 +157,11 @@ static uint32_t g_cd_sector_count = 0;
 
 static int g_cd_reading = 0;
 static int g_cd_error = 0;
+/* ReadS/XA transport only; PCM ADPCM decoding remains unimplemented. */
+static int g_cd_streaming = 0;
+static uint8_t g_cd_mode = 0u;
+static uint64_t g_cd_stream_last_ms = 0u;
+static uint32_t g_cd_stream_fraction = 0u;
 
 
 /*
@@ -6743,6 +6748,59 @@ static uint32_t fm_bcd_to_u32(uint8_t value)
         (value & 0x0Fu);
 }
 
+/* B136.14: ReadS runs independently of data DMA/GetSector. Keep a
+ * clocked silent XA position so native GetlocL waits can complete. */
+static void fm_cd_stream_tick(uint64_t now_ms, int running)
+{
+    uint64_t elapsed = now_ms >= g_cd_stream_last_ms
+        ? now_ms - g_cd_stream_last_ms : 0u;
+    g_cd_stream_last_ms = now_ms;
+    if (!g_cd_streaming || !running) return;
+    uint32_t rate = (g_cd_mode & 0x80u) ? 150u : 75u;
+    /* Bound to the representable 99:59:74 MSF range. */
+    if (elapsed > 6000000u) elapsed = 6000000u;
+    uint64_t units = elapsed * rate + g_cd_stream_fraction;
+    uint64_t next = (uint64_t)g_cd_lba + units / 1000u;
+    g_cd_stream_fraction = (uint32_t)(units % 1000u);
+    g_cd_lba = next > 449849u ? 449849u : (uint32_t)next;
+}
+
+static void fm_cd_apply_command(CPUState *cpu, uint32_t command,
+    uint32_t params, int raw_mode, uint64_t now_ms)
+{
+    fm_cd_stream_tick(now_ms, 1);
+    /* 7BA00 wraps Pause/SetMode/Setloc/command; params are its CdlLOC,
+     * rather than the hardware ReadS parameter (which has no arguments). */
+    if (raw_mode >= 0) g_cd_mode = (uint8_t)raw_mode;
+    if ((command == 0x02u || raw_mode >= 0) && params != 0u)
+    {
+        uint32_t m = fm_bcd_to_u32(cpu->read_byte(params));
+        uint32_t sec = fm_bcd_to_u32(cpu->read_byte(params + 1u));
+        uint32_t f = fm_bcd_to_u32(cpu->read_byte(params + 2u));
+        uint32_t absolute = (m * 60u + sec) * 75u + f;
+        g_cd_lba = absolute >= 150u ? absolute - 150u : 0u;
+        g_cd_pos = 2048u;
+    }
+    if (command == 0x0Eu && raw_mode < 0 && params != 0u)
+        g_cd_mode = cpu->read_byte(params);
+    if (command == 0x1Bu || command == 0x06u)
+    {
+        g_cd_streaming = command == 0x1Bu;
+        g_cd_reading = command == 0x06u;
+        g_cd_stream_last_ms = now_ms;
+        g_cd_stream_fraction = 0u;
+        g_cd_pos = 2048u;
+        g_cd_error = 0;
+    }
+    else if (command == 0x08u || command == 0x09u || command == 0x0Au)
+    {
+        g_cd_streaming = 0;
+        g_cd_reading = 0;
+        g_cd_stream_fraction = 0u;
+        if (command == 0x0Au) g_cd_mode = 0u;
+    }
+}
+
 static void fm_b33_fill_cd_result(CPUState *cpu, uint32_t command)
 {
     if (!cpu)
@@ -6792,7 +6850,7 @@ static void fm_b33_fill_cd_result(CPUState *cpu, uint32_t command)
 static int fm_b33_schedule_cd_callback(
     CPUState *cpu, uint32_t command, uint32_t callback,
     uint32_t resume_pc, uint32_t params, uint32_t context,
-    uint32_t return_value, uint32_t frame
+    uint32_t return_value, uint32_t frame, int raw_mode
 )
 {
     if (!cpu) return 0;
@@ -6808,6 +6866,7 @@ static int fm_b33_schedule_cd_callback(
         cpu->gpr[0] = 0u;
         return 1;
     }
+    fm_cd_apply_command(cpu, command, params, raw_mode, osGetTime());
     g_b33_pending = 1u;
     g_b33_pending_cmd = command & 0xFFu;
     g_b33_pending_callback = callback;
@@ -6830,6 +6889,7 @@ static int fm_b33_deliver_cd_callback(CPUState *cpu, uint32_t frame)
     uint32_t callback = g_b33_pending_callback;
     uint32_t callback_gp = g_b33_pending_gp;
     g_b33_pending = 0u;
+    fm_cd_stream_tick(osGetTime(), 1);
     fm_b33_fill_cd_result(cpu, command);
     g_b66_last_cmd = command;
     g_b66_last_sync_before = cpu->read_byte(0x80094BECu);
@@ -7174,27 +7234,6 @@ static int fm_execute_guest_vblank_callback(
             g_b13594_low_queue_before = irq_cpu.read_word(0x800F7270u);
             g_cd_last_cmd = command;
 
-            if (command == 0x02u && params != 0u)
-            {
-                uint32_t minute = fm_bcd_to_u32(irq_cpu.read_byte(params + 0u));
-                uint32_t second = fm_bcd_to_u32(irq_cpu.read_byte(params + 1u));
-                uint32_t frame_cd = fm_bcd_to_u32(irq_cpu.read_byte(params + 2u));
-                uint32_t absolute_sector = ((minute * 60u + second) * 75u) + frame_cd;
-                g_cd_lba = absolute_sector >= 150u ? absolute_sector - 150u : 0u;
-                g_cd_pos = 2048u;
-            }
-
-            if (command == 0x06u)
-            {
-                g_cd_reading = 1;
-                g_cd_pos = 2048u;
-                g_cd_error = 0;
-            }
-            else if (command == 0x09u)
-            {
-                g_cd_reading = 0;
-            }
-
             fm_b33_schedule_cd_callback(
                 &irq_cpu,
                 command,
@@ -7203,7 +7242,7 @@ static int fm_execute_guest_vblank_callback(
                 params,
                 0u,
                 0u,
-                        frame
+                frame, -1
             );
 
             continue;
@@ -7223,33 +7262,6 @@ static int fm_execute_guest_vblank_callback(
             g_b34_last_command = command;
             g_cd_last_cmd = command;
 
-            if (command == 0x02u && params != 0u)
-            {
-                uint32_t minute = fm_bcd_to_u32(irq_cpu.read_byte(params + 0u));
-                uint32_t second = fm_bcd_to_u32(irq_cpu.read_byte(params + 1u));
-                uint32_t frame_cd = fm_bcd_to_u32(irq_cpu.read_byte(params + 2u));
-                uint32_t absolute_sector =
-                    ((minute * 60u + second) * 75u) + frame_cd;
-
-                g_cd_lba =
-                    absolute_sector >= 150u
-                        ? absolute_sector - 150u
-                        : 0u;
-
-                g_cd_pos = 2048u;
-            }
-
-            if (command == 0x06u)
-            {
-                g_cd_reading = 1;
-                g_cd_pos = 2048u;
-                g_cd_error = 0;
-            }
-            else if (command == 0x09u)
-            {
-                g_cd_reading = 0;
-            }
-
             fm_b33_schedule_cd_callback(
                 &irq_cpu,
                 command,
@@ -7258,7 +7270,7 @@ static int fm_execute_guest_vblank_callback(
                 params,
                 context,
                 1u,
-                        frame
+                frame, mode
             );
 
             continue;
@@ -8513,6 +8525,10 @@ static void fm_cd_hle_reset(void)
     g_cd_sector_count = 0;
     g_cd_reading = 0;
     g_cd_error = 0;
+    g_cd_streaming = 0;
+    g_cd_mode = 0u;
+    g_cd_stream_last_ms = 0u;
+    g_cd_stream_fraction = 0u;
 
     g_cd_search_path[0] = '\0';
     g_cd_search_lba = 0;
@@ -12236,6 +12252,7 @@ int main(void)
     while (aptMainLoop())
     {
         uint64_t b105_loop_start_ms = osGetTime();
+        fm_cd_stream_tick(b105_loop_start_ms, game_running);
 
         int b131_presented_this_loop = 0;
 
@@ -14309,27 +14326,6 @@ int main(void)
                     g_b13594_low_queue_before = cpu->read_word(0x800F7270u);
                     g_cd_last_cmd = command;
 
-                    if (command == 0x02u && params != 0u)
-                    {
-                        uint32_t minute = fm_bcd_to_u32(cpu->read_byte(params + 0u));
-                        uint32_t second = fm_bcd_to_u32(cpu->read_byte(params + 1u));
-                        uint32_t frame_cd = fm_bcd_to_u32(cpu->read_byte(params + 2u));
-                        uint32_t absolute_sector = ((minute * 60u + second) * 75u) + frame_cd;
-                        g_cd_lba = absolute_sector >= 150u ? absolute_sector - 150u : 0u;
-                        g_cd_pos = 2048u;
-                    }
-
-                    if (command == 0x06u)
-                    {
-                        g_cd_reading = 1;
-                        g_cd_pos = 2048u;
-                        g_cd_error = 0;
-                    }
-                    else if (command == 0x09u)
-                    {
-                        g_cd_reading = 0;
-                    }
-
                     fm_b33_schedule_cd_callback(
                         cpu,
                         command,
@@ -14338,7 +14334,7 @@ int main(void)
                         params,
                         0u,
                         0u,
-                        frame
+                        frame, -1
                     );
 
                     static_miss = 0;
@@ -14359,27 +14355,6 @@ int main(void)
                     g_b34_last_command = command;
                     g_cd_last_cmd = command;
 
-                    if (command == 0x02u && params != 0u)
-                    {
-                        uint32_t minute = fm_bcd_to_u32(cpu->read_byte(params + 0u));
-                        uint32_t second = fm_bcd_to_u32(cpu->read_byte(params + 1u));
-                        uint32_t frame_cd = fm_bcd_to_u32(cpu->read_byte(params + 2u));
-                        uint32_t absolute_sector = ((minute * 60u + second) * 75u) + frame_cd;
-                        g_cd_lba = absolute_sector >= 150u ? absolute_sector - 150u : 0u;
-                        g_cd_pos = 2048u;
-                    }
-
-                    if (command == 0x06u)
-                    {
-                        g_cd_reading = 1;
-                        g_cd_pos = 2048u;
-                        g_cd_error = 0;
-                    }
-                    else if (command == 0x09u)
-                    {
-                        g_cd_reading = 0;
-                    }
-
                     fm_b33_schedule_cd_callback(
                         cpu,
                         command,
@@ -14388,7 +14363,7 @@ int main(void)
                         params,
                         context,
                         1u,
-                        frame
+                        frame, mode
                     );
 
                     static_miss = 0;
@@ -15025,78 +15000,7 @@ int main(void)
                         command;
 
 
-                    /*
-                     * CdlSetloc = 02
-                     */
-                    if (
-                        command == 0x02u
-                        && params != 0
-                    )
-                    {
-                        uint32_t minute =
-                            fm_bcd_to_u32(
-                                cpu->read_byte(
-                                    params + 0
-                                )
-                            );
-
-                        uint32_t second =
-                            fm_bcd_to_u32(
-                                cpu->read_byte(
-                                    params + 1
-                                )
-                            );
-
-                        uint32_t frame_cd =
-                            fm_bcd_to_u32(
-                                cpu->read_byte(
-                                    params + 2
-                                )
-                            );
-
-                        uint32_t absolute_sector =
-                            (
-                                (
-                                    minute * 60u
-                                    + second
-                                )
-                                * 75u
-                            )
-                            + frame_cd;
-
-                        if (absolute_sector >= 150u)
-                        {
-                            g_cd_lba =
-                                absolute_sector - 150u;
-                        }
-                        else
-                        {
-                            g_cd_lba = 0;
-                        }
-
-                        g_cd_pos = 2048;
-                    }
-
-
-                    /*
-                     * CdlReadN = 06
-                     */
-                    if (command == 0x06u)
-                    {
-                        g_cd_reading = 1;
-                        g_cd_pos = 2048;
-                        g_cd_error = 0;
-                    }
-
-
-                    /*
-                     * CdlPause = 09
-                     */
-                    if (command == 0x09u)
-                    {
-                        g_cd_reading = 0;
-                    }
-
+                    fm_cd_apply_command(cpu, command, params, -1, osGetTime());
 
                     /*
                      * Commandes temporairement traitées en HLE.
@@ -15111,6 +15015,7 @@ int main(void)
                         || command == 0x0Eu
                         || command == 0x15u
                         || command == 0x16u
+                        || command == 0x1Bu
                     )
                     {
                         if (result != 0)
@@ -20205,7 +20110,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.13\nvideo_mode=%08lX\n"
+                            "video_probe=B136.14\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20273,7 +20178,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.13\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.14\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"
@@ -20309,6 +20214,10 @@ int main(void)
                                 (unsigned long)fm_memory_read_half(0x8009C47Cu),
                                 (unsigned long)fm_memory_read_word(0x800EB1E8u),
                                 (unsigned long)fm_memory_read_word(0x800EB1ECu));
+                            fprintf(intro_file,
+                                "xa_transport=active:%d mode:%02X lba:%08lX fraction:%lu\n",
+                                g_cd_streaming, (unsigned)g_cd_mode,
+                                (unsigned long)g_cd_lba, (unsigned long)g_cd_stream_fraction);
                             if (intro_req_valid)
                             {
                                 static const unsigned req_offsets[] =

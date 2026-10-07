@@ -2,6 +2,24 @@
 
 Dernière mise à jour : **7 octobre 2026**.
 
+## B136.14 : position du transport ReadS/XA
+
+L'essai B136.13 atteint la phase XA 06 et le script 0A, mais GetlocL renvoie
+encore 00004D8C alors que la lecture demandée commence à 00031734 et finit
+à 00031834. Le backend confirmait ReadS (1B) sans appliquer le wrapper
+7BA00 : SetMode, Setloc puis ReadS. B136.14 applique ces effets dans le
+backend commun main/IRQ, après acceptation de la commande.
+
+Le transport XA silencieux avance selon le temps hôte (75 secteurs/s,
+150 si mode double vitesse), avec fraction conservée, et s'arrête sur
+Pause/Stop/Init. ReadN garde sa progression par secteurs/DataReady. La pause
+hôte ne rattrape pas le temps passé en pause. Aucune modification des flags
+XA, de la fin de requête ou de l'état script. intro-diag ajoute xa_transport.
+Les 38 tests passent, dont les scénarios C de position, GetlocL BCD,
+Pause, changement de mode, ReadN et rejet sans effets d'une commande.
+Le texte/scène reste à confirmer en jeu. Audio XA et vidéo STR/MDEC ne
+sont pas décodés par cette correction.
+
 ## B136.13 : livraison asynchrone des callbacks CD
 
 L'introduction reste avec une requête type 4, flags 00080410, Pause terminée,

@@ -239,3 +239,28 @@ HI/LO, commande suivante pendant le callback sans corruption et refus d'une
 commande si pending est déjà occupé. Total 38 tests. Retester le cold boot,
 le titre et la nouvelle partie ; transport/audio XA et STR/MDEC restent
 incomplets, donc le résultat de la scène et du texte reste à vérifier.
+
+## B136.14 : wrapper ReadS et position XA
+
+Le test B136.13 confirme phase 06, flags C001, position 4D8C, fin 31834,
+GetlocL répété (commande 10), script 0A et toujours aucun texte visible.
+Le pseudo-C 8007BA34 montre que 7BA00 construit Pause/SetMode/Setloc/ReadS.
+L'interception ne traitait que Setloc/ReadN/Pause : ReadS confirmait une
+lecture jamais démarrée et le wrapper ne cherchait pas son CdlLOC.
+
+Backend unique fm_cd_apply_command pour main/IRQ et ancien fallback.
+Le mode du wrapper est explicite ; ses paramètres fournissent la position.
+Les effets n'interviennent qu'après acceptation (refus pending sans effets).
+ReadS démarre un transport silencieux, distinct de la lecture DataReady.
+La position progresse selon osGetTime, 75 ou 150 secteurs/s selon mode bit7,
+avec fraction milliseconde, et GetlocL livre la position BCD courante.
+Pause/Stop/Init et retour à ReadN l'arrêtent ; reset nettoie tout l'état.
+Le tick pause hôte actualise l'horloge sans avancer ni rattraper la pause.
+Le transport ne décode aucun secteur XA/PCM et ne touche pas aux flags du
+jeu, au remaining, à la fin XA ou au script. Le rendu STR/MDEC reste incomplet.
+
+Le test C du backend vérifie seek/mode ReadS, fraction, 75/150 secteurs/s,
+requêtes de position répétées sans accélération, conversion GetlocL BCD,
+pause hôte, Pause CD, transition vers ReadN, et refus sans effets. Total
+38 tests host. Retester nouvelle partie/nom et collecter intro-diag après
+10 secondes ; cette vérification n'annonce pas le texte corrigé en jeu.
