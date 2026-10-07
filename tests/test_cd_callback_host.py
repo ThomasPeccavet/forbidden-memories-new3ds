@@ -18,7 +18,7 @@ class CdCallbackHostTests(unittest.TestCase):
             self.skipTest("Host C compiler required")
         source = (ROOT / "3ds/source/main.c").read_text()
         start = source.index("static uint32_t fm_bcd_to_u32(")
-        end = source.index("static int fm_execute_guest_vblank_callback(", start)
+        end = source.index("static int g_media_irq_active;", start)
         code = source[start:end]
         declarations = []
         for name in sorted(set(re.findall(r"\bg_[a-zA-Z0-9_]+\b", code))):
@@ -36,6 +36,9 @@ typedef struct {
 } CPUState;
 static uint64_t test_now;
 static uint64_t osGetTime(void) { return test_now; }
+static void fm_media_command(uint32_t cmd, uint32_t params, int mode, uint32_t lba) {
+    (void)cmd; (void)params; (void)mode; (void)lba;
+}
 static uint8_t ram[0x200000];
 static void store(uint32_t a, uint8_t v) { ram[a & 0x1fffff] = v; }
 static uint8_t load(uint32_t a) { return ram[a & 0x1fffff]; }

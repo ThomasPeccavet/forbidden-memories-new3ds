@@ -1,5 +1,7 @@
 #include "fm_memory.h"
 #include "fm_gpu.h"
+#include "mdec.h"
+#include "fm_media.h"
 
 #include <3ds.h>
 #include <stddef.h>
@@ -299,6 +301,10 @@ static FMRootCounter g_timers[
  * ============================================================
  */
 
+static uint32_t g_mdec_dma[2][3];
+static uint32_t g_mdec_dma_remaining[2];
+static uint32_t g_mdec_callback, g_mdec_callback_gp, g_mdec_irq_pending;
+static int g_mdec_dma_servicing;
 static uint32_t g_dma2_madr = 0;
 static uint32_t g_dma2_bcr = 0;
 static uint32_t g_dma2_chcr = 0;
@@ -1502,6 +1508,62 @@ static void fm_dma_update_irq(void)
 }
 
 
+/* B136.15: MDEC input/output DMA use the same RAM and completion semantics
+ * as GPU DMA. Output waits for decoded data instead of inventing pixels. */
+static void fm_mdec_dma_service(void)
+{
+    if (g_mdec_dma_servicing) return;
+    g_mdec_dma_servicing = 1;
+    for (unsigned ch = 0; ch < 2u; ++ch) {
+        uint32_t *reg = g_mdec_dma[ch];
+        if (!(reg[2] & 0x01000000u)) continue;
+        uint32_t left = g_mdec_dma_remaining[ch];
+        while (left && (ch == 0u ? mdec_dma_write_ready() : mdec_dma_read_ready())) {
+            if (!ch) mdec_dma_write_word(fm_dma_ram_read_word(reg[0]));
+            else fm_dma_ram_write_word(reg[0], mdec_dma_read_word());
+            reg[0] = (reg[0] + ((reg[2] & 2u) ? -4u : 4u)) & 0x001FFFFCu;
+            --left;
+        }
+        g_mdec_dma_remaining[ch] = left;
+        if (!left) {
+            reg[2] &= ~0x11000000u;
+            g_dma_dicr |= 1u << (24u + ch); fm_dma_update_irq();
+            if (ch == 1u) ++g_mdec_irq_pending;
+        }
+    }
+    g_mdec_dma_servicing = 0;
+}
+static int fm_mdec_dma_register(uint32_t address)
+{ return address >= 0x1F801080u && address < 0x1F8010A0u && (address & 15u) < 12u; }
+static uint32_t fm_mdec_dma_read(uint32_t address)
+{ return g_mdec_dma[(address >> 4) & 1u][(address & 15u) / 4u]; }
+static void fm_mdec_dma_write(uint32_t address, uint32_t value)
+{
+    unsigned ch = (address >> 4) & 1u, r = (address & 15u) / 4u;
+    g_mdec_dma[ch][r] = r == 0u ? value & 0x00FFFFFFu : value;
+    if (r == 2u) {
+        if (value & 0x01000000u) {
+            uint32_t bcr = g_mdec_dma[ch][1];
+            uint32_t size = (bcr & 0xFFFFu) ? (bcr & 0xFFFFu) : 65536u;
+            uint32_t blocks = ((value >> 9) & 3u) == 1u ? bcr >> 16 : 1u;
+            if (!blocks) blocks = 65536u;
+            uint64_t total = (uint64_t)size * blocks;
+            /* Invalid giant DMA must not walk beyond a RAM image per command. */
+            g_mdec_dma_remaining[ch] = total > PSX_RAM_SIZE / 4u ? PSX_RAM_SIZE / 4u : (uint32_t)total;
+        } else g_mdec_dma_remaining[ch] = 0;
+        fm_mdec_dma_service();
+    }
+}
+void fm_memory_mdec_set_callback(uint32_t callback, uint32_t gp)
+{ g_mdec_callback = callback; g_mdec_callback_gp = gp; }
+int fm_memory_mdec_take_callback(uint32_t *callback, uint32_t *gp)
+{
+    if (!g_mdec_irq_pending) return 0;
+    --g_mdec_irq_pending;
+    if (g_mdec_callback < 0x80010000u || g_mdec_callback >= 0x80200000u) return 0;
+    *callback = g_mdec_callback; *gp = g_mdec_callback_gp; return 1;
+}
+
 /*
  * ============================================================
  * DMA2 completion
@@ -2521,6 +2583,7 @@ static int fm_dma_is_register(
     uint32_t phys
 )
 {
+    if (fm_mdec_dma_register(phys)) return 1;
     return
         (
             phys >= PSX_DMA2_MADR
@@ -2594,6 +2657,7 @@ static uint32_t fm_dma_register_read32(
     uint32_t base
 )
 {
+    if (fm_mdec_dma_register(base)) return fm_mdec_dma_read(base);
     switch (base)
     {
         case PSX_DMA2_MADR:
@@ -2639,6 +2703,7 @@ static uint32_t fm_dma_register_base(
     uint32_t phys
 )
 {
+    if (fm_mdec_dma_register(phys)) return phys & ~3u;
     if (
         phys >= PSX_DMA2_MADR
         &&
@@ -2800,6 +2865,10 @@ static void fm_dma_register_write32_masked(
     uint32_t write_mask
 )
 {
+    if (fm_mdec_dma_register(base)) {
+        fm_mdec_dma_write(base, (fm_mdec_dma_read(base) & ~write_mask) | (value & write_mask));
+        return;
+    }
     switch (base)
     {
         case PSX_DMA4_MADR:
@@ -3120,6 +3189,10 @@ void fm_memory_init(
     size_t ram_size
 )
 {
+    mdec_init(); memset(g_mdec_dma, 0, sizeof(g_mdec_dma));
+    memset(g_mdec_dma_remaining, 0, sizeof(g_mdec_dma_remaining));
+    g_mdec_callback = g_mdec_callback_gp = g_mdec_irq_pending = 0;
+    g_mdec_dma_servicing = 0;
     g_ram =
         ram;
 
@@ -3335,6 +3408,7 @@ uint8_t fm_memory_read_byte(
             addr
         );
 
+    if (phys >= 0x1F801800u && phys < 0x1F801804u) return fm_media_cd_read(phys);
     /*
      * ========================================================
      * B92 - hot RAM fast path
@@ -3521,6 +3595,7 @@ void fm_memory_write_byte(
 
     fm_memory_watch_store(phys, 1u, (uint32_t)value);
 
+    if (phys >= 0x1F801800u && phys < 0x1F801804u) { fm_media_cd_write(phys, value); return; }
     /* B92 - hot RAM fast path. */
     if (
         g_ram
@@ -4196,6 +4271,10 @@ uint32_t fm_memory_read_word(
             addr
         );
 
+    if (phys == 0x1F801820u || phys == 0x1F801824u) {
+        uint32_t result = mdec_read(phys); fm_mdec_dma_service(); return result;
+    }
+    if (fm_mdec_dma_register(phys) && !(phys & 3u)) return fm_mdec_dma_read(phys);
     /* B92 - hot RAM fast path before all MMIO tests. */
     if (
         g_ram
@@ -4498,6 +4577,10 @@ void fm_memory_write_word(
             addr
         );
 
+    if (phys == 0x1F801820u || phys == 0x1F801824u) {
+        mdec_write(phys, value); fm_mdec_dma_service(); return;
+    }
+    if (fm_mdec_dma_register(phys) && !(phys & 3u)) { fm_mdec_dma_write(phys, value); return; }
     fm_memory_watch_store(phys, 4u, value);
 
     /* B92 - hot RAM fast path before all MMIO tests. */

@@ -1,6 +1,7 @@
 #include "fm_runtime_shim.h"
 #include "fm_memory.h"
 #include "fm_gpu.h"
+#include "fm_media.h"
 
 #include <setjmp.h>
 #include <stddef.h>
@@ -1369,6 +1370,8 @@ void psx_check_interrupts_dispatch_entry(
 {
     uint32_t phys =
         resume_pc & 0x1FFFFFFFu;
+
+    fm_media_guest_entry(cpu, phys);
 
 #if FM_PERF_PROFILE
     b13586_text_entry(cpu, phys, 0);

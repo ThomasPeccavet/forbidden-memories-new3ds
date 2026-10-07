@@ -2,6 +2,36 @@
 
 Dernière mise à jour : **7 octobre 2026**.
 
+## B136.15 : décodage XA et lecteur STR/MDEC
+
+L'utilisateur confirme le texte après validation du nom sur B136.14.
+La position XA dépasse la fin demandée, les flags CD retombent à zéro et le
+script continue. Konami/titre/menu et texte sont donc validés sur B136.14.
+
+B136.15 ajoute la lecture complète MODE2/2352, un décodeur XA ADPCM
+4/8 bits mono/stéréo avec historique par canal et le filtrage fichier/canal.
+Les échantillons à 37800/18900 Hz sont envoyés à NDSP via des buffers PCM
+stéréo en mémoire linéaire, sans écraser les buffers en cours. Le CdlMix du
+jeu règle la matrice CD. Le résultat ndspInit est exposé ; si le DSP échoue,
+le décodage et le lecteur vidéo peuvent continuer sans sortie audio.
+
+Les secteurs STR sont réassemblés par frame et publiés dans le ring natif
+uniquement une fois complets, avec marqueur de rebouclage et backpressure.
+Le lecteur/Huffman/LoadImage du jeu est conservé. Le décodeur MDEC de la
+révision PSXRecomp épinglée est raccordé aux registres 1F801820/824, au DMA0
+entrée et DMA1 sortie ; un callback DMA1 séparé reprend le contexte guest.
+Le skip STR automatique est désarmé pour tester la vraie vidéo du boot.
+
+46 tests locaux passent. L'oracle FFmpeg compare exactement le PCM de
+16 secteurs synthétiques utilisant les quatre filtres ; les tests couvrent
+également le ring STR, MDEC RGB16/RGB24, DMA en attente, callback, CdlMix et
+propriété des buffers NDSP. L'essai audiovisuel dans Azahar reste nécessaire.
+Pas encore de mixage des 24 voix SPU ; la conversion de fréquence NDSP
+n'est pas le filtre zigzag matériel PS1. Emphase XA non prise en charge.
+Les savestates du port ne sérialisent pas encore ce nouveau pipeline :
+tester par démarrage neuf, sans quick-load. intro-diag expose media_raw,
+xa_decoded, pcm_frames, dsp, str_sectors/frames et mdec_blocks/in/out.
+
 ## B136.14 : position du transport ReadS/XA
 
 L'essai B136.13 atteint la phase XA 06 et le script 0A, mais GetlocL renvoie

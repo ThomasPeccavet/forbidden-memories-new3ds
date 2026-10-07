@@ -20,10 +20,11 @@ class SpuDma4HostTests(unittest.TestCase):
                 binary = Path(temp) / f"spu-dma4-{profile}"
                 cmd = cc + [
                     "-std=gnu11", "-O2", "-Werror=implicit-function-declaration",
-                    f"-DFM_PERF_PROFILE={profile}",
+                    f"-DFM_PERF_PROFILE={profile}", "-DPSX_NO_DEBUG_TOOLS",
                     "-I", str(ROOT / "tests/host/include"),
                     "-I", str(ROOT / "3ds/include"),
                     str(ROOT / "3ds/source/fm_memory.c"),
+                    str(ROOT / "3ds/source/fm_mdec.c"),
                     str(ROOT / "tests/host/test_spu_dma4.c"),
                     "-o", str(binary),
                 ]

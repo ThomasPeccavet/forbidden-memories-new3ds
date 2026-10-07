@@ -149,3 +149,6 @@ void fm_memory_dma_debug(
 );
 
 void fm_memory_dma4_write_diag(uint32_t out[6]);
+
+void fm_memory_mdec_set_callback(uint32_t callback, uint32_t gp);
+int fm_memory_mdec_take_callback(uint32_t *callback, uint32_t *gp);

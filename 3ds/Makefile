@@ -111,6 +111,10 @@ OBJECTS := \
 	$(BUILD)/main.o \
 	$(BUILD)/platform.o \
 	$(BUILD)/disc.o \
+	$(BUILD)/fm_audio.o \
+	$(BUILD)/fm_xa.o \
+	$(BUILD)/fm_media.o \
+	$(BUILD)/fm_mdec.o \
 	$(BUILD)/fm_cpu.o \
 	$(BUILD)/fm_memory.o \
 	$(BUILD)/fm_runtime_shim.o \

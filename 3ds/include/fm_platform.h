@@ -23,6 +23,8 @@ int fm_disc_read_sector(
     uint8_t out[2048]
 );
 
+int fm_disc_read_raw_sector(uint32_t lba, uint8_t out[2352]);
+
 int fm_disc_find_file(
     const char *path,
     uint32_t *lba,

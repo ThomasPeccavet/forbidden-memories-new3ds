@@ -6,6 +6,9 @@
 
 /* GPU is outside this test: unexpected calls must fail, not silently pass. */
 uint32_t g_debug_last_store_pc;
+uint64_t fm_mdec_host_frame, fm_mdec_host_cycles;
+uint8_t fm_media_cd_read(uint32_t addr) { (void)addr; return 0; }
+void fm_media_cd_write(uint32_t addr, uint8_t value) { (void)addr; (void)value; }
 void fm_gpu_gp0_write(uint32_t value) { (void)value; assert(0); }
 void fm_gpu_gp1_write(uint32_t value) { (void)value; assert(0); }
 uint32_t fm_gpu_status(void) { assert(0); return 0; }

@@ -264,3 +264,35 @@ requêtes de position répétées sans accélération, conversion GetlocL BCD,
 pause hôte, Pause CD, transition vers ReadN, et refus sans effets. Total
 38 tests host. Retester nouvelle partie/nom et collecter intro-diag après
 10 secondes ; cette vérification n'annonce pas le texte corrigé en jeu.
+
+## B136.15 : XA audio et STR/MDEC
+
+Validation utilisateur B136.14 : le texte apparaît. Flags CD zéro, position
+3185C > fin 31834. Transport/attente script ne sont plus le verrou observé.
+
+- disc.c fournit les 2352 octets bruts validés et garde l'API 2048 compatible.
+- fm_xa.c décode 18 groupes XA, 4/8 bits, mono/stéréo, 37800/18900 Hz,
+  saturation signée et historique par canal ; changement de canal réinitialise
+  l'historique. Formats réservés/emphase et buffers trop courts sont refusés.
+- fm_audio.c possède 16 buffers linéaires NDSP stéréo PCM16, reprend seulement
+  FREE/DONE, flush cache avant queue, pause hôte et état DSP observable.
+- fm_media.c parcourt les secteurs sans saut, filtre XA, applique la matrice
+  CdlMix, reconstitue les frames STR et remplit le ring natif (2/3, wrap 1).
+  Une frame incomplète ou un ring occupé n'est jamais publié/écrasé.
+- MDEC est repris de PSXRecomp 1965b2d avec licence/provenance préservées.
+  DMA0/1, CHCR busy, DICR, attentes FIFO et callback DMA1 sont raccordés.
+  Le callback restaure PC/GPR/HI/LO et attend la fin des autres callbacks.
+- Désarmement du skip premier STR : le lecteur natif doit lire la vraie vidéo.
+
+46 tests host passent, dont oracle FFmpeg indépendant byte-exact sur PCM
+synthétique non nul, codecs/groupes, filtrage/matrice vers NDSP, buffers DSP,
+secteurs Form2 complets, ring plein/wrap/frame complète, MDEC gris RGB16/RGB24
+via MMIO/DMA et interruption différée. L'oracle est optionnel si FFmpeg absent.
+CI compile aussi les quatre nouveaux objets de production ARM.
+
+Limites explicites : XA seulement pour la sortie audio actuelle (voix SPU
+non mixées), conversion de fréquence NDSP au lieu du zigzag PS1, emphase
+refusée, savestates média non intégrés. Les fixtures ne prouvent pas la
+lecture du flux FR ni la vitesse de décodage sur 3DS. Essai utilisateur
+nécessaire depuis le boot puis nouvelle partie/nom ; collecter intro-diag
+et video-watch pour distinguer secteur, frame, VLC, MDEC, présentation et DSP.

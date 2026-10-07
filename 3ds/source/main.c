@@ -16,6 +16,9 @@
 #include "fm_runtime_shim.h"
 #include "fm_interp.h"
 #include "fm_gpu.h"
+#include "fm_media.h"
+#include "fm_audio.h"
+#include "fm_mdec_clock.h"
 
 #include "gpu_sw_renderer.h"
 
@@ -585,20 +588,13 @@ static int b110_get_rank(
 
 /*
  * ============================================================
- * STR intro skip - bring-up temporaire
+ * STR intro skip - legacy explicit request
  * ============================================================
  *
- * Le runtime PC validé montre que le boot reste longtemps dans
- * FUN_8006A4D8 en attendant des secteurs STR, puis que l'appui
- * Start permet d'atteindre le titre/menu.
- *
- * Sur 3DS, notre chaîne CD streaming STR n'alimente pas encore
- * FUN_80078B58. Pour débloquer le jalon graphique sans afficher
- * d'image artificielle, START demande la fin du flux actif.
- * B136.11 : terminer automatiquement le premier STR non pris en charge
- * avant le titre interactif SU. Ses boutons attendent le START guest.
+ * B136.15: automatic skip is disabled. Raw STR sectors now feed the native
+ * ring/Huffman/MDEC player. Fresh boots and resets start with no skip request.
  */
-static int g_str_intro_skip_pending = 1;
+static int g_str_intro_skip_pending = 0;
 static uint32_t g_str_intro_skip_count = 0;
 
 static uint32_t g_str_intro_last_base = 0;
@@ -6799,6 +6795,7 @@ static void fm_cd_apply_command(CPUState *cpu, uint32_t command,
         g_cd_stream_fraction = 0u;
         if (command == 0x0Au) g_cd_mode = 0u;
     }
+    fm_media_command(command, params, raw_mode, g_cd_lba);
 }
 
 static void fm_b33_fill_cd_result(CPUState *cpu, uint32_t command)
@@ -6923,6 +6920,27 @@ static int fm_b33_deliver_cd_callback(CPUState *cpu, uint32_t frame)
     return 1;
 }
 
+
+static int g_media_irq_active;
+static uint32_t g_media_irq_gpr[32], g_media_irq_pc, g_media_irq_hi, g_media_irq_lo;
+static const uint32_t g_media_irq_sentinel = 0x8000FFD0u;
+static int fm_media_irq_dispatch(CPUState *cpu)
+{
+    if (g_media_irq_active) {
+        if (cpu->pc != g_media_irq_sentinel) return 0;
+        memcpy(cpu->gpr, g_media_irq_gpr, sizeof(g_media_irq_gpr));
+        cpu->pc = g_media_irq_pc; cpu->hi = g_media_irq_hi; cpu->lo = g_media_irq_lo;
+        cpu->gpr[0] = 0; g_media_irq_active = 0; return 1;
+    }
+    if (g_b33_cb_active || g_cd_tick_active || g_b34_ready_active || g_b35_finalizer_active) return 0;
+    uint32_t callback, gp;
+    if (!fm_memory_mdec_take_callback(&callback, &gp)) return 0;
+    memcpy(g_media_irq_gpr, cpu->gpr, sizeof(g_media_irq_gpr));
+    g_media_irq_pc = cpu->pc; g_media_irq_hi = cpu->hi; g_media_irq_lo = cpu->lo;
+    cpu->pc = callback; cpu->gpr[28] = gp;
+    cpu->gpr[31] = g_media_irq_sentinel; cpu->gpr[0] = 0;
+    g_media_irq_active = 1; return 1;
+}
 
 static int fm_execute_guest_vblank_callback(
     CPUState *cpu,
@@ -8511,6 +8529,8 @@ static void fm_capture_guest_string(
 
 static void fm_cd_hle_reset(void)
 {
+    fm_media_reset();
+    g_media_irq_active = 0;
     g_b33_pending = 0u;
     g_b33_cb_active = 0u;
     memset(
@@ -8565,7 +8585,7 @@ static void fm_cd_hle_reset(void)
     g_b108_vsync_waited = 0u;
     g_b108_vsync_last_target = 0u;
 
-    g_str_intro_skip_pending = 1;
+    g_str_intro_skip_pending = 0;
     g_str_intro_skip_count = 0;
 
     g_str_intro_last_base = 0;
@@ -12240,6 +12260,7 @@ int main(void)
     uint64_t gp0_last_frame =
         0;
 
+    fm_audio_init();
     fm_cd_hle_reset();
 
 
@@ -12253,6 +12274,8 @@ int main(void)
     {
         uint64_t b105_loop_start_ms = osGetTime();
         fm_cd_stream_tick(b105_loop_start_ms, game_running);
+        fm_mdec_host_frame = frame; fm_mdec_host_cycles = (uint64_t)frame * 677376u;
+        fm_media_poll(g_cd_lba, game_running);
 
         int b131_presented_this_loop = 0;
 
@@ -12461,7 +12484,7 @@ int main(void)
             && fm_memory_read_word(0x8009C818u) != 0u
             && fm_memory_read_byte(0x8009C3EBu) == 0u)
         {
-            g_str_intro_skip_pending = 1;
+            g_str_intro_skip_pending = 0;
         }
 
 
@@ -12992,8 +13015,10 @@ int main(void)
                     dispatch_address
                     & 0x1FFFFFFFu;
 
+                fm_media_guest_entry(cpu, phys);
+                if (fm_media_irq_dispatch(cpu)) { static_miss = 0; continue; }
                 /* Deliver hardware completion outside guest CD/data/tick callbacks. */
-                if (!g_cd_tick_active && !g_b34_ready_active && !g_b35_finalizer_active
+                if (!g_media_irq_active && !g_cd_tick_active && !g_b34_ready_active && !g_b35_finalizer_active
                     && fm_b33_deliver_cd_callback(cpu, frame))
                 {
                     static_miss = 0;
@@ -13143,6 +13168,7 @@ int main(void)
                     && fm_memory_read_word(0x80094CB0u) != 0u
                     && fm_memory_read_word(0x800F7270u) != 0u
                     && !g_b33_cb_active
+                    && !g_media_irq_active
                     && !g_b34_ready_active
                     && !g_b35_finalizer_active
                 )
@@ -13444,6 +13470,7 @@ int main(void)
                     g_b34_ready_pending
                     && !g_b34_ready_active
                     && !g_b33_cb_active
+                    && !g_media_irq_active
                     && frame >= g_b34_ready_arm_frame
                 )
                 {
@@ -20110,7 +20137,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.14\nvideo_mode=%08lX\n"
+                            "video_probe=B136.15\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20178,7 +20205,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.14\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.15\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"
@@ -20257,6 +20284,7 @@ int main(void)
                                     (unsigned long)fm_memory_read_half(text_obj + 8u),
                                     (unsigned long)fm_memory_read_word(text_obj + 0x24u));
                             }
+                            fm_media_dump(intro_file);
                             fclose(intro_file);
                         }
 
@@ -21181,6 +21209,7 @@ int main(void)
      * ========================================================
      */
 
+    fm_audio_exit();
     fm_disc_close();
 
     free(vram);
