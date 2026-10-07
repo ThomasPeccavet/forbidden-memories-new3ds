@@ -161,11 +161,12 @@ void fm_media_dump(FILE *f)
     MDECDebugState m; mdec_debug_get_state(&m);
     MDECPerf perf; mdec_perf_get(&perf);
     uint64_t elapsed = perf.last_ms - perf.first_ms;
-    fprintf(f, "movie_perf=decoded:%lu elapsed_ms:%llu decode_ms:%llu fps_x100:%llu\n",
+    fprintf(f, "movie_perf=decoded:%lu elapsed_ms:%llu decode_ms:%llu fps_x100:%llu max_decode_ms:%lu\n",
         (unsigned long)perf.frames, (unsigned long long)elapsed,
         (unsigned long long)perf.decode_ms,
         (unsigned long long)(elapsed && perf.frames > 1u
-            ? (perf.frames - 1u) * 100000ull / elapsed : 0));
+            ? (perf.frames - 1u) * 100000ull / elapsed : 0),
+        (unsigned long)perf.max_decode_ms);
     fprintf(f, "media_raw=%lu next=%08lX errors=%lu active=%d\n"
         "xa_decoded=%lu pcm_frames=%lu filtered=%lu dsp=%08lX queued=%lu\n"
         "str_sectors=%lu frames=%lu invalid=%lu stalls=%lu size=%lux%lu\n"

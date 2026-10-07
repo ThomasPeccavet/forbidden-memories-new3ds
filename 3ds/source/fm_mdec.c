@@ -697,7 +697,9 @@ static void execute_decode(void) {
      * The 4/8-bit luma path above is texture decompression, not video. */
     uint64_t end_ms = osGetTime();
     if (!perf.frames) perf.first_ms = end_ms;
-    perf.last_ms = end_ms; perf.decode_ms += end_ms - start_ms; ++perf.frames;
+    uint64_t decode_ms = end_ms - start_ms;
+    if (decode_ms > perf.max_decode_ms) perf.max_decode_ms = (uint32_t)decode_ms;
+    perf.last_ms = end_ms; perf.decode_ms += decode_ms; ++perf.frames;
     mdec_last_color_decode_frame = fm_mdec_host_frame;
     mdec_last_color_decode_cycle = fm_mdec_host_cycles;
     trace_event(MDEC_EVT_DECODE_DONE, mdec.output_size);

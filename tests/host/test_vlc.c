@@ -106,7 +106,7 @@ int main(void)
 {
     tables();
     for (unsigned v = 1; v <= 3; ++v) for (unsigned n = 0; n < 35; ++n) {
-        compare(v, n, 0x10000); compare(v, n, 0); compare(v, n, 4); compare(v, n, 9);
+        compare(v, n, 0x00FFFFFF); compare(v, n, 0x10000); compare(v, n, 0); compare(v, n, 4); compare(v, n, 9);
     }
     uint8_t snapshot[sizeof(ram)]; memcpy(snapshot, ram, sizeof(ram));
     CPUState cpu = {0}; cpu.gpr[4] = IN; cpu.gpr[5] = 0x801FFFFC; cpu.gpr[6] = TABLE;
@@ -120,6 +120,10 @@ int main(void)
     memset(ram + (TABLE & 0x1FFFFFFF), 0, sizeof(native_table));
     memcpy(snapshot, ram, sizeof(ram)); cpu.gpr[6] = TABLE; before = cpu;
     assert(!fm_vlc_try(&cpu));
+    assert(!memcmp(&cpu, &before, sizeof(cpu)) && !memcmp(snapshot, ram, sizeof(ram)));
+    tables(); memcpy(ram + (TABLE & 0x1FFFFFFF), native_table, sizeof(native_table));
+    fm_memory_write_word(0x8009B458, UINT32_MAX); memcpy(snapshot, ram, sizeof(ram));
+    before = cpu; assert(!fm_vlc_try(&cpu));
     assert(!memcmp(&cpu, &before, sizeof(cpu)) && !memcmp(snapshot, ram, sizeof(ram)));
     return 0;
 }

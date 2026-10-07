@@ -71,6 +71,10 @@ int main(void) {
         native = native.replace("(int)", "(int32_t)")
         native = re.sub(r"\(int32_t\)(param_[12]|puVar\d+)", r"(intptr_t)\1", native)
         native = native.replace("FUN_800914a8", "native_vlc")
+        # The PsyQ whole-frame boundary is outside the output array. Native
+        # MIPS computes an integer address; do so on the host as well.
+        native = native.replace("puVar17 = DAT_8009b460 + DAT_8009b458;",
+                                "puVar17 = (undefined2 *)((uintptr_t)DAT_8009b460 + (uintptr_t)DAT_8009b458 * 2);")
         harness = (ROOT / "tests/host/test_vlc.c").read_text().replace("/* NATIVE_REFERENCE */", native)
         with tempfile.TemporaryDirectory() as temp:
             c = Path(temp) / "vlc.c"

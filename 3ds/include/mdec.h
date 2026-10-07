@@ -9,7 +9,7 @@ extern "C" {
 
 typedef struct {
     uint64_t decode_ms, first_ms, last_ms;
-    uint32_t frames;
+    uint32_t frames, max_decode_ms;
 } MDECPerf;
 void mdec_perf_get(MDECPerf *out);
 void mdec_init(void);

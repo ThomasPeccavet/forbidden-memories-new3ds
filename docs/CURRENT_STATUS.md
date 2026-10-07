@@ -2,6 +2,27 @@
 
 Dernière mise à jour : **7 octobre 2026**.
 
+## B136.18 : limite VLC native 00FFFFFF
+
+Essai B136.17 : amélioration ressentie (~15 FPS visuels), mais petites pauses.
+Le log mesure 155 décodages sur 26281 ms (5,85 images/s MDEC), codec 7293 ms,
+309 frames STR et surtout `vlc_hle calls=0 fallback=312 limit=00FFFFFF`.
+La HLE n'était donc pas active : le garde-fou limitait arbitrairement le
+nombre de demi-mots à 20000h. Le jeu utilise FFFFFFh comme frontière de
+comparaison pour traiter une frame entière, sans écrire jusqu'à cette adresse.
+
+B136.18 accepte cette frontière sans modifier la limite du jeu. Les accès
+restent bornés au vrai buffer de sortie, au flux et aux tables en RAM ; un
+calcul de frontière qui déborde uint32 reste refusé avec fallback atomique.
+49 tests host passent, dont 525 fixtures différentielles contre la routine
+Ghidra, avec la valeur native FFFFFFh pour les trois versions du format.
+`movie_perf` ajoute max_decode_ms pour observer les pics du codec MDEC.
+Ni cadence CD, saut de frame natif ni décodage audio ne sont modifiés.
+
+Retester au boot, vidéo entière sans START. Vérifier l'activation `vlc_hle`
+et comparer movie_perf ; les petites pauses ne sont pas encore attribuées
+à une cause unique ni annoncées corrigées avant cet essai.
+
 ## B136.17 : Huffman/VLC natif en C
 
 L'essai B136.16 confirme une amélioration ressentie, mais une cadence basse

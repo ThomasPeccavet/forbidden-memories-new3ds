@@ -592,7 +592,7 @@ static int b110_get_rank(
  * STR intro skip - legacy explicit request
  * ============================================================
  *
- * B136.17: automatic skip is disabled. Raw STR sectors now feed the native
+ * B136.18: automatic skip is disabled. Raw STR sectors now feed the native
  * ring/Huffman/MDEC player. Fresh boots and resets start with no skip request.
  */
 static int g_str_intro_skip_pending = 0;
@@ -20142,7 +20142,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.17\nvideo_mode=%08lX\n"
+                            "video_probe=B136.18\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20210,7 +20210,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.17\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.18\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"

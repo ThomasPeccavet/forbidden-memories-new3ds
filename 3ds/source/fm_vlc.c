@@ -43,6 +43,9 @@ int fm_vlc_try(CPUState *cpu)
         qscale = rd16(header + 4u) << 10;
         block = rd16(header + 6u) >= 3u ? 1u : 0u;
         src = input + 12u;
+        /* The FR game uses 00FFFFFF to decode a whole frame in one call. This
+         * comparison boundary need not point into RAM; only actual writes do. */
+        if (limit > (UINT32_MAX - output) / 2u) goto fail;
         chunk_end = output + limit * 2u;
     } else {
         p = fm_memory_read_word(0x8009B460u) - 4u;
@@ -57,10 +60,11 @@ int fm_vlc_try(CPUState *cpu)
         cr = fm_memory_read_word(0x8009B474u);
         cb = fm_memory_read_word(0x8009B478u);
         y = fm_memory_read_word(0x8009B47Cu);
+        if (p > UINT32_MAX - 4u || limit > (UINT32_MAX - p - 4u) / 2u) goto fail;
         chunk_end = p + 4u + limit * 2u;
         if (fraction > 15u || block > 6u || (p & 1u) || (src & 1u)) goto fail;
     }
-    if (limit > 0x20000u || size > 0x40000u || chunk_end < base) goto fail;
+    if (size > 0x40000u || chunk_end < base) goto fail;
     const uint8_t *destination = fm_memory_ram_span(base, size);
     if (destination < lut + 0x11000u && lut < destination + size) goto fail;
     const uint8_t *controls = fm_memory_ram_span(0x8009B458u, 44u);

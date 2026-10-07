@@ -346,3 +346,18 @@ tokens groupés, padding et quatre limites de morceaux. Comparaison du
 buffer complet et de l'état natif lors de chaque reprise ; refus atomique
 avant ou après début de traduction. Ajouter l'observation `vlc_hle` au
 prochain essai pour vérifier activation et FPS réels, sans les annoncer.
+
+## B136.18 : frontière VLC complète
+
+Le test utilisateur B136.17 montre calls=0 / fallback=312, table=80100000,
+limit=00FFFFFF. Le garde-fou de B136.17 confondait la frontière de comparaison
+avec la capacité réelle de destination. Supprimer le plafond arbitraire
+20000h ; vérifier séparément que le calcul de frontière n'overflow pas et
+que chaque écriture se situe dans la sortie définie par le header MDEC.
+
+Les 49 tests passent : 525 fixtures couvrent maintenant aussi FFFFFFh,
+versions 1/2/3, sortie et états identiques à la routine originale. Le modèle
+hôte calcule cette frontière comme adresse entière, évitant une arithmétique
+C de pointeur au-delà du tableau. Rejet atomique testé sur UINT32_MAX.
+`max_decode_ms` expose les pics du codec ; gain réel et causes des freezes
+restent à vérifier avec la HLE effectivement active.
