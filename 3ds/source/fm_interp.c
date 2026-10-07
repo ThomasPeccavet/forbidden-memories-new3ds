@@ -3,6 +3,21 @@
 #include <stdint.h>
 #include <string.h>
 
+#ifndef FM_PERF_PROFILE
+#define FM_PERF_PROFILE 0
+#endif
+
+#if FM_PERF_PROFILE
+extern uint32_t g_debug_last_store_pc;
+static inline int interp_watch_render_store(uint32_t addr, uint32_t size)
+{
+    uint32_t phys = (addr & 0x1FFFFFFFu) & 0x001FFFFFu;
+    if ((addr & 0x1FFFFFFFu) >= 0x00800000u) return 0;
+    return (phys <= 0x0009C4B8u && phys + size > 0x0009C4B8u)
+        || (phys < 0x000EB251u && phys + size > 0x000EB248u);
+}
+#endif
+
 /*
  * B135.1 - le GPF de la scene Simon peut etre repris par le fallback
  * R3000A apres un stop du code ARM recompile. On reutilise exactement
@@ -152,6 +167,13 @@ static inline void interp_write_byte(
     uint8_t value
 )
 {
+#if FM_PERF_PROFILE
+    if (interp_watch_render_store(addr, 1u))
+    {
+        cpu->write_byte(addr, value);
+        return;
+    }
+#endif
     uint32_t o;
 
     if (interp_ram_offset(addr, 1u, &o))
@@ -170,6 +192,13 @@ static inline void interp_write_half(
     uint16_t value
 )
 {
+#if FM_PERF_PROFILE
+    if (interp_watch_render_store(addr, 2u))
+    {
+        cpu->write_half(addr, value);
+        return;
+    }
+#endif
     uint32_t o;
 
     if (interp_ram_offset(addr, 2u, &o))
@@ -188,6 +217,13 @@ static inline void interp_write_word(
     uint32_t value
 )
 {
+#if FM_PERF_PROFILE
+    if (interp_watch_render_store(addr, 4u))
+    {
+        cpu->write_word(addr, value);
+        return;
+    }
+#endif
     uint32_t o;
 
     if (interp_ram_offset(addr, 4u, &o))
@@ -323,6 +359,13 @@ static int exec_normal(
 {
     uint32_t opcode =
         instruction >> 26;
+
+#if FM_PERF_PROFILE
+    /* Use the actual instruction PC, including a branch delay slot.
+     * cpu->pc alone is not the store PC in that case. */
+    if (opcode >= 0x28u && opcode <= 0x2Eu)
+        g_debug_last_store_pc = pc;
+#endif
 
 
     uint32_t rs =

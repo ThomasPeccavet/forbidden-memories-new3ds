@@ -92,6 +92,31 @@ devenir noir et attendre 10 secondes pour rafraîchir les TXT. Envoyer les
 deux fichiers. Comparer image GPU, composite hôte et activité du menu avant
 de choisir un correctif de rendu.
 
+## B136.8 : trace du verrou de rendu et du fondu
+
+Le second essai atteint menu_init=1, menu_update=634, menu_destroy=0.
+La page GP1 reste (0,0), son échantillon est noir ; la page (320,256)
+conserve des pixels sans preuve qu'elle soit le framebuffer à afficher.
+La file CD est vide. C4B8=0 empêche la soumission des ordering tables dans
+la fonction originale 80012D60. Cela explique un mécanisme possible du noir,
+sans identifier encore pourquoi le verrou reste fermé.
+
+`change_pc` dans c4b8-diag est un contexte observé, pas nécessairement
+l'instruction ayant écrit. B136.8 recentre le journal borné
+`memory-watch.txt` sur C4B8 et EB248..EB250 (état du fondu). En PROFILE,
+les stores interprétés concernés passent par le même callback mémoire et
+portent le PC réel du store, y compris dans un delay slot. Le bridge hôte
+de fondu est marqué PC=0. Les stores générés utilisent leur instrumentation
+existante. Aucun verrou ou choix de page n'est forcé.
+
+Le dump vidéo expose aussi les octets du fondu, les compteurs de paquets
+et DMA2. Les compteurs fill/draw/copy/upload de c4b8-diag étaient toujours
+zéro car le snapshot ne les copiait pas : cette omission est corrigée,
+sans changer le rendu. Le journal ne conserve que les 96 derniers changements.
+
+Essai : cold boot PROFILE, attendre dix secondes après le noir, fermer
+Azahar, envoyer memory-watch.txt et les 80 dernières lignes de debug-latest.txt.
+
 ## Prochain essai avec le PC
 
 Compiler cette branche : `make -C 3ds PROFILE=1 -j2`. Le labo pointe encore

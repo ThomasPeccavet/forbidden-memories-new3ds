@@ -17,6 +17,10 @@
 #include "fm_interp.h"
 #include "fm_gpu.h"
 
+#if FM_PERF_PROFILE
+extern uint32_t g_debug_last_store_pc;
+#endif
+
 #include "gpu_sw_renderer.h"
 
 /* B28 helpers exported by source/fm_gpu.c. */
@@ -20742,7 +20746,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.7\nvideo_mode=%08lX\n"
+                            "video_probe=B136.8\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20775,6 +20779,29 @@ int main(void)
                             fprintf(dbg, "video_page%u_nz=%lu\nvideo_page%u_hash=%08lX\n",
                                 vp, (unsigned long)video_nz[vp],
                                 vp, (unsigned long)video_hash[vp]);
+
+                        fprintf(dbg,
+                            "video_gate=%02lX\nvideo_fade_rgba=%08lX\n"
+                            "video_fade_current=%02lX\nvideo_fade_target=%02lX\n"
+                            "video_fade_flags=%02lX\nvideo_fade_step=%02lX\n"
+                            "video_packets_fill=%llu\nvideo_packets_draw=%llu\n"
+                            "video_packets_copy=%llu\nvideo_packets_upload=%llu\n"
+                            "video_packets_env=%llu\nvideo_dma2_transfers=%lu\n"
+                            "video_dma2_last_nodes=%lu\nvideo_dma2_last_words=%lu\n",
+                            (unsigned long)fm_memory_read_byte(0x8009C4B8u),
+                            (unsigned long)fm_memory_read_word(0x800EB248u),
+                            (unsigned long)fm_memory_read_byte(0x800EB24Cu),
+                            (unsigned long)fm_memory_read_byte(0x800EB24Du),
+                            (unsigned long)fm_memory_read_byte(0x800EB24Eu),
+                            (unsigned long)fm_memory_read_byte(0x800EB24Fu),
+                            (unsigned long long)gpu_debug.packets_fill,
+                            (unsigned long long)gpu_debug.packets_draw,
+                            (unsigned long long)gpu_debug.packets_copy,
+                            (unsigned long long)gpu_debug.packets_upload,
+                            (unsigned long long)gpu_debug.packets_env,
+                            (unsigned long)b130_dma.dma2_transfer_count,
+                            (unsigned long)b130_dma.dma2_last_nodes,
+                            (unsigned long)b130_dma.dma2_last_words);
 
                         /* Keep the last 16 diagnostic refreshes so the brief
                          * title/menu appearance can be compared with black.
@@ -21507,7 +21534,14 @@ int main(void)
          */
         if (memory_status == 0)
         {
+#if FM_PERF_PROFILE
+            uint32_t fade_store_pc = g_debug_last_store_pc;
+            g_debug_last_store_pc = 0u; /* Host bridge, not a guest store. */
+#endif
             fm_service_fade_bridge();
+#if FM_PERF_PROFILE
+            g_debug_last_store_pc = fade_store_pc;
+#endif
 
             fm_update_game_state_debug();
 

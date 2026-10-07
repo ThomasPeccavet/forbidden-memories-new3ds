@@ -6411,6 +6411,19 @@ void fm_gpu_b127_perf_snapshot(
      * snapshot and may have filled cheap fields such as gp0_words.
      * Only copy counters needed by B124..B127.
      */
+    /* B136.8: real cheap packet counters. Previously callers zeroed the
+     * struct and this getter left fill/draw/copy/upload misleadingly at 0. */
+    out->packets_total = g_packet_total;
+    out->packets_nop = g_packet_nop;
+    out->packets_fill = g_packet_fill;
+    out->packets_draw = g_packet_draw;
+    out->packets_copy = g_packet_copy;
+    out->packets_upload = g_packet_upload;
+    out->packets_readback = g_packet_readback;
+    out->packets_env = g_packet_env;
+    out->packets_other = g_packet_other;
+    out->upload_data_words = g_upload_data_words;
+
     out->b124_rect_hits =
         g_b124_rect_hits;
 
