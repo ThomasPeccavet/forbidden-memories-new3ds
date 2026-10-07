@@ -131,6 +131,26 @@ void fm_runtime_text_trace_outer(CPUState *cpu, uint32_t phys)
 {
 #if FM_PERF_PROFILE
     b13586_text_entry(cpu, phys, 1);
+    /* B136.22: interpreted resident routines return through the outer
+     * dispatcher and do not execute generated entry checkpoints. Include
+     * those entries in the existing category-2 path counters. These are
+     * entry counts (both paths), not unique frame counts. */
+    if (phys == 0x00040B48u)
+    {
+        ++g_dialogue_layer_trace.category2_calls;
+        if (cpu)
+        {
+            int32_t head = (int16_t)cpu->read_half(0x800F11C4u);
+            g_dialogue_layer_trace.last_head = (uint32_t)head;
+            g_dialogue_layer_trace.last_ra = cpu->gpr[31];
+            if (head >= 0 && head < 0x60)
+                ++g_dialogue_layer_trace.category2_with_head;
+        }
+    }
+    else if (phys == 0x000418C0u)
+        ++g_dialogue_layer_trace.object_render_calls;
+    else if (phys == 0x000424B8u)
+        ++g_dialogue_layer_trace.primitive_calls;
 #else
     (void)cpu; (void)phys;
 #endif

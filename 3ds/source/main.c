@@ -20147,7 +20147,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.21\nvideo_mode=%08lX\n"
+                            "video_probe=B136.22\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20215,7 +20215,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.21\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.22\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"
@@ -20381,6 +20381,23 @@ int main(void)
                             }
                             FMDialogueLayerTrace scene_trace = {0};
                             fm_runtime_dialogue_layer_trace(&scene_trace);
+                            uint64_t scene_seen[2] = {0u, 0u};
+                            int scene_idx = (int16_t)fm_memory_read_half(0x800F11C4u);
+                            unsigned scene_nodes = 0u, scene_mask = 0u;
+                            while (scene_idx >= 0 && scene_idx < 0x60 && scene_nodes < 0x60u)
+                            {
+                                unsigned bit = (unsigned)scene_idx;
+                                if (scene_seen[bit >> 6] & (1ull << (bit & 63u))) break;
+                                scene_seen[bit >> 6] |= 1ull << (bit & 63u);
+                                uint32_t node = 0x800F1210u + bit * 0x70u;
+                                for (unsigned si = 0u; si < 3u; ++si)
+                                    if (node == fm_memory_read_word(0x800EC220u + si * 0x14u))
+                                        scene_mask |= 1u << si;
+                                ++scene_nodes;
+                                scene_idx = (int16_t)fm_memory_read_half(node + 2u);
+                            }
+                            fprintf(intro_file, "scene_chain=nodes:%u backgrounds:%X end:%d\n",
+                                scene_nodes, scene_mask, scene_idx);
                             fprintf(intro_file,
                                 "scene_render=walk:%lu nonempty:%lu object:%lu primitive:%lu head:%ld table:%08lX/%08lX\n",
                                 (unsigned long)scene_trace.category2_calls,
