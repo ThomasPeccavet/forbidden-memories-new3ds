@@ -1,4 +1,5 @@
 #include "fm_media.h"
+#include "fm_vlc.h"
 #include "fm_memory.h"
 #include "fm_platform.h"
 #include "fm_audio.h"
@@ -84,7 +85,7 @@ int fm_media_str_sector(const uint8_t raw[2352])
 
 void fm_media_reset(void)
 {
-    fm_audio_reset(); fm_xa_reset(&xa); memset(&str, 0, sizeof(str)); str.last_published = UINT32_MAX;
+    fm_vlc_reset(); fm_audio_reset(); fm_xa_reset(&xa); memset(&str, 0, sizeof(str)); str.last_published = UINT32_MAX;
     active = 0; next_lba = raw_sectors = errors = xa_sectors = xa_frames = filtered = 0;
     video_sectors = video_frames = stalls = invalid_frames = last_width = last_height = 0;
     entry_str = entry_vlc = entry_out = 0; mode = filter_file = filter_channel = index_reg = 0;
@@ -156,6 +157,7 @@ uint8_t fm_media_cd_read(uint32_t addr)
 { return (addr & 3u) == 0u ? (uint8_t)(0x18u | index_reg) : 0u; }
 void fm_media_dump(FILE *f)
 {
+    fm_vlc_dump(f);
     MDECDebugState m; mdec_debug_get_state(&m);
     MDECPerf perf; mdec_perf_get(&perf);
     uint64_t elapsed = perf.last_ms - perf.first_ms;

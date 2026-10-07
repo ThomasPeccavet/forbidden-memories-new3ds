@@ -2,6 +2,32 @@
 
 Dernière mise à jour : **7 octobre 2026**.
 
+## B136.17 : Huffman/VLC natif en C
+
+L'essai B136.16 confirme une amélioration ressentie, mais une cadence basse
+et une impression d'accélération. Mesure : 153 décodages en 25757 ms, soit
+5,90 FPS ; le codec MDEC consomme 7237 ms (~47 ms par image). 309 frames STR
+sont publiées. Le lecteur natif compare les frames disponibles à la position
+du flux et peut en sauter ; cette différence n'est pas une mesure directe
+du nombre d'images affichées ou une preuve d'un bug d'horloge.
+
+B136.17 traduit la routine FR 800914A8 en C, avec les tables Huffman étendues
+du jeu, DC signés/prédictifs, codes d'échappement, tokens groupés et état
+résident de continuation. Les commandes et coefficients envoyés au MDEC
+sont conservés. Un buffer temporaire permet un fallback natif sans modifier
+la RAM/CPU si les adresses, tables, tailles ou overlaps sont incompatibles.
+Le dispatcher principal et les appels générés imbriqués utilisent cette HLE.
+Ni le timing CD ni la règle de synchronisation du lecteur ne sont changés.
+
+49 tests host passent. Une référence distincte issue du pseudo-C Ghidra
+original est exécutée sur 420 fixtures (versions 1/2/3, coefficients signés,
+AC/escape/table secondaire/tokens groupés, quatre tailles de morceaux).
+Sortie entière, retour, pointeurs et sept mots de continuation sont comparés.
+Le checkpoint généré retourne au RA et conserve le chemin natif en cas de
+refus. `vlc_hle` expose succès, fallback, durée, table et taille de morceau.
+Le gain en FPS et la compatibilité avec le vrai flux restent à valider dans
+Azahar, depuis un boot neuf et sans START pendant la vidéo d'ouverture.
+
 ## B136.16 : transferts vidéo par blocs
 
 Essai utilisateur B136.15 : la vidéo entre Konami et le titre fonctionne,

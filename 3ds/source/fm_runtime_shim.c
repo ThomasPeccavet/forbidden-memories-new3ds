@@ -2,6 +2,7 @@
 #include "fm_memory.h"
 #include "fm_gpu.h"
 #include "fm_media.h"
+#include "fm_vlc.h"
 
 #include <setjmp.h>
 #include <stddef.h>
@@ -1371,6 +1372,12 @@ void psx_check_interrupts_dispatch_entry(
     uint32_t phys =
         resume_pc & 0x1FFFFFFFu;
 
+    /* Escape before the native prologue for a direct generated VLC call.
+     * Failed translations are transactional and continue through native code. */
+    if (g_probe_armed && phys == 0x000914A8u && fm_vlc_try(cpu)) {
+        fm_probe_stop(FM_STOP_BUDGET, cpu->pc);
+        return;
+    }
     fm_media_guest_entry(cpu, phys);
 
 #if FM_PERF_PROFILE

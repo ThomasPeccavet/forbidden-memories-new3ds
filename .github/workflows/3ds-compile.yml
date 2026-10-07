@@ -40,6 +40,7 @@ jobs:
             build-profile/fm_audio.o \
             build-profile/fm_xa.o \
             build-profile/fm_media.o \
+            build-profile/fm_vlc.o \
             build-profile/fm_mdec.o \
             build-profile/fm_cpu.o \
             build-profile/fm_memory.o \

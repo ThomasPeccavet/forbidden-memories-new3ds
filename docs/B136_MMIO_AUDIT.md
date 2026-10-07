@@ -320,3 +320,29 @@ bottleneck : B136.16 ajoute la durée réelle et le temps de décodage MDEC.
 24x256) montre ~24 ms par mot, ~3 ms par bloc sur l'hôte. Gain de FPS à
 vérifier sous Azahar ; `movie_perf` distingue cadence couleur MDEC et coût
 codec. Sortie sonore et animation après le nom restent à traiter ensuite.
+
+## B136.17 : décodage Huffman de la routine FR 800914A8
+
+B136.16 utilisateur : movie_perf 153 / 25757 ms / 7237 ms codec / 5,90 FPS.
+Le codec représente ~28 % de la durée mesurée ; le reste comprend CPU
+lecteur/Huffman, uploads, callbacks et attentes. Ce n'est pas un profil
+isolé du Huffman. Le lecteur peut sauter les frames plus anciennes que
+F710C ; B136.17 conserve cette politique et le transport ReadS.
+
+`fm_vlc.c` traduit le pseudo-C résident dans une boucle C bornée, en lisant
+les tables du guest (a2) et les états B458/B45C..B480. Le résultat n'est
+commis que si le décodage aboutit à la fin ou à une pause de morceau valide.
+Source/table/contrôles ne doivent pas chevaucher la destination. En cas de
+refus, aucun registre ou octet guest ne change et le code natif continue.
+
+HLE raccordée au handoff principal et au checkpoint d'entrée généré, avant
+prologue. Un appel imbriqué réussi reprend au RA via le mécanisme de probe
+existant ; le test vérifie aussi refus, probe désarmée et autres entrées.
+
+49 tests : 420 fixtures différentielles contre le pseudo-C original exécuté
+sur hôte (seuls les types des pointeurs sont élargis pour l'hôte 64 bits).
+Versions 1/2/3, DC signés et prédictifs, AC, échappement, lookup secondaire,
+tokens groupés, padding et quatre limites de morceaux. Comparaison du
+buffer complet et de l'état natif lors de chaque reprise ; refus atomique
+avant ou après début de traduction. Ajouter l'observation `vlc_hle` au
+prochain essai pour vérifier activation et FPS réels, sans les annoncer.

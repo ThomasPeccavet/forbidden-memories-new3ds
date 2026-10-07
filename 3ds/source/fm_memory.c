@@ -1555,6 +1555,13 @@ int fm_memory_copy_to_ram(uint32_t address, const void *data, size_t size)
     memcpy(g_ram + offset, data, size);
     return 1;
 }
+const uint8_t *fm_memory_ram_span(uint32_t address, size_t size)
+{
+    uint32_t phys = address & 0x1FFFFFFFu, offset = phys & 0x001FFFFFu;
+    if (!g_ram || phys >= PSX_RAM_MIRROR_END || offset > g_ram_size
+        || size > g_ram_size - offset || size > PSX_RAM_SIZE - offset) return NULL;
+    return g_ram + offset;
+}
 int fm_memory_gpu_send_words(uint32_t address, uint32_t words)
 {
     uint32_t phys = address & 0x1FFFFFFFu, offset = phys & 0x001FFFFFu;
