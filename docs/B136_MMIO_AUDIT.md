@@ -212,3 +212,30 @@ bornée en taille, aucun changement des flags ou du pipeline guest.
 La cause du texte et de la scène corrompus reste à déterminer. Les vidéos
 STR/MDEC ne sont pas complètement prises en charge ; cela ne permet pas
 d'attribuer automatiquement à MDEC le défaut de texte.
+
+## B136.13 : ordering de completion CD
+
+Trace : req_type=04, flags=00080410, sync=02/cmd=09, reading=0,
+716 DataReady terminées, file LibCD vide. Le script est état 84, ptr=801C0025,
+glyph_write=800EC390. Ceci cible le démarrage du transport XA plutôt qu'une
+lecture de secteurs en échec (716 réussies, zéro échec).
+
+80014478 appelle 7B78C(Pause,1413C), puis pose busy=400. Le callback
+1413C passe la phase à 2 et efface busy. La livraison immédiate du bridge
+pouvait inverser cet ordre : effacer, puis reposer busy. De plus, son ancien
+test cb_active intervenait après l'écriture des métadonnées actives, ce qui
+pouvait écraser le contexte si le callback démarrait une autre commande.
+
+B136.13 sépare pending/actif, retourne immédiatement l'acceptation au caller,
+puis publie Complete et le vrai callback à partir de la frame suivante.
+La livraison se fait hors tick CD/DataReady/cleanup, et conserve le contexte
+interrompu courant et le GP de l'émetteur pour le callback. PC/RA/GPR et
+HI/LO sont restaurés au retour. Aucun flag busy, remaining ou script n'est
+forcé. La completion de ReadN garde l'armement DataReady existant.
+
+Le test host compile les fonctions de production : pas de callback inline,
+pas de Complete anticipé, reprise au PC de livraison, préservation de RA/GP/
+HI/LO, commande suivante pendant le callback sans corruption et refus d'une
+commande si pending est déjà occupé. Total 38 tests. Retester le cold boot,
+le titre et la nouvelle partie ; transport/audio XA et STR/MDEC restent
+incomplets, donc le résultat de la scène et du texte reste à vérifier.

@@ -2,6 +2,21 @@
 
 Dernière mise à jour : **7 octobre 2026**.
 
+## B136.13 : livraison asynchrone des callbacks CD
+
+L'introduction reste avec une requête type 4, flags 00080410, Pause terminée,
+file vide et script état 84. Le bridge livrait le callback avant de retourner
+au demandeur, alors que 80014478 pose son busy après l'enqueue. B136.13
+rend d'abord la main, puis livre la completion à partir de la frame hôte
+suivante. Le contexte interrompu est sauvegardé à la livraison (GPR, PC,
+HI/LO), avec métadonnées pending séparées des callbacks actifs. Une commande
+supplémentaire en attente est refusée sans écraser la précédente.
+
+38 tests host passent, dont un test C du scheduler/delivery réel. L'essai
+jeu reste nécessaire : la correction de timing n'est pas une implémentation
+audio XA ou STR/MDEC et ne prouve pas encore la résolution du texte/scène.
+intro-diag expose maintenant la phase XA et le callback pending/actif.
+
 ## Nouvelle partie : titre/menu validés, introduction à diagnostiquer
 
 L'essai utilisateur B136.11 valide Konami, l'attente START, l'animation du menu,

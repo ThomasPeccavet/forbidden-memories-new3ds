@@ -1082,6 +1082,11 @@ static const uint32_t g_b33_cb_sentinel = 0x8000FFC0u;
  * the game's CdlLOC: clearing 16 bytes there corrupts the render gate
  * at +4 and its colors. Keep the adjacent ready result at F7138 intact. */
 static const uint32_t g_b33_result_scratch = 0x800F7130u;
+static uint32_t g_b33_pending = 0u;
+static uint32_t g_b33_pending_cmd, g_b33_pending_callback;
+static uint32_t g_b33_pending_gp, g_b33_pending_frame;
+static uint32_t g_b33_saved_hi, g_b33_saved_lo;
+
 static uint32_t g_b33_cb_active = 0;
 static uint32_t g_b33_cb_resume = 0;
 static uint32_t g_b33_cb_addr = 0;
@@ -6781,105 +6786,80 @@ static void fm_b33_fill_cd_result(CPUState *cpu, uint32_t command)
     }
 }
 
+/* B136.13: CD completion is an interrupt, not a nested guest call.
+ * Return to the issuer before it sets busy; deliver after a host frame.
+ * Pending metadata is separate from the active interrupted context. */
 static int fm_b33_schedule_cd_callback(
-    CPUState *cpu,
-    uint32_t command,
-    uint32_t callback,
-    uint32_t resume_pc,
-    uint32_t params,
-    uint32_t context,
-    uint32_t return_value
+    CPUState *cpu, uint32_t command, uint32_t callback,
+    uint32_t resume_pc, uint32_t params, uint32_t context,
+    uint32_t return_value, uint32_t frame
 )
 {
-    if (!cpu)
-    {
-        return 0;
-    }
-
-    g_b33_cb_cmd = command & 0xFFu;
-    g_b33_cb_addr = callback;
-    g_b33_cb_resume = resume_pc;
+    if (!cpu) return 0;
     g_b33_last_params = params;
     g_b33_last_ctx = context;
-    g_b33_cb_return_value = return_value;
+    if (g_b33_pending)
+    {
+        /* Refuse a second outstanding command without losing the first.
+         * 7A1D4 returns -1 on failure; 7BA00 returns zero. */
+        ++g_b33_cb_skipped;
+        cpu->gpr[2] = return_value == 0u ? 0xFFFFFFFFu : 0u;
+        cpu->pc = resume_pc;
+        cpu->gpr[0] = 0u;
+        return 1;
+    }
+    g_b33_pending = 1u;
+    g_b33_pending_cmd = command & 0xFFu;
+    g_b33_pending_callback = callback;
+    g_b33_pending_gp = cpu->gpr[28];
+    g_b33_pending_frame = frame + 1u;
+    cpu->write_byte(0x80094BECu, 0u); /* No completion before delivery. */
+    cpu->write_byte(0x8009492Du, (uint8_t)command);
+    cpu->gpr[2] = return_value;
+    cpu->pc = resume_pc;
+    cpu->gpr[0] = 0u;
+    return 1;
+}
 
+static int fm_b33_deliver_cd_callback(CPUState *cpu, uint32_t frame)
+{
+    if (!cpu || !g_b33_pending || g_b33_cb_active
+        || (int32_t)(frame - g_b33_pending_frame) < 0)
+        return 0;
+    uint32_t command = g_b33_pending_cmd;
+    uint32_t callback = g_b33_pending_callback;
+    uint32_t callback_gp = g_b33_pending_gp;
+    g_b33_pending = 0u;
     fm_b33_fill_cd_result(cpu, command);
-
-    /*
-     * B66 - reproduire la partie INTERNE de LibCD que notre HLE B33
-     * court-circuitait.
-     *
-     * FUN_80079728 fait ceci lors d'un interrupt type 2 :
-     *   DAT_80094BEC = 2;
-     *   copie des 8 octets de resultat vers DAT_800F7130.
-     *
-     * Le callback utilisateur est appele seulement APRES cet update.
-     */
-    g_b66_last_cmd = command & 0xFFu;
-    g_b66_last_sync_before =
-        cpu->read_byte(0x80094BECu);
-
-    cpu->write_byte(
-        0x80094BECu,
-        2u
-    );
-
-    cpu->write_byte(
-        0x8009492Du,
-        (uint8_t)(command & 0xFFu)
-    );
-
-    /* fm_b33_fill_cd_result already populated the canonical sync result. */
-
-    g_b66_last_sync_after =
-        cpu->read_byte(0x80094BECu);
-
+    g_b66_last_cmd = command;
+    g_b66_last_sync_before = cpu->read_byte(0x80094BECu);
+    cpu->write_byte(0x80094BECu, 2u);
+    cpu->write_byte(0x8009492Du, (uint8_t)command);
+    g_b66_last_sync_after = cpu->read_byte(0x80094BECu);
     ++g_b66_complete_publish;
-
-    /* Pas de callback : la commande est simplement acceptee. */
-    if (
-        callback < 0x80010000u
-        || callback >= 0x801E0000u
-    )
+    if (callback < 0x80010000u || callback >= 0x801E0000u)
     {
         ++g_b33_cb_skipped;
-        cpu->gpr[2] = g_b33_cb_return_value;
-        cpu->pc = resume_pc;
-        cpu->gpr[31] = resume_pc;
-        cpu->gpr[0] = 0u;
-        return 1;
+        return 0;
     }
-
-    /* Une seule profondeur suffit pour le chemin succes (event 2). */
-    if (g_b33_cb_active)
-    {
-        ++g_b33_cb_skipped;
-        cpu->gpr[2] = g_b33_cb_return_value;
-        cpu->pc = resume_pc;
-        cpu->gpr[31] = resume_pc;
-        cpu->gpr[0] = 0u;
-        return 1;
-    }
-
-    for (unsigned i = 0; i < 32u; ++i)
-    {
+    /* Preserve the context at delivery, not the obsolete issuing call. */
+    for (unsigned i = 0u; i < 32u; ++i)
         g_b33_saved_gpr[i] = cpu->gpr[i];
-    }
+    g_b33_saved_hi = cpu->hi;
+    g_b33_saved_lo = cpu->lo;
+    g_b33_cb_resume = cpu->pc;
+    g_b33_cb_return_value = cpu->gpr[2];
+    g_b33_cb_cmd = command;
+    g_b33_cb_addr = callback;
     ++g_b33_ctx_saved;
-
     g_b33_cb_active = 1u;
     ++g_b33_cb_started;
-
-    /*
-     * Les callbacks du moteur testent a0 == 2 pour CdlComplete
-     * et a0 == 5 pour l'erreur/retry. a1 pointe sur le resultat.
-     */
+    cpu->gpr[28] = callback_gp;
     cpu->gpr[4] = 2u;
     cpu->gpr[5] = g_b33_result_scratch;
     cpu->pc = callback;
     cpu->gpr[31] = g_b33_cb_sentinel;
     cpu->gpr[0] = 0u;
-
     return 1;
 }
 
@@ -7154,6 +7134,8 @@ static int fm_execute_guest_vblank_callback(
             }
             ++g_b33_ctx_restored;
 
+            irq_cpu.hi = g_b33_saved_hi;
+            irq_cpu.lo = g_b33_saved_lo;
             irq_cpu.gpr[2] = g_b33_cb_return_value;
             irq_cpu.pc = resume_pc;
             irq_cpu.gpr[0] = 0u;
@@ -7220,7 +7202,8 @@ static int fm_execute_guest_vblank_callback(
                 resume_pc,
                 params,
                 0u,
-                0u
+                0u,
+                        frame
             );
 
             continue;
@@ -7274,7 +7257,8 @@ static int fm_execute_guest_vblank_callback(
                 resume_pc,
                 params,
                 context,
-                1u
+                1u,
+                        frame
             );
 
             continue;
@@ -8515,6 +8499,8 @@ static void fm_capture_guest_string(
 
 static void fm_cd_hle_reset(void)
 {
+    g_b33_pending = 0u;
+    g_b33_cb_active = 0u;
     memset(
         g_cd_sector,
         0,
@@ -12989,6 +12975,14 @@ int main(void)
                     dispatch_address
                     & 0x1FFFFFFFu;
 
+                /* Deliver hardware completion outside guest CD/data/tick callbacks. */
+                if (!g_cd_tick_active && !g_b34_ready_active && !g_b35_finalizer_active
+                    && fm_b33_deliver_cd_callback(cpu, frame))
+                {
+                    static_miss = 0;
+                    continue;
+                }
+
                 /*
                  * B136.02 - PS1 IRQ preemption inside FUN_80046750.
                  *
@@ -13221,6 +13215,8 @@ int main(void)
                      * Le haut niveau 8007B78C gere desormais lui-meme
                      * son ID et son historique dans le guest.
                      */
+                    cpu->hi = g_b33_saved_hi;
+                    cpu->lo = g_b33_saved_lo;
                     cpu->gpr[2] = g_b33_cb_return_value;
 
                     cpu->pc = resume_pc;
@@ -14341,7 +14337,8 @@ int main(void)
                         resume_pc,
                         params,
                         0u,
-                        0u
+                        0u,
+                        frame
                     );
 
                     static_miss = 0;
@@ -14390,7 +14387,8 @@ int main(void)
                         resume_pc,
                         params,
                         context,
-                        1u
+                        1u,
+                        frame
                     );
 
                     static_miss = 0;
@@ -20207,7 +20205,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.12\nvideo_mode=%08lX\n"
+                            "video_probe=B136.13\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20275,7 +20273,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.12\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.13\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"
@@ -20302,6 +20300,15 @@ int main(void)
                                 (unsigned long)g_b32_getsec_ok,
                                 (unsigned long)g_b32_getsec_fail,
                                 (unsigned long)g_b32_last_lba);
+                            fprintf(intro_file,
+                                "cd_callback=pending:%lu active:%lu cmd:%02lX addr:%08lX\n"
+                                "xa_stage=%02lX flags=%04lX position=%08lX end=%08lX\n",
+                                (unsigned long)g_b33_pending, (unsigned long)g_b33_cb_active,
+                                (unsigned long)g_b33_cb_cmd, (unsigned long)g_b33_cb_addr,
+                                (unsigned long)fm_memory_read_byte(0x8009C464u),
+                                (unsigned long)fm_memory_read_half(0x8009C47Cu),
+                                (unsigned long)fm_memory_read_word(0x800EB1E8u),
+                                (unsigned long)fm_memory_read_word(0x800EB1ECu));
                             if (intro_req_valid)
                             {
                                 static const unsigned req_offsets[] =
