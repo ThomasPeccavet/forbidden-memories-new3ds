@@ -2,6 +2,15 @@
 
 Dernière mise à jour : **8 octobre 2026**.
 
+## B136.33 : réduction des scans de diagnostic pendant les combats
+
+La mesure utilisateur en duel B136.32 indique 14,6 latches d'image/s,
+avec 1013 ms avant présentation sur 2122 ms. B136.33 désactive les anciens
+parcours d'OT dédiés aux diagnostics des cartes en main. Le prédicat du
+bridge de récupération reste actif, ainsi que le tri et le rendu.
+Le gain en jeu reste à mesurer sur la même sauvegarde de combat.
+Voir [les changements et leur validation](B136_33_OT_DIAGNOSTICS.md).
+
 ## B136.32 : mesure des performances globales
 
 L'essai utilisateur B136.31 valide le début du jeu après environ 15 secondes

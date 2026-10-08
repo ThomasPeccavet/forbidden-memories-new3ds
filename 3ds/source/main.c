@@ -10,6 +10,12 @@
 #define FM_PERF_PROFILE 0
 #endif
 
+/* B136.33: expensive legacy hand/OT inspections are diagnostic only.
+ * Opt in with -DFM_OT_DIAGNOSTICS=1 when investigating packet lifetime. */
+#ifndef FM_OT_DIAGNOSTICS
+#define FM_OT_DIAGNOSTICS 0
+#endif
+
 #include "fm_platform.h"
 #include "fm_cpu.h"
 #include "fm_memory.h"
@@ -3023,6 +3029,12 @@ static int b13556_chain_contains_hand(
         *steps_out = 0u;
     }
 
+    /* Outputs above stay deterministic when the optional scan is off. */
+    if (!FM_OT_DIAGNOSTICS)
+    {
+        return 0;
+    }
+
     if (!cpu || start_tag == 0u)
     {
         return 0;
@@ -3092,7 +3104,7 @@ static uint32_t g_b13557_last_src_steps = 0u;
 static uint32_t g_b13557_last_dst_steps = 0u;
 static uint32_t g_b13557_last_draw_steps = 0u;
 
-static int b13557_chain_has_hand_shape(
+static int fm_chain_has_hand_shape(
     CPUState *cpu,
     uint32_t start_tag,
     uint32_t *steps_out,
@@ -3156,6 +3168,19 @@ static int b13557_chain_has_hand_shape(
     return 0;
 }
 
+/* The B135.64 recovery bridge needs a real shape check. Only diagnostic
+ * callers use this optional wrapper; never bypass the recovery predicate. */
+static int b13557_chain_has_hand_shape(
+    CPUState *cpu, uint32_t start_tag,
+    uint32_t *steps_out, uint32_t *packet_out
+)
+{
+    if (steps_out) *steps_out = 0u;
+    if (packet_out) *packet_out = 0u;
+    if (!FM_OT_DIAGNOSTICS) return 0;
+    return fm_chain_has_hand_shape(cpu, start_tag, steps_out, packet_out);
+}
+
 /*
  * B135.58 - packet lifetime and exact OT reachability.
  *
@@ -3213,6 +3238,12 @@ static int b13558_chain_reaches(
     if (steps_out) *steps_out = 0u;
     if (stop_out) *stop_out = 0u;
     if (header_out) *header_out = 0u;
+
+    /* Outputs above stay deterministic when the optional scan is off. */
+    if (!FM_OT_DIAGNOSTICS)
+    {
+        return 0;
+    }
 
     if (!cpu || start_tag == 0u || target == 0u)
     {
@@ -7013,7 +7044,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
     uint64_t report_start = osGetTime();
     FILE *fp = fopen("sdmc:/3ds/fm-new3ds/perf-latest.txt", "wb");
     if (fp) {
-        fprintf(fp, "probe=B136.32 window_ms=%llu pc=%08lX script=%04lX\n",
+        fprintf(fp, "probe=B136.33 window_ms=%llu pc=%08lX script=%04lX\n",
             (unsigned long long)elapsed, (unsigned long)(cpu ? cpu->pc : 0u),
             (unsigned long)fm_memory_read_half(0x8009C610u));
         fprintf(fp, "host_fps_x100=%llu new_images_fps_x100=%llu samples=%lu\n",
@@ -7039,6 +7070,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
             (unsigned long)g_b91_fast_entries, (unsigned long)g_b91_fast_blocks,
             (unsigned long long)g_b91_fast_instructions,
             (unsigned long)g_b91_slow_handoff_pc, (unsigned long)g_b91_slow_handoff_ms);
+        fprintf(fp, "diagnostic_ot_scans=%u\n", (unsigned)FM_OT_DIAGNOSTICS);
         fprintf(fp, "native_sampling=1/64 totals_are_sampled_not_estimated\n");
         for (unsigned rank=0; rank<B110_PROF_SLOTS; ++rank) {
             B110ProbeStat hot = {0}; b110_get_rank(rank, &hot);
@@ -15300,7 +15332,7 @@ int main(void)
                                         0u;
 
                                     if (
-                                        b13557_chain_has_hand_shape(
+                                        fm_chain_has_hand_shape(
                                             cpu,
                                             hand_tag,
                                             NULL,
@@ -20158,7 +20190,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.32\nvideo_mode=%08lX\n"
+                            "video_probe=B136.33\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20226,7 +20258,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.32\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.33\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"

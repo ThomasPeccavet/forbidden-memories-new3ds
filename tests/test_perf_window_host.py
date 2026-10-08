@@ -16,6 +16,7 @@ class PerfWindowTests(unittest.TestCase):
 typedef struct { uint32_t pc; } CPUState;
 typedef struct { uint32_t start_pc,end_pc,hits,max_us; uint64_t total_us; } B110ProbeStat;
 #define B110_PROF_SLOTS 12
+#define FM_OT_DIAGNOSTICS 0
 static B110ProbeStat g_b110_prof[12];
 static uint32_t g_b84_latch_count, g_seq_irq_done, g_seq_irq_max_ms;
 static uint64_t g_seq_irq_total_ms;
