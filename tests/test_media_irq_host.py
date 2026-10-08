@@ -58,6 +58,8 @@ int main(void) {
     assert(!memcmp(&cpu, &saved, sizeof(cpu)));
     assert(!fm_media_irq_dispatch(&cpu));
     timer_pending = 1;
+    assert(!fm_media_irq_dispatch(&cpu) && timer_pending == 1);
+    cpu.pc = 0x80012C50; saved = cpu;
     assert(fm_media_irq_dispatch(&cpu) && cpu.pc == 0x8004BBC4);
     assert(cpu.gpr[28] == saved.gpr[28]);
     cpu.pc = g_media_irq_sentinel; assert(fm_media_irq_dispatch(&cpu));
