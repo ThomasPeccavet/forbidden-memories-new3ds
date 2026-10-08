@@ -36,3 +36,17 @@ int main(void){
   load=s[s.index('static int fm_b135_quick_load('):s.index('static int fm_b135_quick_load(')+12000]
   self.assertIn('fm_host_clock_reset(&g_ps1_host_clock);',load)
   self.assertIn('for (unsigned clock_tick=0; clock_tick<clock_due; ++clock_tick)',s)
+
+ def test_clock_precedes_guest_dispatch_after_input(self):
+  s=(ROOT/'3ds/source/main.c').read_text()
+  loop=s.index('while (aptMainLoop())')
+  clock=s.index('unsigned clock_due=fm_host_clock_due(',loop)
+  execution=s.index('* EXECUTION',loop)
+  dispatch=s.index('uint64_t b16_slice_start_ms',loop)
+  wait=s.index('gspWaitForVBlank();',dispatch)
+  self.assertLess(clock,execution)
+  self.assertLess(execution,dispatch)
+  self.assertLess(dispatch,wait)
+  self.assertEqual(s.count('unsigned clock_due=fm_host_clock_due('),1)
+  self.assertIn('fm_mdec_host_frame = frame;',s[clock:execution])
+  self.assertLess(s.index('fm_b135_quick_load(',loop),clock)

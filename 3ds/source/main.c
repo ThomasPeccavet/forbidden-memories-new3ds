@@ -7076,7 +7076,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         /* A single stdio buffer avoids small writes per formatted line. */
         char report_buffer[8192];
         setvbuf(fp, report_buffer, _IOFBF, sizeof(report_buffer));
-        fprintf(fp, "probe=B136.41 window_ms=%llu pc=%08lX script=%04lX\n",
+        fprintf(fp, "probe=B136.42 window_ms=%llu pc=%08lX script=%04lX\n",
             (unsigned long long)elapsed, (unsigned long)(cpu ? cpu->pc : 0u),
             (unsigned long)fm_memory_read_half(0x8009C610u));
         fprintf(fp, "host_fps_x100=%llu new_images_fps_x100=%llu samples=%lu\n",
@@ -13097,6 +13097,276 @@ int main(void)
             }
         }
 
+
+        /* B136.42: input is sampled above; service due clock callbacks before
+         * guest execution, including VBlanks elapsed during the host wait. */
+        unsigned clock_due=fm_host_clock_due(&g_ps1_host_clock,osGetTime());
+        for (unsigned clock_tick=0; clock_tick<clock_due; ++clock_tick) {
+            ++frame;
+            ++g_clock_ticks;
+
+
+            /*
+             * B136.42: consume elapsed VBlanks before guest VSync is retested.
+             */
+            if (memory_status == 0)
+            {
+                fm_memory_vblank_tick();
+                if (game_running && fm_execute_guest_timer_callback(cpu) < 0) {
+                    /* An incomplete native ISR must never leave a reentrancy
+                     * gate set while the game silently continues. */
+                    g_b65_stop_code = 4u;
+                    g_b65_stop_pc = 0x8004BBC4u;
+                    g_b65_stop_detail = g_seq_irq_blocks;
+                    game_running = 0;
+                }
+
+                /*
+                 * B12 : executer le vrai callback VBlank du jeu dans un
+                 * contexte CPU isole, sans detruire les registres du
+                 * thread principal.
+                 */
+                if (game_running)
+                {
+                    {
+                        uint64_t b105_vblank_start_ms =
+                            osGetTime();
+
+                        fm_execute_guest_vblank_callback(
+                            cpu,
+                            frame
+                        );
+
+                        g_b105_vblank_ms =
+                            (uint32_t)(
+                                osGetTime()
+                                -
+                                b105_vblank_start_ms
+                            );
+                    }
+
+                    /*
+                     * B72 - conserver le dernier etat input guest non nul.
+                     * FUN_8003CEA4, executee par le callback VBlank,
+                     * transforme 70C en held/edge/repeat.
+                     */
+                    {
+                        uint32_t b72_raw =
+                            fm_memory_read_word(0x8009C70Cu)
+                            &
+                            0xFFFFu;
+
+                        uint32_t b72_held =
+                            fm_memory_read_word(0x8009C710u)
+                            &
+                            0xFFFFu;
+
+                        uint32_t b72_edge =
+                            fm_memory_read_word(0x8009C72Cu)
+                            &
+                            0xFFFFu;
+
+                        uint32_t b72_rep =
+                            fm_memory_read_word(0x8009C728u)
+                            &
+                            0xFFFFu;
+
+                        if (
+                            b72_raw != 0u
+                            ||
+                            b72_held != 0u
+                            ||
+                            b72_edge != 0u
+                            ||
+                            b72_rep != 0u
+                        )
+                        {
+                            g_b72_guest_raw_latched = b72_raw;
+                            g_b72_guest_held_latched = b72_held;
+                            g_b72_guest_edge_latched = b72_edge;
+                            g_b72_guest_rep_latched = b72_rep;
+                            g_b72_guest_nonzero_frame = frame;
+                        }
+
+                        if ((b72_edge & 0x0008u) != 0u)
+                        {
+                            ++g_b72_edge8_hits;
+                            g_b72_edge8_last_frame = frame;
+                        }
+                    }
+
+                    /*
+                     * =====================================================
+                     * B13 FASTBOOT 401A4
+                     * =====================================================
+                     *
+                     * B12 a prouve que le vrai callback VBlank s'execute
+                     * correctement (retour propre + 8003CE34 traverse),
+                     * mais le startup reste dans la boucle interne de
+                     * FUN_800401A4.
+                     *
+                     * On laisse d'abord la fonction faire son setup et au
+                     * moins quatre vrais callbacks VBlank. Quand le thread
+                     * principal est de nouveau dans le VSync de cette boucle,
+                     * on restaure le SP d'entree et on reprend exactement au
+                     * RA du JAL appelant (80012B48 sur notre build FR).
+                     *
+                     * Cela evite de sauter le setup de 401A4 tout en supprimant
+                     * uniquement son attente infinie dans notre environnement.
+                     */
+                    if (
+                        !g_fast401_forced
+                        && g_hit_401a4 != 0u
+                        && g_sp_401a4 != 0u
+                        && g_ra_401a4 != 0u
+                        && g_irq_exec_ok >= 4u
+                        && ((cpu->pc & 0x1FFFFFFFu) == 0x000746B8u)
+                        && cpu->gpr[31] == 0x80012D48u
+                    )
+                    {
+                        cpu->pc = g_ra_401a4;
+                        cpu->gpr[29] = g_sp_401a4;
+                        cpu->gpr[31] = g_ra_401a4;
+                        cpu->gpr[2] = 0u;
+                        cpu->gpr[0] = 0u;
+
+                        /* Annuler l'attente VSync HLE devenue obsolete. */
+                        g_vsync_wait_active = 0;
+                        g_vsync_wait_until_frame = 0;
+
+                        g_fast401_forced = 1u;
+                        g_fast401_frame = frame;
+                    }
+
+                    /*
+                     * B32 : si FUN_80043E3C revient d'elle-meme apres que
+                     * le pont CD a effectivement livre des secteurs, noter
+                     * ce retour naturel. On ne saute plus sa sequence
+                     * d'initialisation.
+                     */
+                    if (
+                        !g_b32_43e_returned
+                        && g_b32_getsec_ok != 0u
+                        && g_ra_43e3c != 0u
+                        && cpu->pc == g_ra_43e3c
+                    )
+                    {
+                        g_b32_43e_returned = 1u;
+                        g_b32_43e_return_frame = frame;
+                    }
+
+
+                    /*
+                     * =====================================================
+                     * B14 FASTBOOT 43E3C
+                     * =====================================================
+                     *
+                     * B13 a prouve que le retour force de 401A4 nous fait
+                     * bien entrer dans FUN_80043E3C. Le nouveau verrou est
+                     * son attente de chargement asynchrone : 80013700 est
+                     * atteint, mais aucun secteur CD n'est jamais transfere.
+                     *
+                     * On ne saute pas 43E3C a son entree. On attend qu'elle
+                     * ait initialise sa requete et soit effectivement entree
+                     * dans 80013700, puis on restaure le contexte d'entree
+                     * de 43E3C et on reprend au vrai RA du startup.
+                     *
+                     * C'est volontairement un FASTBOOT de bring-up : le but
+                     * est d'atteindre 8002DF60 et de provoquer enfin les
+                     * premieres commandes graphiques utiles du jeu.
+                     */
+                    if (
+                        !g_fast43e_forced
+                        && !g_b32_43e_returned
+                        && g_fast401_forced
+                        && g_hit_intro_init != 0u
+                        && g_hit_load_wait != 0u
+                        && g_ra_43e3c != 0u
+                        && g_sp_43e3c != 0u
+                        && g_irq_exec_ok >= 8u
+                        /*
+                         * B32 laisse maintenant la vraie requete CD se
+                         * terminer. L'ancien fastboot n'est conserve qu'en
+                         * filet de securite si le bridge n'a jamais reussi
+                         * a fournir un secteur apres plusieurs secondes.
+                         */
+                        && g_b32_getsec_ok == 0u
+                        && frame >= (g_fast401_frame + 300u)
+                    )
+                    {
+                        cpu->pc = g_ra_43e3c;
+                        cpu->gpr[29] = g_sp_43e3c;
+                        cpu->gpr[31] = g_ra_43e3c;
+                        cpu->gpr[2] = 0u;
+                        cpu->gpr[0] = 0u;
+
+                        /* Sortir proprement de toute attente HLE en cours. */
+                        g_vsync_wait_active = 0;
+                        g_vsync_wait_until_frame = 0;
+
+                        g_fast43e_forced = 1u;
+                        g_fast43e_frame = frame;
+                    }
+
+                    /*
+                     * =====================================================
+                     * B15 DIRECT MAIN STATE MACHINE
+                     * =====================================================
+                     *
+                     * B14 a enfin fait apparaitre de vraies commandes DRAW
+                     * et COPY GPU, mais le startup n'appelle toujours pas
+                     * naturellement 8002DF60. On cesse d'attendre : apres
+                     * 43E3C, on initialise le flag attendu par le startup et
+                     * on pilote directement la vraie fonction 8002DF60.
+                     */
+                    if (
+                        !g_direct2df_active
+                        &&
+                        (
+                            (
+                                g_fast43e_forced
+                                && frame >= (g_fast43e_frame + 2u)
+                            )
+                            ||
+                            (
+                                /*
+                                 * En chemin naturel, laisser le startup
+                                 * poursuivre seul. Direct-2DF ne redevient
+                                 * qu'un fallback si 8002DF60 n'est toujours
+                                 * jamais atteint deux secondes plus tard.
+                                 */
+                                g_b32_43e_returned
+                                && g_hit_main_loop == 0u
+                                && frame >= (g_b32_43e_return_frame + 120u)
+                            )
+                        )
+                    )
+                    {
+                        fm_memory_write_byte(
+                            0x8009C60Du,
+                            8u
+                        );
+
+                        g_direct2df_active = 1u;
+                        g_direct2df_start_frame = frame;
+
+                        /*
+                         * Forcer le premier scheduling a la frame suivante.
+                         */
+                        cpu->pc = g_direct2df_sentinel;
+                        cpu->gpr[31] = g_direct2df_sentinel;
+                        cpu->gpr[0] = 0u;
+
+                        g_vsync_wait_active = 0;
+                        g_vsync_wait_until_frame = 0;
+                    }
+                }
+            }
+
+
+        } /* wall-clock VBlank ticks */
+        fm_mdec_host_frame = frame;
+        fm_mdec_host_cycles = (uint64_t)frame * 677376u;
 
         /*
          * ====================================================
@@ -20278,7 +20548,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.41\nvideo_mode=%08lX\n"
+                            "video_probe=B136.42\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20346,7 +20616,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.41\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.42\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"
@@ -21094,271 +21364,7 @@ int main(void)
         }
 
 
-        unsigned clock_due=fm_host_clock_due(&g_ps1_host_clock,osGetTime());
-        for (unsigned clock_tick=0; clock_tick<clock_due; ++clock_tick) {
-            ++frame;
-            ++g_clock_ticks;
 
-
-            /*
-             * B136.41: PS1 VBlank/root counters follow wall time, not slice count.
-             */
-            if (memory_status == 0)
-            {
-                fm_memory_vblank_tick();
-                if (game_running && fm_execute_guest_timer_callback(cpu) < 0) {
-                    /* An incomplete native ISR must never leave a reentrancy
-                     * gate set while the game silently continues. */
-                    g_b65_stop_code = 4u;
-                    g_b65_stop_pc = 0x8004BBC4u;
-                    g_b65_stop_detail = g_seq_irq_blocks;
-                    game_running = 0;
-                }
-
-                /*
-                 * B12 : executer le vrai callback VBlank du jeu dans un
-                 * contexte CPU isole, sans detruire les registres du
-                 * thread principal.
-                 */
-                if (game_running)
-                {
-                    {
-                        uint64_t b105_vblank_start_ms =
-                            osGetTime();
-
-                        fm_execute_guest_vblank_callback(
-                            cpu,
-                            frame
-                        );
-
-                        g_b105_vblank_ms =
-                            (uint32_t)(
-                                osGetTime()
-                                -
-                                b105_vblank_start_ms
-                            );
-                    }
-
-                    /*
-                     * B72 - conserver le dernier etat input guest non nul.
-                     * FUN_8003CEA4, executee par le callback VBlank,
-                     * transforme 70C en held/edge/repeat.
-                     */
-                    {
-                        uint32_t b72_raw =
-                            fm_memory_read_word(0x8009C70Cu)
-                            &
-                            0xFFFFu;
-
-                        uint32_t b72_held =
-                            fm_memory_read_word(0x8009C710u)
-                            &
-                            0xFFFFu;
-
-                        uint32_t b72_edge =
-                            fm_memory_read_word(0x8009C72Cu)
-                            &
-                            0xFFFFu;
-
-                        uint32_t b72_rep =
-                            fm_memory_read_word(0x8009C728u)
-                            &
-                            0xFFFFu;
-
-                        if (
-                            b72_raw != 0u
-                            ||
-                            b72_held != 0u
-                            ||
-                            b72_edge != 0u
-                            ||
-                            b72_rep != 0u
-                        )
-                        {
-                            g_b72_guest_raw_latched = b72_raw;
-                            g_b72_guest_held_latched = b72_held;
-                            g_b72_guest_edge_latched = b72_edge;
-                            g_b72_guest_rep_latched = b72_rep;
-                            g_b72_guest_nonzero_frame = frame;
-                        }
-
-                        if ((b72_edge & 0x0008u) != 0u)
-                        {
-                            ++g_b72_edge8_hits;
-                            g_b72_edge8_last_frame = frame;
-                        }
-                    }
-
-                    /*
-                     * =====================================================
-                     * B13 FASTBOOT 401A4
-                     * =====================================================
-                     *
-                     * B12 a prouve que le vrai callback VBlank s'execute
-                     * correctement (retour propre + 8003CE34 traverse),
-                     * mais le startup reste dans la boucle interne de
-                     * FUN_800401A4.
-                     *
-                     * On laisse d'abord la fonction faire son setup et au
-                     * moins quatre vrais callbacks VBlank. Quand le thread
-                     * principal est de nouveau dans le VSync de cette boucle,
-                     * on restaure le SP d'entree et on reprend exactement au
-                     * RA du JAL appelant (80012B48 sur notre build FR).
-                     *
-                     * Cela evite de sauter le setup de 401A4 tout en supprimant
-                     * uniquement son attente infinie dans notre environnement.
-                     */
-                    if (
-                        !g_fast401_forced
-                        && g_hit_401a4 != 0u
-                        && g_sp_401a4 != 0u
-                        && g_ra_401a4 != 0u
-                        && g_irq_exec_ok >= 4u
-                        && ((cpu->pc & 0x1FFFFFFFu) == 0x000746B8u)
-                        && cpu->gpr[31] == 0x80012D48u
-                    )
-                    {
-                        cpu->pc = g_ra_401a4;
-                        cpu->gpr[29] = g_sp_401a4;
-                        cpu->gpr[31] = g_ra_401a4;
-                        cpu->gpr[2] = 0u;
-                        cpu->gpr[0] = 0u;
-
-                        /* Annuler l'attente VSync HLE devenue obsolete. */
-                        g_vsync_wait_active = 0;
-                        g_vsync_wait_until_frame = 0;
-
-                        g_fast401_forced = 1u;
-                        g_fast401_frame = frame;
-                    }
-
-                    /*
-                     * B32 : si FUN_80043E3C revient d'elle-meme apres que
-                     * le pont CD a effectivement livre des secteurs, noter
-                     * ce retour naturel. On ne saute plus sa sequence
-                     * d'initialisation.
-                     */
-                    if (
-                        !g_b32_43e_returned
-                        && g_b32_getsec_ok != 0u
-                        && g_ra_43e3c != 0u
-                        && cpu->pc == g_ra_43e3c
-                    )
-                    {
-                        g_b32_43e_returned = 1u;
-                        g_b32_43e_return_frame = frame;
-                    }
-
-
-                    /*
-                     * =====================================================
-                     * B14 FASTBOOT 43E3C
-                     * =====================================================
-                     *
-                     * B13 a prouve que le retour force de 401A4 nous fait
-                     * bien entrer dans FUN_80043E3C. Le nouveau verrou est
-                     * son attente de chargement asynchrone : 80013700 est
-                     * atteint, mais aucun secteur CD n'est jamais transfere.
-                     *
-                     * On ne saute pas 43E3C a son entree. On attend qu'elle
-                     * ait initialise sa requete et soit effectivement entree
-                     * dans 80013700, puis on restaure le contexte d'entree
-                     * de 43E3C et on reprend au vrai RA du startup.
-                     *
-                     * C'est volontairement un FASTBOOT de bring-up : le but
-                     * est d'atteindre 8002DF60 et de provoquer enfin les
-                     * premieres commandes graphiques utiles du jeu.
-                     */
-                    if (
-                        !g_fast43e_forced
-                        && !g_b32_43e_returned
-                        && g_fast401_forced
-                        && g_hit_intro_init != 0u
-                        && g_hit_load_wait != 0u
-                        && g_ra_43e3c != 0u
-                        && g_sp_43e3c != 0u
-                        && g_irq_exec_ok >= 8u
-                        /*
-                         * B32 laisse maintenant la vraie requete CD se
-                         * terminer. L'ancien fastboot n'est conserve qu'en
-                         * filet de securite si le bridge n'a jamais reussi
-                         * a fournir un secteur apres plusieurs secondes.
-                         */
-                        && g_b32_getsec_ok == 0u
-                        && frame >= (g_fast401_frame + 300u)
-                    )
-                    {
-                        cpu->pc = g_ra_43e3c;
-                        cpu->gpr[29] = g_sp_43e3c;
-                        cpu->gpr[31] = g_ra_43e3c;
-                        cpu->gpr[2] = 0u;
-                        cpu->gpr[0] = 0u;
-
-                        /* Sortir proprement de toute attente HLE en cours. */
-                        g_vsync_wait_active = 0;
-                        g_vsync_wait_until_frame = 0;
-
-                        g_fast43e_forced = 1u;
-                        g_fast43e_frame = frame;
-                    }
-
-                    /*
-                     * =====================================================
-                     * B15 DIRECT MAIN STATE MACHINE
-                     * =====================================================
-                     *
-                     * B14 a enfin fait apparaitre de vraies commandes DRAW
-                     * et COPY GPU, mais le startup n'appelle toujours pas
-                     * naturellement 8002DF60. On cesse d'attendre : apres
-                     * 43E3C, on initialise le flag attendu par le startup et
-                     * on pilote directement la vraie fonction 8002DF60.
-                     */
-                    if (
-                        !g_direct2df_active
-                        &&
-                        (
-                            (
-                                g_fast43e_forced
-                                && frame >= (g_fast43e_frame + 2u)
-                            )
-                            ||
-                            (
-                                /*
-                                 * En chemin naturel, laisser le startup
-                                 * poursuivre seul. Direct-2DF ne redevient
-                                 * qu'un fallback si 8002DF60 n'est toujours
-                                 * jamais atteint deux secondes plus tard.
-                                 */
-                                g_b32_43e_returned
-                                && g_hit_main_loop == 0u
-                                && frame >= (g_b32_43e_return_frame + 120u)
-                            )
-                        )
-                    )
-                    {
-                        fm_memory_write_byte(
-                            0x8009C60Du,
-                            8u
-                        );
-
-                        g_direct2df_active = 1u;
-                        g_direct2df_start_frame = frame;
-
-                        /*
-                         * Forcer le premier scheduling a la frame suivante.
-                         */
-                        cpu->pc = g_direct2df_sentinel;
-                        cpu->gpr[31] = g_direct2df_sentinel;
-                        cpu->gpr[0] = 0u;
-
-                        g_vsync_wait_active = 0;
-                        g_vsync_wait_until_frame = 0;
-                    }
-                }
-            }
-
-
-        } /* wall-clock VBlank ticks */
 
         /*
          * Observer l'état réel du jeu.

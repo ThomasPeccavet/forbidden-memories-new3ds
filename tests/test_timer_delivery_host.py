@@ -14,8 +14,8 @@ class TimerDeliveryTests(unittest.TestCase):
         # A capture can be inside DrawSync with I_MASK=0. Delivery must also
         # see the guest re-enable IRQs before returning to the host loop.
         self.assertEqual(main.count("fm_execute_guest_timer_callback(cpu)"), 2)
-        call = main.index("fm_execute_guest_timer_callback(cpu)")
         dispatch = main.index("fm_media_guest_entry(cpu, phys)")
+        call = main.rfind("fm_execute_guest_timer_callback(cpu)", 0, dispatch)
         self.assertLess(call, dispatch)
         self.assertNotIn("continue;", main[call:dispatch])
 

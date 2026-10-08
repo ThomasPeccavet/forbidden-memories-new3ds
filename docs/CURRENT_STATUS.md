@@ -2,6 +2,15 @@
 
 Dernière mise à jour : **8 octobre 2026**.
 
+## B136.42 : servir l'horloge avant l'exécution guest
+
+B136.41 tient 60 Hz mais mesure 53 attentes VSync pour 24 images, sans gain.
+B136.42 déplace les ticks/callbacks dus avant l'exécution du jeu, après les
+entrées et le quick-load. Le VSync voit ainsi les ticks écoulés pendant
+l'attente hôte précédente. Cadence, budgets et règles de présentation
+restent identiques ; le gain reste à mesurer dans Azahar.
+Voir [l'ordre d'exécution et ses limites](B136_42_CLOCK_ORDER.md).
+
 ## B136.41 : reprise des tranches et horloge VBlank indépendante
 
 B136.40 mesure 285 ms d'attente après épuisement du budget sur 2006 ms.
