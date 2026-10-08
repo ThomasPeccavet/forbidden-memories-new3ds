@@ -21,7 +21,8 @@ static void fm_gpu_perf_texture_window(uint64_t *n, uint64_t *f, uint32_t *nt, u
 }
 static unsigned gpu_resets;
 static unsigned g_perf_wait_reason;
-static uint32_t g_clock_ticks,g_budget_wait_skips;
+static uint32_t g_clock_ticks,g_budget_wait_skips,g_native_probe_calls,g_b13514_chain_entries;
+static uint64_t g_b13514_chain_dispatches;
 static uint32_t g_b105_slice_budget_ms=12, g_b84_budget_yields;
 static uint32_t g_b108_vsync_mode0,g_b108_vsync_modeN,g_b108_vsync_immediate,g_b1358_vsync_completions;
 static void fm_gpu_perf_window_reset(void) { ++gpu_resets; }

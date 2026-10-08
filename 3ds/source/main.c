@@ -1,3 +1,4 @@
+#include "fm_native_batch.h"
 #include "fm_host_clock.h"
 #include <3ds.h>
 
@@ -2266,6 +2267,7 @@ static uint32_t g_b106_wait_ms = 0u;
 static unsigned g_perf_wait_reason = 3u;
 static FMHostClock g_ps1_host_clock;
 static uint32_t g_clock_ticks, g_budget_wait_skips;
+static uint32_t g_native_probe_calls;
 
 
 /*
@@ -7043,6 +7045,8 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
     static uint32_t report_ms;
     static uint64_t dma_before, payload_before;
     static uint32_t clock_before, skips_before;
+    static uint32_t probes_before, chains_before;
+    static uint64_t blocks_before;
     static uint64_t wait_reason_ms[4];
     static uint32_t wait_reason_calls[4];
     static uint32_t mode0_before, modeN_before, immediate_before, completions_before, budget_before;
@@ -7054,6 +7058,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         irq_before = g_seq_irq_done; seq_before = g_seq_irq_total_ms;
         dma_before = dma.dma2_linked_total_ms; payload_before = dma.dma2_payload_us;
         dma_calls_before = dma.dma2_linked_transfer_count;
+        probes_before=g_native_probe_calls; chains_before=g_b13514_chain_entries; blocks_before=g_b13514_chain_dispatches;
         clock_before=g_clock_ticks; skips_before=g_budget_wait_skips;
         mode0_before=g_b108_vsync_mode0; modeN_before=g_b108_vsync_modeN;
         immediate_before=g_b108_vsync_immediate;
@@ -7076,7 +7081,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         /* A single stdio buffer avoids small writes per formatted line. */
         char report_buffer[8192];
         setvbuf(fp, report_buffer, _IOFBF, sizeof(report_buffer));
-        fprintf(fp, "probe=B136.42 window_ms=%llu pc=%08lX script=%04lX\n",
+        fprintf(fp, "probe=B136.43 window_ms=%llu pc=%08lX script=%04lX\n",
             (unsigned long long)elapsed, (unsigned long)(cpu ? cpu->pc : 0u),
             (unsigned long)fm_memory_read_half(0x8009C610u));
         fprintf(fp, "host_fps_x100=%llu new_images_fps_x100=%llu samples=%lu\n",
@@ -7102,6 +7107,10 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         fprintf(fp, "ps1_clock=wall_60hz ticks=%lu budget_wait_skips=%lu\n",
             (unsigned long)(g_clock_ticks-clock_before),
             (unsigned long)(g_budget_wait_skips-skips_before));
+        fprintf(fp, "native_batch probes=%lu chains=%lu blocks=%llu object_limit=64 time_budget_ms=2\n",
+            (unsigned long)(g_native_probe_calls-probes_before),
+            (unsigned long)(g_b13514_chain_entries-chains_before),
+            (unsigned long long)(g_b13514_chain_dispatches-blocks_before));
         uint64_t classified = pre + render + vb + gfx + wait;
         fprintf(fp, "unclassified_ms=%llu\n",
             (unsigned long long)(loops > classified ? loops-classified : 0u));
@@ -7165,6 +7174,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
     dma_calls_before=dma.dma2_linked_transfer_count;
     memset(wait_reason_ms,0,sizeof(wait_reason_ms));
     memset(wait_reason_calls,0,sizeof(wait_reason_calls));
+    probes_before=g_native_probe_calls; chains_before=g_b13514_chain_entries; blocks_before=g_b13514_chain_dispatches;
     clock_before=g_clock_ticks; skips_before=g_budget_wait_skips;
     mode0_before=g_b108_vsync_mode0; modeN_before=g_b108_vsync_modeN;
     immediate_before=g_b108_vsync_immediate;
@@ -13098,7 +13108,7 @@ int main(void)
         }
 
 
-        /* B136.42: input is sampled above; service due clock callbacks before
+        /* B136.43: input is sampled above; service due clock callbacks before
          * guest execution, including VBlanks elapsed during the host wait. */
         unsigned clock_due=fm_host_clock_due(&g_ps1_host_clock,osGetTime());
         for (unsigned clock_tick=0; clock_tick<clock_due; ++clock_tick) {
@@ -13107,7 +13117,7 @@ int main(void)
 
 
             /*
-             * B136.42: consume elapsed VBlanks before guest VSync is retested.
+             * B136.43: consume elapsed VBlanks before guest VSync is retested.
              */
             if (memory_status == 0)
             {
@@ -16553,8 +16563,11 @@ int main(void)
                  * Le profiler complet reste disponible dans un build
                  * sans NDEBUG.
                  */
+                ++g_native_probe_calls;
                 uint32_t b13514_chain_count = 0u;
                 int b13514_chain_region =
+                    fm_native_object_batch(dispatch_address)
+                    ||
                     (
                         phys >= 0x000342B0u
                         &&
@@ -16611,7 +16624,7 @@ int main(void)
                              * budget while still amortizing setjmp/dispatcher
                              * overhead versus the old max=4 behavior.
                              */
-                            16u,
+                            fm_native_object_batch(dispatch_address) ? 64u : 16u,
                             &b13514_chain_count
                         );
                 }
@@ -16644,7 +16657,7 @@ int main(void)
                                 0x0008A204u,
                                 0x0005721Cu,
                                 0x00058860u,
-                                16u,
+                                fm_native_object_batch(dispatch_address) ? 64u : 16u,
                                 &b13514_chain_count
                             );
                     }
@@ -20548,7 +20561,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.42\nvideo_mode=%08lX\n"
+                            "video_probe=B136.43\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20616,7 +20629,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.42\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.43\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"

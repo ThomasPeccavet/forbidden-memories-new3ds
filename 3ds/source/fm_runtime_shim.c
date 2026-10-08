@@ -1,3 +1,5 @@
+#include "fm_native_batch.h"
+#include <3ds.h>
 #include "fm_runtime_shim.h"
 #include "fm_memory.h"
 #include "fm_gpu.h"
@@ -829,8 +831,10 @@ FMRuntimeProbeResult fm_runtime_probe(
  * recompiled function return. The Pharaoh map renderer lives in one known
  * resident region and bounces between many tiny compiled helpers there.
  *
+ * B136.43 also admits the resident object/packet helper ranges defined
+ * by fm_native_object_batch(), excluding the 85D98 HLE boundary.
  * Keep one probe armed and immediately re-dispatch while the next PC stays
- * in that safe region. As soon as code exits the range, becomes unknown,
+ * in an admitted region. As soon as code exits the range, becomes unknown,
  * hits the watchdog, GTE stop, syscall, etc., return to main unchanged.
  */
 FMRuntimeProbeResult fm_runtime_probe_chain(
@@ -893,6 +897,7 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
 
     if (jumped == 0)
     {
+        uint64_t batch_start_ms=osGetTime();
         uint32_t current = addr;
         uint32_t dispatched_count = 0u;
         int last_dispatch = -1;
@@ -925,6 +930,8 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
                 phys < phys4_end;
 
             if (
+                !fm_native_object_batch(current)
+                &&
                 !in_primary
                 &&
                 !in_secondary
@@ -936,6 +943,11 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
             {
                 break;
             }
+
+            /* Bound new batches by elapsed time as well as block count.
+             * Existing single compiled calls remain indivisible. */
+            if (dispatched_count && (dispatched_count & 3u)==0u
+                && osGetTime()-batch_start_ms>=2u) break;
 
             last_dispatch =
                 psx_dispatch_game_compiled(

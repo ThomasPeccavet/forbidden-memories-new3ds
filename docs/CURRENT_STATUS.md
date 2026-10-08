@@ -2,6 +2,15 @@
 
 Dernière mise à jour : **8 octobre 2026**.
 
+## B136.43 : chaînage natif des routines d'objets
+
+Le chaînage sous un seul setjmp inclut désormais les routines résidentes
+84018–85D98 et 85D9C–89D60, avec la frontière HLE 85D98 exclue. Les entrées
+objet sont bornées à 64 blocs, avec retour après >=2 ms vérifié tous les
+quatre blocs. Le rapport expose probes/chains/blocks par fenêtre.
+Le coût réel évité et le gain de FPS restent à mesurer dans le duel.
+Voir [les frontières et la validation](B136_43_NATIVE_OBJECT_BATCH.md).
+
 ## B136.42 : servir l'horloge avant l'exécution guest
 
 B136.41 tient 60 Hz mais mesure 53 attentes VSync pour 24 images, sans gain.
