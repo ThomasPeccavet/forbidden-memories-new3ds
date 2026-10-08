@@ -6951,6 +6951,7 @@ static int fm_media_irq_dispatch(CPUState *cpu)
 
 static uint32_t g_seq_irq_calls, g_seq_irq_done, g_seq_irq_blocks;
 static uint32_t g_seq_irq_serviced, g_seq_irq_skipped, g_seq_irq_max_ms;
+static uint64_t g_seq_irq_total_ms;
 /* B136.31: service a timer IRQ independently of the next rendered update.
  * I_STAT still coalesces elapsed targets, and BIOS registration/I_MASK still
  * decide delivery. Run the entire native ISR on a separate CPU/stack so it
@@ -6974,6 +6975,7 @@ static int fm_execute_guest_timer_callback(CPUState *cpu)
             if (irq_cpu.gpr[2] == 0u) ++g_seq_irq_serviced;
             else ++g_seq_irq_skipped;
             uint32_t elapsed = (uint32_t)(osGetTime() - start_ms);
+            g_seq_irq_total_ms += elapsed;
             if (elapsed > g_seq_irq_max_ms) g_seq_irq_max_ms = elapsed;
             return 1;
         }
@@ -6988,6 +6990,73 @@ static int fm_execute_guest_timer_callback(CPUState *cpu)
     }
     return -1;
 }
+
+#if FM_PERF_PROFILE
+/* B136.32: wall-time windows, completed image latches rather than host swaps.
+ * Nested SEQ time belongs to pre-render or IRQ work; never add it twice. */
+static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUState *cpu)
+{
+    static uint64_t start, pre, render, vb, gfx, wait, loops, seq_before;
+    static uint32_t samples, max_loop, image_before, frame_before, irq_before;
+    static uint32_t report_ms;
+    if (!start) {
+        start = now; frame_before = frame; image_before = g_b84_latch_count;
+        irq_before = g_seq_irq_done; seq_before = g_seq_irq_total_ms;
+        return;
+    }
+    pre += pre_ms; render += g_b105_render_ms; vb += g_b105_vblank_ms;
+    gfx += g_b106_gfx_ms; wait += g_b106_wait_ms; loops += g_b105_loop_ms;
+    ++samples;
+    if (g_b105_loop_ms > max_loop) max_loop = g_b105_loop_ms;
+    uint64_t elapsed = now - start;
+    if (elapsed < 2000u) return;
+    uint64_t report_start = osGetTime();
+    FILE *fp = fopen("sdmc:/3ds/fm-new3ds/perf-latest.txt", "wb");
+    if (fp) {
+        fprintf(fp, "probe=B136.32 window_ms=%llu pc=%08lX script=%04lX\n",
+            (unsigned long long)elapsed, (unsigned long)(cpu ? cpu->pc : 0u),
+            (unsigned long)fm_memory_read_half(0x8009C610u));
+        fprintf(fp, "host_fps_x100=%llu new_images_fps_x100=%llu samples=%lu\n",
+            (unsigned long long)((uint64_t)(frame-frame_before)*100000u/elapsed),
+            (unsigned long long)((uint64_t)(g_b84_latch_count-image_before)*100000u/elapsed),
+            (unsigned long)samples);
+        fprintf(fp, "sum_ms pre_guest_input=%llu presentation=%llu vblank=%llu gfx=%llu wait=%llu loop=%llu max_loop=%lu\n",
+            (unsigned long long)pre, (unsigned long long)render, (unsigned long long)vb,
+            (unsigned long long)gfx, (unsigned long long)wait, (unsigned long long)loops,
+            (unsigned long)max_loop);
+        uint64_t classified = pre + render + vb + gfx + wait;
+        fprintf(fp, "unclassified_ms=%llu\n",
+            (unsigned long long)(loops > classified ? loops-classified : 0u));
+        fprintf(fp, "seq_nested_ms=%llu irq_done=%lu irq_max_ms=%lu previous_report_ms=%lu\n",
+            (unsigned long long)(g_seq_irq_total_ms-seq_before),
+            (unsigned long)(g_seq_irq_done-irq_before),
+            (unsigned long)g_seq_irq_max_ms, (unsigned long)report_ms);
+        fprintf(fp, "ot_last_window_ms repair=%llu submit_raster=%llu merge=%llu calls=%lu\n",
+            (unsigned long long)g_b115_last_repair_ms,
+            (unsigned long long)g_b115_last_submit_ms,
+            (unsigned long long)g_b115_last_merge_ms, (unsigned long)g_b115_last_calls);
+        fprintf(fp, "overlay_totals entries=%lu blocks=%lu instructions=%llu slow_handoff_pc=%08lX slow_handoff_ms=%lu\n",
+            (unsigned long)g_b91_fast_entries, (unsigned long)g_b91_fast_blocks,
+            (unsigned long long)g_b91_fast_instructions,
+            (unsigned long)g_b91_slow_handoff_pc, (unsigned long)g_b91_slow_handoff_ms);
+        fprintf(fp, "native_sampling=1/64 totals_are_sampled_not_estimated\n");
+        for (unsigned rank=0; rank<B110_PROF_SLOTS; ++rank) {
+            B110ProbeStat hot = {0}; b110_get_rank(rank, &hot);
+            if (!hot.hits) continue;
+            fprintf(fp, "native%u pc=%08lX end=%08lX samples=%lu us=%llu max_us=%lu\n",
+                rank, (unsigned long)hot.start_pc, (unsigned long)hot.end_pc,
+                (unsigned long)hot.hits, (unsigned long long)hot.total_us,
+                (unsigned long)hot.max_us);
+        }
+        fclose(fp);
+    }
+    report_ms = (uint32_t)(osGetTime()-report_start);
+    start=now; pre=render=vb=gfx=wait=loops=0; samples=max_loop=0;
+    frame_before=frame; image_before=g_b84_latch_count;
+    seq_before=g_seq_irq_total_ms; irq_before=g_seq_irq_done;
+    memset(g_b110_prof, 0, sizeof(g_b110_prof));
+}
+#endif
 
 static int fm_execute_guest_vblank_callback(
     CPUState *cpu,
@@ -12250,6 +12319,7 @@ int main(void)
     while (aptMainLoop())
     {
         uint64_t b105_loop_start_ms = osGetTime();
+        g_b105_vblank_ms = g_b106_gfx_ms = g_b106_wait_ms = 0u;
         fm_cd_stream_tick(b105_loop_start_ms, game_running);
         fm_mdec_host_frame = frame; fm_mdec_host_cycles = (uint64_t)frame * 677376u;
         fm_media_poll(g_cd_lba, game_running);
@@ -16122,6 +16192,11 @@ int main(void)
                         phys < 0x00058860u
                     );
 
+#if FM_PERF_PROFILE && defined(NDEBUG)
+                static uint32_t perf_probe_index;
+                int perf_probe_sample = (++perf_probe_index & 63u) == 0u;
+                uint64_t perf_probe_start = perf_probe_sample ? svcGetSystemTick() : 0u;
+#endif
 #if defined(NDEBUG)
                 if (b13514_chain_region)
                 {
@@ -16210,6 +16285,14 @@ int main(void)
                         probe.pc,
                         b110_probe_us
                     );
+                }
+#endif
+
+#if FM_PERF_PROFILE && defined(NDEBUG)
+                if (perf_probe_sample) {
+                    uint32_t us = (uint32_t)((svcGetSystemTick() - perf_probe_start)
+                        / (SYSCLOCK_ARM11 / 1000000u));
+                    b110_profile_probe(dispatch_address, probe.pc, us);
                 }
 #endif
 
@@ -16685,6 +16768,9 @@ int main(void)
 
         uint64_t b105_render_start_ms =
             osGetTime();
+#if FM_PERF_PROFILE
+        uint32_t perf_pre_ms = (uint32_t)(b105_render_start_ms - b105_loop_start_ms);
+#endif
 
         /*
          * B15 FIRST IMAGE :
@@ -20072,7 +20158,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.31\nvideo_mode=%08lX\n"
+                            "video_probe=B136.32\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20140,7 +20226,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.31\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.32\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"
@@ -21304,6 +21390,9 @@ int main(void)
         {
             ++g_b110_loop_over33;
         }
+#if FM_PERF_PROFILE
+        fm_perf_window(osGetTime(), frame, perf_pre_ms, cpu);
+#endif
     }
 
 

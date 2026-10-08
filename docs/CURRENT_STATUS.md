@@ -2,6 +2,19 @@
 
 Dernière mise à jour : **8 octobre 2026**.
 
+## B136.32 : mesure des performances globales
+
+L'essai utilisateur B136.31 valide le début du jeu après environ 15 secondes
+à la fin de l'intro. Le problème prioritaire devient la cadence globale,
+annoncée à 10 FPS ou moins. Le diagnostic intro ne suffit pas à attribuer
+cette lenteur au GPU, au CPU ou au séquenceur.
+
+B136.32 ajoute `perf-latest.txt` en PROFILE, par fenêtres réelles de deux
+secondes, et réactive un échantillonnage limité du code ARM (1 appel sur 64).
+Il distingue la cadence hôte des nouveaux latches d'image, expose les temps
+par phase et le temps audio imbriqué. Aucun gain FPS n'est annoncé avant les
+mesures en jeu. Voir [la procédure](B136_32_GLOBAL_PERF.md).
+
 ## B136.31 : livraison du timer découplée des updates graphiques
 
 L'utilisateur a confirmé que B136.30 termine finalement l'intro et atteint
