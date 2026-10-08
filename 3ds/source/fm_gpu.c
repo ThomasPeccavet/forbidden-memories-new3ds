@@ -95,6 +95,10 @@ static uint32_t g_b13530_sample_phase = 0u;
 static uint64_t g_window_opcode_ticks[256], g_window_opcode_max[256];
 static uint32_t g_window_opcode_samples[256];
 static uint32_t g_window_sample_rng = 0x13635u;
+static uint32_t g_window_neutral_triangles;
+static uint32_t g_window_fast_tex_triangles;
+static uint64_t g_window_neutral_pixels;
+static uint64_t g_window_fast_tex_pixels;
 
 /*
  * B124 - native 3DS fast path for variable-size textured rectangles
@@ -1860,6 +1864,44 @@ static inline int32_t b13513_edge_fp16(
 }
 
 
+/* B136.36: the old modulation is exactly identity when all vertex
+ * RGB555 components are 16. Keep the original transparency/cache behavior,
+ * but eliminate RGB interpolation, clamping and multiplication per pixel.
+ * Constant depth call sites let the compiler remove format branches too. */
+static inline __attribute__((always_inline)) void b13636_neutral_span(
+    uint16_t *dst, unsigned width, int32_t u_fp, int32_t v_fp,
+    int32_t du_dx, int32_t dv_dx, const B13512TexCtx *ctx,
+    const uint16_t *palette, unsigned depth
+)
+{
+    int last_key = -1;
+    uint16_t packed = 0u;
+    uint32_t u = (uint32_t)u_fp, v = (uint32_t)v_fp;
+    for (unsigned x=0; x<width; ++x, ++dst) {
+        int tu = ((int32_t)u >> 16) & 255;
+        int tv = ((int32_t)v >> 16) & 255;
+        uint16_t texel;
+        if (depth < 2u) {
+            unsigned shift = depth == 0u ? 2u : 1u;
+            int key = (tv << (8u-shift)) | (tu >> shift);
+            if (key != last_key) {
+                packed = g_vram[(size_t)(ctx->tpy+tv)*1024u
+                    + (size_t)((ctx->tpx+(tu >> shift)) & 1023)];
+                last_key = key;
+            }
+            unsigned bits = depth == 0u ? 4u : 8u;
+            unsigned lane = (unsigned)tu & ((1u << shift)-1u);
+            texel = palette[(packed >> (lane*bits)) & ((1u << bits)-1u)];
+        } else {
+            texel = g_vram[(size_t)(ctx->tpy+tv)*1024u
+                + (size_t)((ctx->tpx+tu) & 1023)];
+        }
+        /* 8000h is opaque black, not transparent: test before masking. */
+        if (texel != 0u) *dst = texel & 0x7fffu;
+        u += (uint32_t)du_dx; v += (uint32_t)dv_dx;
+    }
+}
+
 static void b13511_shaded_textured_triangle(
     int x0, int y0, int u0, int v0, uint32_t c0,
     int x1, int y1, int u1, int v1, uint32_t c1,
@@ -1948,12 +1990,16 @@ static void b13511_shaded_textured_triangle(
     int32_t dv_dx = b13513_grad_fp16(B13513_NUM_X(v0,v1,v2), inv_det_fp16);
     int32_t dv_dy = b13513_grad_fp16(B13513_NUM_Y(v0,v1,v2), inv_det_fp16);
 
-    int32_t dr_dx = b13513_grad_fp16(B13513_NUM_X(r0,r1,r2), inv_det_fp16);
-    int32_t dr_dy = b13513_grad_fp16(B13513_NUM_Y(r0,r1,r2), inv_det_fp16);
-    int32_t dg_dx = b13513_grad_fp16(B13513_NUM_X(g0,g1,g2), inv_det_fp16);
-    int32_t dg_dy = b13513_grad_fp16(B13513_NUM_Y(g0,g1,g2), inv_det_fp16);
-    int32_t db_dx = b13513_grad_fp16(B13513_NUM_X(b0,b1,b2), inv_det_fp16);
-    int32_t db_dy = b13513_grad_fp16(B13513_NUM_Y(b0,b1,b2), inv_det_fp16);
+    int b13636_neutral =
+        (c0 & 0x00f8f8f8u) == 0x00808080u &&
+        (c1 & 0x00f8f8f8u) == 0x00808080u &&
+        (c2 & 0x00f8f8f8u) == 0x00808080u;
+    int32_t dr_dx = b13636_neutral ? 0 : b13513_grad_fp16(B13513_NUM_X(r0,r1,r2), inv_det_fp16);
+    int32_t dr_dy = b13636_neutral ? 0 : b13513_grad_fp16(B13513_NUM_Y(r0,r1,r2), inv_det_fp16);
+    int32_t dg_dx = b13636_neutral ? 0 : b13513_grad_fp16(B13513_NUM_X(g0,g1,g2), inv_det_fp16);
+    int32_t dg_dy = b13636_neutral ? 0 : b13513_grad_fp16(B13513_NUM_Y(g0,g1,g2), inv_det_fp16);
+    int32_t db_dx = b13636_neutral ? 0 : b13513_grad_fp16(B13513_NUM_X(b0,b1,b2), inv_det_fp16);
+    int32_t db_dy = b13636_neutral ? 0 : b13513_grad_fp16(B13513_NUM_Y(b0,b1,b2), inv_det_fp16);
 
 #undef B13513_NUM_X
 #undef B13513_NUM_Y
@@ -1988,6 +2034,11 @@ static void b13511_shaded_textured_triangle(
         &&
         (texctx.mask_x | texctx.mask_y) == 0u;
 
+    b13636_neutral = b13636_neutral && b13533_fast;
+#if FM_PERF_PROFILE
+    if (b13533_fast) ++g_window_fast_tex_triangles;
+    if (b13636_neutral) ++g_window_neutral_triangles;
+#endif
     uint16_t b13533_clut[256];
 
     if (b13533_fast && texctx.depth == 0u)
@@ -2107,6 +2158,19 @@ static void b13511_shaded_textured_triangle(
         {
             b13537_fast_pixels +=
                 b13537_span;
+
+            if (b13636_neutral) {
+                if (texctx.depth == 0u)
+                    b13636_neutral_span(dst, b13537_span, u_fp, v_fp,
+                        du_dx, dv_dx, &texctx, b13533_clut, 0u);
+                else if (texctx.depth == 1u)
+                    b13636_neutral_span(dst, b13537_span, u_fp, v_fp,
+                        du_dx, dv_dx, &texctx, b13533_clut, 1u);
+                else
+                    b13636_neutral_span(dst, b13537_span, u_fp, v_fp,
+                        du_dx, dv_dx, &texctx, b13533_clut, 2u);
+                continue;
+            }
 
             int last_key = -1;
             uint16_t packed = 0u;
@@ -2256,6 +2320,10 @@ static void b13511_shaded_textured_triangle(
         }
     }
 
+#if FM_PERF_PROFILE
+    g_window_fast_tex_pixels += b13537_fast_pixels;
+    if (b13636_neutral) g_window_neutral_pixels += b13537_fast_pixels;
+#endif
     g_b125_pixels +=
         (uint64_t)b13537_pixels;
 
@@ -6008,6 +6076,16 @@ void fm_gpu_perf_window_reset(void)
     memset(g_window_opcode_ticks, 0, sizeof(g_window_opcode_ticks));
     memset(g_window_opcode_max, 0, sizeof(g_window_opcode_max));
     memset(g_window_opcode_samples, 0, sizeof(g_window_opcode_samples));
+    g_window_neutral_triangles = g_window_fast_tex_triangles = 0u;
+    g_window_neutral_pixels = g_window_fast_tex_pixels = 0u;
+}
+void fm_gpu_perf_texture_window(uint64_t *neutral_pixels, uint64_t *fast_pixels,
+    uint32_t *neutral_triangles, uint32_t *fast_triangles)
+{
+    if (neutral_pixels) *neutral_pixels=g_window_neutral_pixels;
+    if (fast_pixels) *fast_pixels=g_window_fast_tex_pixels;
+    if (neutral_triangles) *neutral_triangles=g_window_neutral_triangles;
+    if (fast_triangles) *fast_triangles=g_window_fast_tex_triangles;
 }
 void fm_gpu_perf_window_rank(unsigned rank, FMGpuOpcodePerf *out)
 {

@@ -16,6 +16,9 @@ class PerfWindowTests(unittest.TestCase):
 typedef struct { uint32_t pc; } CPUState;
 typedef struct { uint32_t start_pc,end_pc,hits,max_us; uint64_t total_us; } B110ProbeStat;
 typedef struct { uint8_t opcode; uint32_t calls; uint64_t total_us; uint32_t max_us; } FMGpuOpcodePerf;
+static void fm_gpu_perf_texture_window(uint64_t *n, uint64_t *f, uint32_t *nt, uint32_t *ft) {
+    *n=1000; *f=2000; *nt=10; *ft=20;
+}
 static unsigned gpu_resets;
 static void fm_gpu_perf_window_reset(void) { ++gpu_resets; }
 static void fm_gpu_perf_window_rank(unsigned rank, FMGpuOpcodePerf *out) {
@@ -76,6 +79,7 @@ static int report_close(FILE *fp) {
     assert(strstr(text,"native_sampling=random_1/64"));
     assert(strstr(text,"gpu0 opcode=30 samples=10 us=1234 max_us=500"));
     assert(gpu_resets==2);
+    assert(strstr(text,"texture_fast neutral_triangles=10 fast_triangles=20 neutral_pixels=1000 fast_pixels=2000"));
     return 0;
 }
 '''

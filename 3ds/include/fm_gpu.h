@@ -286,3 +286,5 @@ int fm_gpu_bios_call(
 /* Sampled opcode timings accumulated across a complete host time window. */
 void fm_gpu_perf_window_reset(void);
 void fm_gpu_perf_window_rank(unsigned rank, FMGpuOpcodePerf *out);
+void fm_gpu_perf_texture_window(uint64_t *neutral_pixels, uint64_t *fast_pixels,
+    uint32_t *neutral_triangles, uint32_t *fast_triangles);

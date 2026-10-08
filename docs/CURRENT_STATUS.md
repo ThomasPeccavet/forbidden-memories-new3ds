@@ -2,6 +2,16 @@
 
 Dernière mise à jour : **8 octobre 2026**.
 
+## B136.36 : modulation neutre des polygones texturés
+
+La fenêtre utilisateur B136.35 mesure 16,45 latches/s et identifie 3Ch/34h
+comme premiers opcodes GPU échantillonnés. B136.36 spécialise leur cas
+opaque à modulation neutre, avec les mêmes pixels que B136.35 sur 640 cas
+compilés en deux modes. 57 tests passent. Le cas ciblé est environ 2,7 à
+3 fois plus rapide sur le banc local x86 ; aucun gain ARM/global n'est
+annoncé avant mesure. Le rapport ajoute la couverture du cas neutre.
+Voir [les résultats et limites](B136_36_NEUTRAL_TEXTURE.md).
+
 ## B136.35 : calcul exact des gradients Gouraud et classement GPU
 
 B136.34 mesure 920 ms de DMA2 sur 2064 ms en duel. B136.35 remplace
