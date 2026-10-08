@@ -17,6 +17,11 @@ typedef struct { uint32_t pc; } CPUState;
 typedef struct { uint32_t start_pc,end_pc,hits,max_us; uint64_t total_us; } B110ProbeStat;
 #define B110_PROF_SLOTS 12
 #define FM_OT_DIAGNOSTICS 0
+#define FM_LEGACY_FILE_DIAGNOSTICS 0
+typedef struct { uint64_t dma2_linked_total_ms; uint32_t dma2_linked_transfer_count,
+    dma2_linked_last_ms, dma2_linked_max_ms; } FMDmaDebugStats;
+static FMDmaDebugStats dma;
+static void fm_memory_dma_debug(FMDmaDebugStats *out) { *out=dma; }
 static B110ProbeStat g_b110_prof[12];
 static uint32_t g_b84_latch_count, g_seq_irq_done, g_seq_irq_max_ms;
 static uint64_t g_seq_irq_total_ms;
@@ -35,7 +40,14 @@ static FILE *report_open(const char *path, const char *mode) {
     assert(strstr(path,"perf-latest.txt") && !strcmp(mode,"wb")); return report;
 }
 #define fopen report_open
-#define fclose fflush
+static int report_close(FILE *fp) {
+    int result=fflush(fp);
+    /* Production closes the file; the harness keeps it for assertions.
+     * Detach the reporter's stack buffer before that stack frame ends. */
+    setvbuf(fp, NULL, _IONBF, 0);
+    return result;
+}
+#define fclose report_close
 ''' + source[begin:end] + r'''int main(void) {
     report = tmpfile(); assert(report);
     CPUState cpu={0x80041EE8};
@@ -43,6 +55,7 @@ static FILE *report_open(const char *path, const char *mode) {
     for(unsigned i=1;i<=100;++i) {
         g_b84_latch_count=i/5;
         g_seq_irq_done=i; g_seq_irq_total_ms=i*3;
+        dma.dma2_linked_total_ms=i*4; dma.dma2_linked_transfer_count=i;
         fm_perf_window(1000+i*20,100+i,12,&cpu);
     }
     rewind(report); char text[4096]={0}; fread(text,1,sizeof(text)-1,report);
@@ -52,6 +65,9 @@ static FILE *report_open(const char *path, const char *mode) {
     assert(strstr(text,"loop=1500 max_loop=15"));
     assert(strstr(text,"seq_nested_ms=300 irq_done=100"));
     assert(strstr(text,"unclassified_ms=0"));
+    assert(strstr(text,"dma2_nested_ms=400 transfers=100"));
+    assert(strstr(text,"legacy_file_dumps=0"));
+    assert(strstr(text,"native_sampling=random_1/64"));
     return 0;
 }
 '''

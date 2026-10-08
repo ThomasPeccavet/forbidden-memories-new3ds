@@ -2,6 +2,15 @@
 
 Dernière mise à jour : **8 octobre 2026**.
 
+## B136.34 : suppression des dumps lourds pendant les mesures
+
+La seconde mesure en duel B136.33 indique 12,45 latches/s, sans gain
+observable sur B136.32 (14,6/s). Elle ne prouve pas une régression causale,
+les fenêtres de combat pouvant différer. Les scans sont bien désactivés.
+B136.34 coupe les anciens dumps SD par défaut, conserve le rapport compact,
+et expose les temps DMA2/rendu imbriqués. Le gain reste à mesurer.
+Voir [la validation et les limites](B136_34_COMPACT_PERF.md).
+
 ## B136.33 : réduction des scans de diagnostic pendant les combats
 
 La mesure utilisateur en duel B136.32 indique 14,6 latches d'image/s,

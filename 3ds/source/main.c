@@ -16,6 +16,12 @@
 #define FM_OT_DIAGNOSTICS 0
 #endif
 
+/* B136.34: opt in to the large legacy SD dumps when diagnosing startup.
+ * The compact performance report remains enabled in PROFILE builds. */
+#ifndef FM_LEGACY_FILE_DIAGNOSTICS
+#define FM_LEGACY_FILE_DIAGNOSTICS 0
+#endif
+
 #include "fm_platform.h"
 #include "fm_cpu.h"
 #include "fm_memory.h"
@@ -7030,9 +7036,15 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
     static uint64_t start, pre, render, vb, gfx, wait, loops, seq_before;
     static uint32_t samples, max_loop, image_before, frame_before, irq_before;
     static uint32_t report_ms;
+    static uint64_t dma_before;
+    static uint32_t dma_calls_before;
+    FMDmaDebugStats dma = {0};
+    fm_memory_dma_debug(&dma);
     if (!start) {
         start = now; frame_before = frame; image_before = g_b84_latch_count;
         irq_before = g_seq_irq_done; seq_before = g_seq_irq_total_ms;
+        dma_before = dma.dma2_linked_total_ms;
+        dma_calls_before = dma.dma2_linked_transfer_count;
         return;
     }
     pre += pre_ms; render += g_b105_render_ms; vb += g_b105_vblank_ms;
@@ -7044,7 +7056,10 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
     uint64_t report_start = osGetTime();
     FILE *fp = fopen("sdmc:/3ds/fm-new3ds/perf-latest.txt", "wb");
     if (fp) {
-        fprintf(fp, "probe=B136.33 window_ms=%llu pc=%08lX script=%04lX\n",
+        /* A single stdio buffer avoids small writes per formatted line. */
+        char report_buffer[8192];
+        setvbuf(fp, report_buffer, _IOFBF, sizeof(report_buffer));
+        fprintf(fp, "probe=B136.34 window_ms=%llu pc=%08lX script=%04lX\n",
             (unsigned long long)elapsed, (unsigned long)(cpu ? cpu->pc : 0u),
             (unsigned long)fm_memory_read_half(0x8009C610u));
         fprintf(fp, "host_fps_x100=%llu new_images_fps_x100=%llu samples=%lu\n",
@@ -7062,6 +7077,12 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
             (unsigned long long)(g_seq_irq_total_ms-seq_before),
             (unsigned long)(g_seq_irq_done-irq_before),
             (unsigned long)g_seq_irq_max_ms, (unsigned long)report_ms);
+        fprintf(fp, "dma2_nested_ms=%llu transfers=%lu last_ms=%lu max_ms=%lu legacy_file_dumps=%u\n",
+            (unsigned long long)(dma.dma2_linked_total_ms-dma_before),
+            (unsigned long)(dma.dma2_linked_transfer_count-dma_calls_before),
+            (unsigned long)dma.dma2_linked_last_ms,
+            (unsigned long)dma.dma2_linked_max_ms,
+            (unsigned)FM_LEGACY_FILE_DIAGNOSTICS);
         fprintf(fp, "ot_last_window_ms repair=%llu submit_raster=%llu merge=%llu calls=%lu\n",
             (unsigned long long)g_b115_last_repair_ms,
             (unsigned long long)g_b115_last_submit_ms,
@@ -7071,7 +7092,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
             (unsigned long long)g_b91_fast_instructions,
             (unsigned long)g_b91_slow_handoff_pc, (unsigned long)g_b91_slow_handoff_ms);
         fprintf(fp, "diagnostic_ot_scans=%u\n", (unsigned)FM_OT_DIAGNOSTICS);
-        fprintf(fp, "native_sampling=1/64 totals_are_sampled_not_estimated\n");
+        fprintf(fp, "native_sampling=random_1/64 totals_are_sampled_not_estimated\n");
         for (unsigned rank=0; rank<B110_PROF_SLOTS; ++rank) {
             B110ProbeStat hot = {0}; b110_get_rank(rank, &hot);
             if (!hot.hits) continue;
@@ -7086,6 +7107,8 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
     start=now; pre=render=vb=gfx=wait=loops=0; samples=max_loop=0;
     frame_before=frame; image_before=g_b84_latch_count;
     seq_before=g_seq_irq_total_ms; irq_before=g_seq_irq_done;
+    dma_before=dma.dma2_linked_total_ms;
+    dma_calls_before=dma.dma2_linked_transfer_count;
     memset(g_b110_prof, 0, sizeof(g_b110_prof));
 }
 #endif
@@ -16225,8 +16248,11 @@ int main(void)
                     );
 
 #if FM_PERF_PROFILE && defined(NDEBUG)
-                static uint32_t perf_probe_index;
-                int perf_probe_sample = (++perf_probe_index & 63u) == 0u;
+                static uint32_t perf_probe_rng = 0x13634u;
+                /* Use upper PRNG bits: periodic dispatch patterns must not
+                 * always select the same tiny call every 64 entries. */
+                perf_probe_rng = perf_probe_rng * 1664525u + 1013904223u;
+                int perf_probe_sample = (perf_probe_rng >> 26) == 0u;
                 uint64_t perf_probe_start = perf_probe_sample ? svcGetSystemTick() : 0u;
 #endif
 #if defined(NDEBUG)
@@ -17853,7 +17879,7 @@ int main(void)
          */
 
         if (
-            frame % 120u == 0u
+            FM_LEGACY_FILE_DIAGNOSTICS && frame % 120u == 0u
         )
         {
             printf(
@@ -20190,7 +20216,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.33\nvideo_mode=%08lX\n"
+                            "video_probe=B136.34\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20258,7 +20284,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.33\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.34\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"
