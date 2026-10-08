@@ -18,7 +18,11 @@ ici d'une attente excessivement longue, pas d'un arrêt permanent du CPU.
 ## Changement
 
 Le timer est livré après `fm_memory_vblank_tick`, avant le service VBlank du
-jeu. Son ISR est exécutée intégralement par l'interpréteur MIPS natif, dans
+jeu, et à la première frontière du dispatcher où le masque l'autorise.
+Ce second point est nécessaire : les captures sont prises dans DrawSync avec
+I_MASK nul, et il faut saisir sa réactivation sans attendre la fin de frame.
+I_STAT est acquitté à la livraison, donc les deux points ne doublent pas l'IRQ.
+Le main update continue au même PC immédiatement après le retour. Son ISR est exécutée intégralement par l'interpréteur MIPS natif, dans
 une copie du CPU avec pile `801FF800`. Le thread principal ne change ni PC,
 ni registres, ni pile, et ne doit plus atteindre `12C50` pour autoriser un IRQ.
 Le service VBlank conserve la gestion native de la fin du SEQ et du script.

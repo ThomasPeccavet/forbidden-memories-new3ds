@@ -12995,6 +12995,16 @@ int main(void)
                 if (phys == 0x000914A8u && fm_vlc_try(cpu)) {
                     static_miss = 0; continue;
                 }
+                /* DrawSync can mask IRQs at the host boundary. Service a
+                 * latched timer at the first eligible guest boundary too,
+                 * without changing the PC or postponing this main update. */
+                if (fm_execute_guest_timer_callback(cpu) < 0) {
+                    g_b65_stop_code = 4u;
+                    g_b65_stop_pc = 0x8004BBC4u;
+                    g_b65_stop_detail = g_seq_irq_blocks;
+                    game_running = 0;
+                    break;
+                }
                 fm_media_guest_entry(cpu, phys);
                 if (fm_media_irq_dispatch(cpu)) { static_miss = 0; continue; }
                 /* Deliver hardware completion outside guest CD/data/tick callbacks. */

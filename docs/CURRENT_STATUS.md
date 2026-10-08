@@ -11,7 +11,8 @@ une fois par update du jeu. Le rendu lent et les tranches de l'interpréteur
 retardaient cette livraison ; plusieurs échéances se regroupaient dans I_STAT.
 
 B136.31 exécute le callback natif complet dans un CPU et une pile séparés,
-à la frontière VBlank hôte, en conservant les masques et événements BIOS.
+à la frontière VBlank hôte et dès la réactivation des IRQs dans le dispatcher,
+en conservant les masques et événements BIOS.
 Le rejeu de la capture B136.30 termine après 374 livraisons supplémentaires,
 avec le contexte principal préservé. Les tests menu antérieurs passent aussi.
 Le parcours et la durée réelle dans Azahar restent à confirmer. Voir

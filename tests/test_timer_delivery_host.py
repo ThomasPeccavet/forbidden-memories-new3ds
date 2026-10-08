@@ -8,6 +8,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class TimerDeliveryTests(unittest.TestCase):
+    def test_delivery_observes_unmasking_between_host_boundaries(self):
+        source = (ROOT / "3ds/source/main.c").read_text()
+        main = source[source.index("int main(void)"):]
+        # A capture can be inside DrawSync with I_MASK=0. Delivery must also
+        # see the guest re-enable IRQs before returning to the host loop.
+        self.assertEqual(main.count("fm_execute_guest_timer_callback(cpu)"), 2)
+        call = main.index("fm_execute_guest_timer_callback(cpu)")
+        dispatch = main.index("fm_media_guest_entry(cpu, phys)")
+        self.assertLess(call, dispatch)
+        self.assertNotIn("continue;", main[call:dispatch])
+
     def test_complete_isolated_isr_masking_and_bounded_failure(self):
         source = (ROOT / "3ds/source/main.c").read_text()
         start = source.index("static uint32_t g_seq_irq_calls")
