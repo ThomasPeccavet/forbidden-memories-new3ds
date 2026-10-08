@@ -1,6 +1,22 @@
 # État courant — New Nintendo 3DS
 
-Dernière mise à jour : **7 octobre 2026**.
+Dernière mise à jour : **8 octobre 2026**.
+
+## B136.29 : registre SPU manquant, freeze menu reproduit
+
+Les captures menu B136.24/25 et fin d'intro B136.27 ont été rejouées avec
+`fm_memory.c` et l'interpréteur natif réels. Les stores SH au masque SPU
+`1F801D98/1F801D9A` étaient ignorés ; le séquenceur attendait ensuite un bit
+qui restait nul. Le masque 24 bits est désormais mémorisé et relisible.
+
+Les deux callbacks menu reviennent en 291/302 blocs. Le SEQ de fin d'intro
+termine et le service natif efface son drapeau `0x80`, sans forçage du script.
+Le test antérieur avec MMIO générique ne reproduisait pas le vrai backend.
+Voir [les preuves et limites](B136_29_SPU_REVERB_FREEZE.md).
+
+Le parcours complet Azahar reste à valider. Retester depuis un boot neuf :
+le format quickstate passe en version 3 pour sauvegarder le nouveau registre.
+L'écran inférieur reste sans lignes de debug ; les diagnostics fichiers restent.
 
 ## B136.18 : limite VLC native 00FFFFFF
 

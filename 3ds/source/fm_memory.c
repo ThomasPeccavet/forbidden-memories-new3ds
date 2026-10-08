@@ -101,6 +101,7 @@
  * Base 1F801C00; only a few control/status registers are modeled.
  */
 #define PSX_SPU_BASE        0x1F801C00u
+#define PSX_SPU_REVERB_MASK (PSX_SPU_BASE + 0x198u)
 #define PSX_SPU_XFER_ADDR   (PSX_SPU_BASE + 0x1A6u)
 #define PSX_SPU_XFER_DATA   (PSX_SPU_BASE + 0x1A8u)
 #define PSX_SPU_CTRL        (PSX_SPU_BASE + 0x1AAu)
@@ -332,6 +333,7 @@ static uint32_t g_dma_dicr = 0;
 static uint16_t g_spu_xfer_addr = 0;
 static uint16_t g_spu_xfer_data = 0;
 static uint16_t g_spu_ctrl = 0;
+static uint32_t g_spu_reverb_mask;
 static uint16_t g_spu_stat = 0;
 
 /*
@@ -3310,6 +3312,7 @@ void fm_memory_init(
     g_spu_xfer_data = 0u;
     g_spu_ctrl = 0u;
     g_spu_stat = 0u;
+    g_spu_reverb_mask = 0u;
 
     g_dma6_madr =
         0;
@@ -3450,6 +3453,8 @@ uint8_t fm_memory_read_byte(
             addr
         );
 
+    if (phys >= PSX_SPU_REVERB_MASK && phys < PSX_SPU_REVERB_MASK + 4u)
+        return (uint8_t)(g_spu_reverb_mask >> ((phys - PSX_SPU_REVERB_MASK) * 8u));
     if (phys >= 0x1F801800u && phys < 0x1F801804u) return fm_media_cd_read(phys);
     /*
      * ========================================================
@@ -3637,6 +3642,12 @@ void fm_memory_write_byte(
 
     fm_memory_watch_store(phys, 1u, (uint32_t)value);
 
+    if (phys >= PSX_SPU_REVERB_MASK && phys < PSX_SPU_REVERB_MASK + 4u) {
+        unsigned shift = (phys - PSX_SPU_REVERB_MASK) * 8u;
+        g_spu_reverb_mask = ((g_spu_reverb_mask & ~(0xFFu << shift))
+            | ((uint32_t)value << shift)) & 0x00FFFFFFu;
+        return;
+    }
     if (phys >= 0x1F801800u && phys < 0x1F801804u) { fm_media_cd_write(phys, value); return; }
     /* B92 - hot RAM fast path. */
     if (
@@ -3773,7 +3784,9 @@ uint16_t fm_memory_read_half(
         );
 
     if (
-        phys == PSX_SPU_XFER_ADDR
+        phys == PSX_SPU_REVERB_MASK
+        || phys == PSX_SPU_REVERB_MASK + 2u
+        || phys == PSX_SPU_XFER_ADDR
         ||
         phys == PSX_SPU_XFER_DATA
         ||
@@ -4021,7 +4034,9 @@ void fm_memory_write_half(
 
     /* Psy-Q programs these 16-bit registers with SH, not only SW. */
     if (
-        phys == PSX_SPU_XFER_ADDR
+        phys == PSX_SPU_REVERB_MASK
+        || phys == PSX_SPU_REVERB_MASK + 2u
+        || phys == PSX_SPU_XFER_ADDR
         || phys == PSX_SPU_XFER_DATA
         || phys == PSX_SPU_CTRL
         || phys == PSX_SPU_STAT
@@ -4250,6 +4265,8 @@ static uint16_t fm_spu_read_half(uint32_t phys)
 {
     switch (phys)
     {
+        case PSX_SPU_REVERB_MASK: return (uint16_t)g_spu_reverb_mask;
+        case PSX_SPU_REVERB_MASK + 2u: return (uint16_t)(g_spu_reverb_mask >> 16);
         case PSX_SPU_XFER_ADDR: return g_spu_xfer_addr;
         case PSX_SPU_XFER_DATA: return g_spu_xfer_data;
         case PSX_SPU_CTRL:      return g_spu_ctrl;
@@ -4263,6 +4280,15 @@ static void fm_spu_write_half(uint32_t phys, uint16_t value)
 {
     switch (phys)
     {
+        /* B136.29: SpuSetReverbVoice polls this 24-bit read/write mask.
+         * Dropping SH stores made the native sound IRQ loop forever. */
+        case PSX_SPU_REVERB_MASK:
+            g_spu_reverb_mask = (g_spu_reverb_mask & 0x00FF0000u) | value;
+            return;
+        case PSX_SPU_REVERB_MASK + 2u:
+            g_spu_reverb_mask = (g_spu_reverb_mask & 0x0000FFFFu)
+                | ((uint32_t)(value & 0xFFu) << 16);
+            return;
         case PSX_SPU_XFER_ADDR:
             g_spu_xfer_addr = value;
             return;
@@ -4382,6 +4408,8 @@ uint32_t fm_memory_read_word(
     /*
      * SPU packed word reads (two adjacent 16-bit registers).
      */
+    if (phys == PSX_SPU_REVERB_MASK) return g_spu_reverb_mask;
+
     if (phys == 0x1F801DA4u)
     {
         return
@@ -4697,6 +4725,11 @@ void fm_memory_write_word(
     /*
      * SPU packed word writes (two adjacent 16-bit registers).
      */
+    if (phys == PSX_SPU_REVERB_MASK) {
+        g_spu_reverb_mask = value & 0x00FFFFFFu;
+        return;
+    }
+
     if (phys == 0x1F801DA4u)
     {
         fm_spu_write_half(PSX_SPU_XFER_ADDR, (uint16_t)(value >> 16));
@@ -5426,6 +5459,7 @@ void fm_memory_quick_save(
     out->spu_xfer_data = g_spu_xfer_data;
     out->spu_ctrl = g_spu_ctrl;
     out->spu_stat = g_spu_stat;
+    out->spu_reverb_mask = g_spu_reverb_mask;
 }
 
 
@@ -5475,6 +5509,7 @@ void fm_memory_quick_load(
     g_spu_xfer_data = in->spu_xfer_data;
     g_spu_ctrl = in->spu_ctrl;
     g_spu_stat = in->spu_stat;
+    g_spu_reverb_mask = in->spu_reverb_mask & 0x00FFFFFFu;
 
     /*
      * La table de detection de boucle DMA est purement host/debug.

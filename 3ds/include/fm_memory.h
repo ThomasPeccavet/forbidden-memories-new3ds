@@ -79,6 +79,7 @@ typedef struct FMMemoryQuickState
     uint16_t spu_xfer_data;
     uint16_t spu_ctrl;
     uint16_t spu_stat;
+    uint32_t spu_reverb_mask;
 } FMMemoryQuickState;
 
 void fm_memory_quick_save(FMMemoryQuickState *out);

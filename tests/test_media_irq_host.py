@@ -69,6 +69,14 @@ int main(void) {
     cpu.pc = g_media_irq_sentinel; assert(fm_media_irq_dispatch(&cpu));
     assert(!g_media_irq_native && g_seq_irq_done == 1);
     assert(!memcmp(&cpu, &saved, sizeof(cpu)));
+    /* A timer raised while the callback ran must not interrupt the same
+     * restored entry again before the game gets one dispatcher turn. */
+    assert(!fm_media_irq_dispatch(&cpu) && timer_pending == 1);
+    cpu.pc = 0x80012CB8; /* The interrupted frame service has progressed. */
+    assert(!fm_media_irq_dispatch(&cpu) && timer_pending == 1);
+    cpu.pc = 0x80012C50; /* Next frame service can accept the pending IRQ. */
+    assert(fm_media_irq_dispatch(&cpu) && timer_pending == 0);
+    assert(g_seq_irq_calls == 2);
     return 0;
 }
 '''

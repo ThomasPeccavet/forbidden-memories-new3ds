@@ -6929,6 +6929,7 @@ static int fm_b33_deliver_cd_callback(CPUState *cpu, uint32_t frame)
 
 static int g_media_irq_active;
 static int g_media_irq_native;
+static int g_seq_irq_resume_pending;
 static uint32_t g_seq_irq_calls, g_seq_irq_done, g_seq_irq_blocks;
 static uint32_t g_media_irq_gpr[32], g_media_irq_pc, g_media_irq_hi, g_media_irq_lo;
 static const uint32_t g_media_irq_sentinel = 0x8000FFD0u;
@@ -6939,12 +6940,21 @@ static int fm_media_irq_dispatch(CPUState *cpu)
         memcpy(cpu->gpr, g_media_irq_gpr, sizeof(g_media_irq_gpr));
         cpu->pc = g_media_irq_pc; cpu->hi = g_media_irq_hi; cpu->lo = g_media_irq_lo;
         cpu->gpr[0] = 0; g_media_irq_active = 0;
-        if (g_media_irq_native) ++g_seq_irq_done;
+        if (g_media_irq_native) {
+            ++g_seq_irq_done;
+            g_seq_irq_resume_pending = 1;
+        }
         g_media_irq_native = 0; return 1;
+    }
+    /* A timer can become pending while its callback spans host frames.
+     * Execute the interrupted entry before permitting another delivery. */
+    if (g_seq_irq_resume_pending) {
+        g_seq_irq_resume_pending = 0;
+        return 0;
     }
     if (g_b33_cb_active || g_cd_tick_active || g_b34_ready_active || g_b35_finalizer_active) return 0;
     uint32_t callback, gp;
-    /* B136.28: run the complete sequencer callback as native MIPS.
+    /* B136.29: run the complete sequencer callback as native MIPS.
      * Start only at the game frame service so its return always lets
      * the interrupted frame progress before another timer delivery. */
     if (!fm_memory_mdec_take_callback(&callback, &gp)) {
@@ -8551,6 +8561,7 @@ static void fm_cd_hle_reset(void)
     fm_media_reset();
     g_media_irq_active = 0;
     g_media_irq_native = 0;
+    g_seq_irq_resume_pending = 0;
     g_b33_pending = 0u;
     g_b33_cb_active = 0u;
     memset(
@@ -11504,7 +11515,7 @@ static int fm_b93_hle_800917f8(
  * Le snapshot ne serialise jamais les pointeurs de fonctions CPU.
  */
 #define FM_B135_QS_MAGIC       0x35333142u /* "B135" little-endian */
-#define FM_B135_QS_VERSION     2u
+#define FM_B135_QS_VERSION     3u
 #define FM_B135_QS_RAM_SIZE    (2u * 1024u * 1024u)
 #define FM_B135_QS_VRAM_WORDS  (1024u * 512u)
 #define FM_B135_QS_PATH        "sdmc:/3ds/fm-new3ds/quickstate-b135.bin"
@@ -20056,7 +20067,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.28\nvideo_mode=%08lX\n"
+                            "video_probe=B136.29\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20124,7 +20135,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.28\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.29\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"
@@ -20251,6 +20262,8 @@ int main(void)
                                 (unsigned long)g_seq_irq_done,
                                 (unsigned long)g_seq_irq_blocks,
                                 (unsigned)(g_media_irq_active && g_media_irq_native));
+                            fprintf(intro_file, "spu_reverb_mask=%08lX\n",
+                                (unsigned long)fm_memory_read_word(0x1F801D98u));
                             for (unsigned si = 0u; si < 3u; ++si)
                             {
                                 uint32_t slot = 0x800EC220u + si * 0x14u;
