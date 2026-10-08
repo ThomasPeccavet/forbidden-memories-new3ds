@@ -20,6 +20,9 @@ static void fm_gpu_perf_texture_window(uint64_t *n, uint64_t *f, uint32_t *nt, u
     *n=1000; *f=2000; *nt=10; *ft=20;
 }
 static unsigned gpu_resets;
+static unsigned g_perf_wait_reason;
+static uint32_t g_b105_slice_budget_ms=12, g_b84_budget_yields;
+static uint32_t g_b108_vsync_mode0,g_b108_vsync_modeN,g_b108_vsync_immediate,g_b1358_vsync_completions;
 static void fm_gpu_perf_window_reset(void) { ++gpu_resets; }
 static void fm_gpu_perf_window_rank(unsigned rank, FMGpuOpcodePerf *out) {
     if (!rank) { out->opcode=0x30; out->calls=10; out->total_us=1234; out->max_us=500; }
@@ -63,6 +66,8 @@ static int report_close(FILE *fp) {
     fm_perf_window(1000,100,12,&cpu);
     for(unsigned i=1;i<=100;++i) {
         g_b84_latch_count=i/5;
+        g_perf_wait_reason=i%4; g_b106_wait_ms= g_perf_wait_reason==3 ? 0 : 2;
+        g_b84_budget_yields=i; g_b108_vsync_mode0=i/5; g_b1358_vsync_completions=i/5;
         g_seq_irq_done=i; g_seq_irq_total_ms=i*3;
         dma.dma2_payload_us=i*3000; dma.dma2_linked_total_ms=i*4; dma.dma2_linked_transfer_count=i;
         fm_perf_window(1000+i*20,100+i,12,&cpu);
@@ -81,6 +86,8 @@ static int report_close(FILE *fp) {
     assert(strstr(text,"native_sampling=random_1/64"));
     assert(strstr(text,"gpu0 opcode=30 calls=10 us=1234 max_us=500"));
     assert(gpu_resets==2);
+    assert(strstr(text,"wait_reasons budget_ms=50 budget_loops=25 vsync_ms=50 vsync_loops=25 other_ms=50 other_loops=25 late_skips=25"));
+    assert(strstr(text,"scheduler budget_ms=12 budget_yields=100 vsync_mode0=20 vsync_modeN=0 vsync_immediate=0 vsync_completed=20"));
     assert(strstr(text,"texture_fast format_specialization=1 color_lookup=1 neutral_triangles=10 fast_triangles=20 neutral_pixels=1000 fast_pixels=2000"));
     return 0;
 }

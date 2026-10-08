@@ -2,6 +2,15 @@
 
 Dernière mise à jour : **8 octobre 2026**.
 
+## B136.40 : attribution des attentes du planificateur
+
+B136.39 divise par deux le coût moyen des sprites au repos, mais le temps
+économisé se retrouve largement dans les attentes. B136.40 distingue les
+attentes après sortie sur budget, avec VSync actif, et les autres attentes.
+Les compteurs VSync et sorties sur budget sont des deltas par fenêtre.
+Le rythme du jeu et du séquenceur reste inchangé.
+Voir [la définition et les limites](B136_40_WAIT_ATTRIBUTION.md).
+
 ## B136.39 : boucle spécialisée des sprites opaques
 
 Au repos, B136.38 mesure 469 ms pour les sprites 64h sur 2004 ms,
