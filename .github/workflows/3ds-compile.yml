@@ -58,7 +58,7 @@ jobs:
             build-profile-unai/fm_unai.o \
             build-profile-unai/gpu_unai_arm.o
           "$DEVKITARM/bin/arm-none-eabi-g++" -r \
-            build-profile-unai/fm_unai.o build-profile-unai/gpu_unai_arm.o \
+            3ds/build-profile-unai/fm_unai.o 3ds/build-profile-unai/gpu_unai_arm.o \
             -o /tmp/unai-linked.o
           if "$DEVKITARM/bin/arm-none-eabi-nm" -u /tmp/unai-linked.o | grep -E 'sprite_driver_|poly_.*_asm|tile_driver_'; then
             echo "Missing Unai assembly implementation"; exit 1
