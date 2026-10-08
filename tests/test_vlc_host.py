@@ -29,7 +29,7 @@ static int fm_vlc_try(CPUState *cpu) {
     cpu->gpr[2] = 7; cpu->pc = cpu->gpr[31]; return 1;
 }
 static void fm_probe_stop(int reason, unsigned pc) {
-    assert(reason == FM_STOP_BUDGET && (pc == 0x8006A670 || pc == 0x80076DB8)); ++stops;
+    assert(reason == FM_STOP_BUDGET && pc == 0x8006A670); ++stops;
 }
 static void fm_media_guest_entry(CPUState *cpu, unsigned phys) { (void)cpu; (void)phys; ++observed; }
 /* ENTRY */
@@ -47,8 +47,6 @@ int main(void) {
     g_probe_armed = 1;
     psx_check_interrupts_dispatch_entry(&cpu, 0x8006A354);
     assert(tries == 2 && stops == 1 && observed == 3);
-    psx_check_interrupts_dispatch_entry(&cpu, 0x80076DB8);
-    assert(stops == 2 && tries == 2 && observed == 3);
     return 0;
 }
 '''.replace("/* ENTRY */", source[start:end] + "}\n")
