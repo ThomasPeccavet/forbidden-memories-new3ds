@@ -24,7 +24,11 @@ class MediaIrqHostTests(unittest.TestCase):
 #include <string.h>
 typedef struct { uint32_t gpr[32], pc, hi, lo; } CPUState;
 static int g_b33_cb_active, g_cd_tick_active, g_b34_ready_active, g_b35_finalizer_active;
-static unsigned pending, taken;
+static unsigned pending, taken, timer_pending;
+static int fm_runtime_take_timer_callback(uint32_t *callback) {
+    if (!timer_pending) return 0;
+    --timer_pending; *callback = 0x8004BBC4; return 1;
+}
 static int fm_memory_mdec_take_callback(uint32_t *callback, uint32_t *gp) {
     if (!pending) return 0;
     --pending; ++taken; *callback = 0x8006A704; *gp = 0x8009C298; return 1;
@@ -53,6 +57,18 @@ int main(void) {
     cpu.pc = g_media_irq_sentinel; assert(fm_media_irq_dispatch(&cpu));
     assert(!memcmp(&cpu, &saved, sizeof(cpu)));
     assert(!fm_media_irq_dispatch(&cpu));
+    assert(g_seq_irq_blocks == 0);
+    timer_pending = 1;
+    assert(!fm_media_irq_dispatch(&cpu) && timer_pending == 1);
+    cpu.pc = 0x80012C50; saved = cpu;
+    assert(fm_media_irq_dispatch(&cpu) && cpu.pc == 0x8004BBC4);
+    assert(g_media_irq_native && g_seq_irq_calls == 1);
+    assert(cpu.gpr[28] == saved.gpr[28]);
+    timer_pending = 1;
+    assert(!fm_media_irq_dispatch(&cpu) && timer_pending == 1);
+    cpu.pc = g_media_irq_sentinel; assert(fm_media_irq_dispatch(&cpu));
+    assert(!g_media_irq_native && g_seq_irq_done == 1);
+    assert(!memcmp(&cpu, &saved, sizeof(cpu)));
     return 0;
 }
 '''
