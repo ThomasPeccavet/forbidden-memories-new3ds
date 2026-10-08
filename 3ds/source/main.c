@@ -6940,7 +6940,9 @@ static int fm_media_irq_dispatch(CPUState *cpu)
     }
     if (g_b33_cb_active || g_cd_tick_active || g_b34_ready_active || g_b35_finalizer_active) return 0;
     uint32_t callback, gp;
-    if (!fm_memory_mdec_take_callback(&callback, &gp)) return 0;
+    gp = cpu->gpr[28];
+    if (!fm_memory_mdec_take_callback(&callback, &gp)
+        && !fm_runtime_take_timer_callback(&callback)) return 0;
     memcpy(g_media_irq_gpr, cpu->gpr, sizeof(g_media_irq_gpr));
     g_media_irq_pc = cpu->pc; g_media_irq_hi = cpu->hi; g_media_irq_lo = cpu->lo;
     cpu->pc = callback; cpu->gpr[28] = gp;
@@ -20021,7 +20023,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.23\nvideo_mode=%08lX\n"
+                            "video_probe=B136.24\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20089,7 +20091,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.23\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.24\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"

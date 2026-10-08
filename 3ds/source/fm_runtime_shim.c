@@ -495,6 +495,28 @@ static FM_BiosEvent g_bios_events[
     FM_BIOS_EVENT_COUNT
 ];
 
+/* B136.24: deliver enabled root-counter events at a dispatcher boundary.
+ * The native sound sequencer uses F2000002/spec 2 in callback mode.
+ * Leave disabled/unregistered IRQs pending, and acknowledge only the
+ * selected timer. CPU context is saved by the shared guest IRQ bridge. */
+int fm_runtime_take_timer_callback(uint32_t *callback)
+{
+    uint16_t pending = fm_memory_i_stat() & fm_memory_i_mask();
+    for (unsigned timer = 0; timer < 3; ++timer) {
+        uint16_t bit = (uint16_t)(1u << (timer + 4u));
+        if (!(pending & bit)) continue;
+        for (unsigned i = 0; i < FM_BIOS_EVENT_COUNT; ++i) {
+            FM_BiosEvent *ev = &g_bios_events[i];
+            if (!ev->used || !ev->enabled || ev->class_id != 0xF2000000u + timer
+                || ev->spec != 2u || ev->mode != 0x1000u || !ev->func) continue;
+            fm_memory_write_half(0x1F801070u, (uint16_t)~bit);
+            *callback = ev->func;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* B136.5 - BIOS event diagnostics for the CD readiness gate. */
 static uint32_t g_b136_bios_deliver_hits = 0u;
 static uint32_t g_b136_bios_deliver_class = 0u;
