@@ -14,7 +14,7 @@ class TexturedNeutralTests(unittest.TestCase):
         funcs='\n'.join(function(s,n) for n in ('b124_vram_get',
             'b13512_texctx','b13512_fetch_texel_ctx','b124_blend',
             'b125_put_textured','b13513_grad_fp16','b13513_edge_fp16',
-            'b13636_neutral_span','b13511_shaded_textured_triangle'))
+            'b13636_neutral_span','b13637_shaded_span','b13511_shaded_textured_triangle'))
         baseline=(ROOT/'tests/host/textured_b13635_reference.c').read_text()
         # Prevent call-site constant propagation only in this harness/benchmark.
         funcs=funcs.replace('static void b13511_shaded_textured_triangle(',
@@ -41,11 +41,15 @@ static uint64_t g_window_fast_tex_pixels,g_window_neutral_pixels;
 static uint32_t g_window_fast_tex_triangles,g_window_neutral_triangles;
 static uint64_t svcGetSystemTick(void) { static uint64_t t; return ++t; }
 #endif
-''' + ctx + '\n' + funcs + '\n' + baseline + r'''
+''' + (ROOT/'3ds/include/fm_modulate_lut.h').read_text() + ctx + '\n' + funcs + '\n' + baseline + r'''
 static uint32_t rng=13636;
 static uint32_t random32(void) { rng=rng*1664525u+1013904223u;return rng; }
 int main(int argc,char **argv) {
     (void)argv;
+    for(unsigned m=0;m<32;++m) for(unsigned t=0;t<32;++t) {
+        unsigned value=(m*t)>>4; if(value>31)value=31;
+        assert(b13637_modulate[m*32+t]==value);
+    }
     for(unsigned i=0;i<1024*512;++i) initial[i]=(uint16_t)random32();
     /* Explicit transparent and opaque-black palette entries. */
     for(unsigned y=0;y<512;++y) {
@@ -58,7 +62,7 @@ int main(int argc,char **argv) {
         for(unsigned j=0;j<3;++j) {
             x[j]=(int)(random32()%480)-80; y[j]=(int)(random32()%360)-60;
             u[j]=random32()%256;v[j]=random32()%256;
-            c[j]=i%5 ? 0x808080 | (random32()&0x070707) : random32()&0xffffff;
+            c[j]=i%5==0 ? 0x808080 | (random32()&0x070707) : random32()&0xffffff;
         }
         if(i%16==0)y[1]=y[0];
         if(i%16==1)y[2]=y[1];
@@ -93,7 +97,7 @@ int main(int argc,char **argv) {
 #endif
     }
 #if FM_PERF_PROFILE
-    assert(neutral_covered>100);
+    assert(neutral_covered>20);
 #else
     (void)neutral_covered;
 #endif
@@ -120,6 +124,24 @@ int main(int argc,char **argv) {
             double after=(double)(clock()-begin)/CLOCKS_PER_SEC;
             printf("host depth=%u before_ms=%.2f after_ms=%.2f ratio=%.3f\n",
                 depth,before*1000,after*1000,before/after);
+        }
+    }
+    if(argc>1) {
+        for(unsigned small=0;small<2;++small) for(unsigned depth=0;depth<3;++depth) {
+            unsigned reps=small ? 70000 : 700;
+            int right=small ? 40 : 300, bottom=small ? 24 : 240;
+            memcpy(ram,initial,sizeof(ram));clock_t begin=clock();
+            for(unsigned i=0;i<reps;++i)
+                reference_textured_triangle(8,8,0,0,0x123456,right,8,128,0,0x7f9bad,
+                    8,bottom,0,128,0xffff22,512,480,0x18|(depth<<7),0,0);
+            double before=(double)(clock()-begin)/CLOCKS_PER_SEC;
+            memcpy(ram,initial,sizeof(ram));begin=clock();
+            for(unsigned i=0;i<reps;++i)
+                b13511_shaded_textured_triangle(8,8,0,0,0x123456,right,8,128,0,0x7f9bad,
+                    8,bottom,0,128,0xffff22,512,480,0x18|(depth<<7),0,0);
+            double after=(double)(clock()-begin)/CLOCKS_PER_SEC;
+            printf("host colored small=%u depth=%u before_ms=%.2f after_ms=%.2f ratio=%.3f\n",
+                small,depth,before*1000,after*1000,before/after);
         }
     }
     return 0;

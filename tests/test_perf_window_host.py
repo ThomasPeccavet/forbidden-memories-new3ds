@@ -79,7 +79,7 @@ static int report_close(FILE *fp) {
     assert(strstr(text,"native_sampling=random_1/64"));
     assert(strstr(text,"gpu0 opcode=30 samples=10 us=1234 max_us=500"));
     assert(gpu_resets==2);
-    assert(strstr(text,"texture_fast neutral_triangles=10 fast_triangles=20 neutral_pixels=1000 fast_pixels=2000"));
+    assert(strstr(text,"texture_fast format_specialization=1 color_lookup=1 neutral_triangles=10 fast_triangles=20 neutral_pixels=1000 fast_pixels=2000"));
     return 0;
 }
 '''

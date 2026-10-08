@@ -1,4 +1,5 @@
 #include "fm_gpu.h"
+#include "fm_modulate_lut.h"
 
 #include "gpu_sw_renderer.h"
 #include "gpu_vram_dirty.h"
@@ -1902,6 +1903,58 @@ static inline __attribute__((always_inline)) void b13636_neutral_span(
     }
 }
 
+/* B136.37: format-specialized spans for non-neutral Gouraud texturing.
+ * Each constant-depth call removes texture-format branches from the hot loop.
+ * A 1 KiB table exactly replaces component multiply/shift/saturation.
+ * Color interpolation, transparent texels and palette snapshots are unchanged. */
+static inline __attribute__((always_inline)) void b13637_shaded_span(
+    uint16_t *dst, unsigned width, int32_t u_fp, int32_t v_fp,
+    int32_t du_dx, int32_t dv_dx,
+    int32_t r_fp, int32_t g_fp, int32_t b_fp,
+    int32_t dr_dx, int32_t dg_dx, int32_t db_dx,
+    const B13512TexCtx *ctx,
+    const uint16_t *palette, unsigned depth
+)
+{
+    int last_key = -1;
+    uint16_t packed = 0u;
+    uint32_t u = (uint32_t)u_fp, v = (uint32_t)v_fp;
+    for (unsigned x=0; x<width; ++x, ++dst) {
+        int tu = ((int32_t)u >> 16) & 255;
+        int tv = ((int32_t)v >> 16) & 255;
+        uint16_t texel;
+        if (depth < 2u) {
+            unsigned shift = depth == 0u ? 2u : 1u;
+            int key = (tv << (8u-shift)) | (tu >> shift);
+            if (key != last_key) {
+                packed = g_vram[(size_t)(ctx->tpy+tv)*1024u
+                    + (size_t)((ctx->tpx+(tu >> shift)) & 1023)];
+                last_key = key;
+            }
+            unsigned bits = depth == 0u ? 4u : 8u;
+            unsigned lane = (unsigned)tu & ((1u << shift)-1u);
+            texel = palette[(packed >> (lane*bits)) & ((1u << bits)-1u)];
+        } else {
+            texel = g_vram[(size_t)(ctx->tpy+tv)*1024u
+                + (size_t)((ctx->tpx+tu) & 1023)];
+        }
+        if (texel != 0u) {
+            int mr=r_fp >> 16, mg=g_fp >> 16, mb=b_fp >> 16;
+            if ((unsigned)mr > 31u) mr=mr < 0 ? 0 : 31;
+            if ((unsigned)mg > 31u) mg=mg < 0 ? 0 : 31;
+            if ((unsigned)mb > 31u) mb=mb < 0 ? 0 : 31;
+            int rr=b13637_modulate[((unsigned)mr << 5) | (texel & 31u)];
+            int gg=b13637_modulate[((unsigned)mg << 5) | ((texel >> 5) & 31u)];
+            int bb=b13637_modulate[((unsigned)mb << 5) | ((texel >> 10) & 31u)];
+            *dst=(uint16_t)(rr | gg << 5 | bb << 10);
+        }
+        u += (uint32_t)du_dx; v += (uint32_t)dv_dx;
+        r_fp=(int32_t)((uint32_t)r_fp+(uint32_t)dr_dx);
+        g_fp=(int32_t)((uint32_t)g_fp+(uint32_t)dg_dx);
+        b_fp=(int32_t)((uint32_t)b_fp+(uint32_t)db_dx);
+    }
+}
+
 static void b13511_shaded_textured_triangle(
     int x0, int y0, int u0, int v0, uint32_t c0,
     int x1, int y1, int u1, int v1, uint32_t c1,
@@ -2172,114 +2225,18 @@ static void b13511_shaded_textured_triangle(
                 continue;
             }
 
-            int last_key = -1;
-            uint16_t packed = 0u;
-
-            for (int x = sx; x < ex; ++x, ++dst)
-            {
-                int tu = (u_fp >> 16) & 0xFF;
-                int tv = (v_fp >> 16) & 0xFF;
-                uint16_t texel;
-
-                if (texctx.depth == 0u)
-                {
-                    int key =
-                        (tv << 6)
-                        |
-                        (tu >> 2);
-
-                    if (key != last_key)
-                    {
-                        packed =
-                            g_vram[
-                                (size_t)(texctx.tpy + tv) * 1024u
-                                +
-                                (size_t)((texctx.tpx + (tu >> 2)) & 1023)
-                            ];
-
-                        last_key =
-                            key;
-                    }
-
-                    texel =
-                        b13533_clut[
-                            (packed >> ((tu & 3) * 4)) & 0x0F
-                        ];
-                }
-                else if (texctx.depth == 1u)
-                {
-                    int key =
-                        (tv << 7)
-                        |
-                        (tu >> 1);
-
-                    if (key != last_key)
-                    {
-                        packed =
-                            g_vram[
-                                (size_t)(texctx.tpy + tv) * 1024u
-                                +
-                                (size_t)((texctx.tpx + (tu >> 1)) & 1023)
-                            ];
-
-                        last_key =
-                            key;
-                    }
-
-                    texel =
-                        b13533_clut[
-                            (packed >> ((tu & 1) * 8)) & 0xFF
-                        ];
-                }
-                else
-                {
-                    texel =
-                        g_vram[
-                            (size_t)(texctx.tpy + tv) * 1024u
-                            +
-                            (size_t)((texctx.tpx + tu) & 1023)
-                        ];
-                }
-
-                if (texel != 0u)
-                {
-                    int mr = r_fp >> 16;
-                    int mg = g_fp >> 16;
-                    int mb = b_fp >> 16;
-
-                    if ((unsigned)mr > 31u) mr = mr < 0 ? 0 : 31;
-                    if ((unsigned)mg > 31u) mg = mg < 0 ? 0 : 31;
-                    if ((unsigned)mb > 31u) mb = mb < 0 ? 0 : 31;
-
-                    int rr =
-                        (((int)(texel & 31u)) * mr) >> 4;
-
-                    int gg =
-                        (((int)((texel >> 5) & 31u)) * mg) >> 4;
-
-                    int bb =
-                        (((int)((texel >> 10) & 31u)) * mb) >> 4;
-
-                    if (rr > 31) rr = 31;
-                    if (gg > 31) gg = 31;
-                    if (bb > 31) bb = 31;
-
-                    *dst =
-                        (uint16_t)(
-                            rr
-                            |
-                            (gg << 5)
-                            |
-                            (bb << 10)
-                        );
-                }
-
-                u_fp += du_dx;
-                v_fp += dv_dx;
-                r_fp += dr_dx;
-                g_fp += dg_dx;
-                b_fp += db_dx;
-            }
+            if (texctx.depth == 0u)
+                b13637_shaded_span(dst, b13537_span, u_fp, v_fp, du_dx, dv_dx,
+                    r_fp, g_fp, b_fp, dr_dx, dg_dx, db_dx,
+                    &texctx, b13533_clut, 0u);
+            else if (texctx.depth == 1u)
+                b13637_shaded_span(dst, b13537_span, u_fp, v_fp, du_dx, dv_dx,
+                    r_fp, g_fp, b_fp, dr_dx, dg_dx, db_dx,
+                    &texctx, b13533_clut, 1u);
+            else
+                b13637_shaded_span(dst, b13537_span, u_fp, v_fp, du_dx, dv_dx,
+                    r_fp, g_fp, b_fp, dr_dx, dg_dx, db_dx,
+                    &texctx, b13533_clut, 2u);
         }
         else
         {

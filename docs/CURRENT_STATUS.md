@@ -2,6 +2,17 @@
 
 Dernière mise à jour : **8 octobre 2026**.
 
+## B136.37 : modulation exacte des couleurs par table
+
+B136.36 reste à 16,50 latches/s dans le duel utilisateur : aucun triangle
+ne prend le chemin neutre. B136.37 cible les couleurs variables des 4488
+triangles rapides mesurés. Une table de 1 Kio remplace les multiplications
+et saturations des composantes, avec spécialisation par format de texture.
+Les tests vérifient toutes les entrées et comparent le rendu complet sur
+640 cas dans deux modes. Le banc x86 montre 1,12–1,25 fois le débit du
+chemin ciblé ; le gain ARM et la cadence globale restent à mesurer.
+Voir [validation et limites](B136_37_COLOR_LOOKUP.md).
+
 ## B136.36 : modulation neutre des polygones texturés
 
 La fenêtre utilisateur B136.35 mesure 16,45 latches/s et identifie 3Ch/34h
