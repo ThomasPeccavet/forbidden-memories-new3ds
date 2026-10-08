@@ -2,6 +2,21 @@
 
 Dernière mise à jour : **8 octobre 2026**.
 
+## B136.31 : livraison du timer découplée des updates graphiques
+
+L'utilisateur a confirmé que B136.30 termine finalement l'intro et atteint
+Simon Muran. La longue attente reste anormale. Le timer avançait à chaque
+intervalle hôte, mais son callback n'était autorisé qu'à l'entrée `80012C50`,
+une fois par update du jeu. Le rendu lent et les tranches de l'interpréteur
+retardaient cette livraison ; plusieurs échéances se regroupaient dans I_STAT.
+
+B136.31 exécute le callback natif complet dans un CPU et une pile séparés,
+à la frontière VBlank hôte, en conservant les masques et événements BIOS.
+Le rejeu de la capture B136.30 termine après 374 livraisons supplémentaires,
+avec le contexte principal préservé. Les tests menu antérieurs passent aussi.
+Le parcours et la durée réelle dans Azahar restent à confirmer. Voir
+[la méthode, les preuves et les limites](B136_31_SEQ_DELIVERY.md).
+
 ## B136.30 : timer du séquenceur 17 fois trop lent
 
 Le log utilisateur B136.29 confirme les retours des interruptions audio

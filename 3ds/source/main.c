@@ -6928,9 +6928,6 @@ static int fm_b33_deliver_cd_callback(CPUState *cpu, uint32_t frame)
 
 
 static int g_media_irq_active;
-static int g_media_irq_native;
-static int g_seq_irq_resume_pending;
-static uint32_t g_seq_irq_calls, g_seq_irq_done, g_seq_irq_blocks;
 static uint32_t g_media_irq_gpr[32], g_media_irq_pc, g_media_irq_hi, g_media_irq_lo;
 static const uint32_t g_media_irq_sentinel = 0x8000FFD0u;
 static int fm_media_irq_dispatch(CPUState *cpu)
@@ -6940,35 +6937,56 @@ static int fm_media_irq_dispatch(CPUState *cpu)
         memcpy(cpu->gpr, g_media_irq_gpr, sizeof(g_media_irq_gpr));
         cpu->pc = g_media_irq_pc; cpu->hi = g_media_irq_hi; cpu->lo = g_media_irq_lo;
         cpu->gpr[0] = 0; g_media_irq_active = 0;
-        if (g_media_irq_native) {
-            ++g_seq_irq_done;
-            g_seq_irq_resume_pending = 1;
-        }
-        g_media_irq_native = 0; return 1;
-    }
-    /* A timer can become pending while its callback spans host frames.
-     * Execute the interrupted entry before permitting another delivery. */
-    if (g_seq_irq_resume_pending) {
-        g_seq_irq_resume_pending = 0;
-        return 0;
+        return 1;
     }
     if (g_b33_cb_active || g_cd_tick_active || g_b34_ready_active || g_b35_finalizer_active) return 0;
     uint32_t callback, gp;
-    /* B136.29: run the complete sequencer callback as native MIPS.
-     * Start only at the game frame service so its return always lets
-     * the interrupted frame progress before another timer delivery. */
-    if (!fm_memory_mdec_take_callback(&callback, &gp)) {
-        if ((cpu->pc & 0x1FFFFFFFu) != 0x00012C50u
-            || !fm_runtime_take_timer_callback(&callback)) return 0;
-        gp = cpu->gpr[28];
-        g_media_irq_native = 1;
-        ++g_seq_irq_calls;
-    }
+    if (!fm_memory_mdec_take_callback(&callback, &gp)) return 0;
     memcpy(g_media_irq_gpr, cpu->gpr, sizeof(g_media_irq_gpr));
     g_media_irq_pc = cpu->pc; g_media_irq_hi = cpu->hi; g_media_irq_lo = cpu->lo;
     cpu->pc = callback; cpu->gpr[28] = gp;
     cpu->gpr[31] = g_media_irq_sentinel; cpu->gpr[0] = 0;
     g_media_irq_active = 1; return 1;
+}
+
+static uint32_t g_seq_irq_calls, g_seq_irq_done, g_seq_irq_blocks;
+static uint32_t g_seq_irq_serviced, g_seq_irq_skipped, g_seq_irq_max_ms;
+/* B136.31: service a timer IRQ independently of the next rendered update.
+ * I_STAT still coalesces elapsed targets, and BIOS registration/I_MASK still
+ * decide delivery. Run the entire native ISR on a separate CPU/stack so it
+ * cannot consume successive main-thread slices or starve the restored PC. */
+static int fm_execute_guest_timer_callback(CPUState *cpu)
+{
+    if (!cpu || g_media_irq_active || g_b33_cb_active || g_cd_tick_active
+        || g_b34_ready_active || g_b35_finalizer_active) return 0;
+    uint32_t callback;
+    if (!fm_runtime_take_timer_callback(&callback)) return 0;
+    CPUState irq_cpu = *cpu;
+    irq_cpu.pc = callback;
+    irq_cpu.gpr[29] = 0x801FF800u;
+    irq_cpu.gpr[31] = g_media_irq_sentinel;
+    irq_cpu.gpr[0] = 0;
+    ++g_seq_irq_calls;
+    uint64_t start_ms = osGetTime();
+    for (unsigned handoff = 0; handoff < 100000u; ++handoff) {
+        if (irq_cpu.pc == g_media_irq_sentinel) {
+            ++g_seq_irq_done;
+            if (irq_cpu.gpr[2] == 0u) ++g_seq_irq_serviced;
+            else ++g_seq_irq_skipped;
+            uint32_t elapsed = (uint32_t)(osGetTime() - start_ms);
+            if (elapsed > g_seq_irq_max_ms) g_seq_irq_max_ms = elapsed;
+            return 1;
+        }
+        uint32_t phys = irq_cpu.pc & 0x1FFFFFFFu;
+        if ((phys == 0xA0u || phys == 0xB0u || phys == 0xC0u
+            || phys == 0x884u || phys == 0x894u)
+            && fm_bios_try_hle(&irq_cpu, irq_cpu.pc)) continue;
+        FMInterpResult result = fm_interp_run_block(&irq_cpu, 512u);
+        ++g_seq_irq_blocks;
+        if (result.reason != FM_INTERP_BLOCK_DONE
+            && result.reason != FM_INTERP_BUDGET) return -1;
+    }
+    return -1;
 }
 
 static int fm_execute_guest_vblank_callback(
@@ -8560,8 +8578,6 @@ static void fm_cd_hle_reset(void)
 {
     fm_media_reset();
     g_media_irq_active = 0;
-    g_media_irq_native = 0;
-    g_seq_irq_resume_pending = 0;
     g_b33_pending = 0u;
     g_b33_cb_active = 0u;
     memset(
@@ -12981,27 +12997,6 @@ int main(void)
                 }
                 fm_media_guest_entry(cpu, phys);
                 if (fm_media_irq_dispatch(cpu)) { static_miss = 0; continue; }
-                /* Keep every native sequencer continuation out of the
-                 * compiled dispatcher, not only the final SPU helpers. */
-                if (g_media_irq_active && g_media_irq_native) {
-                    if (fm_bios_try_hle(cpu, cpu->pc)) {
-                        static_miss = 0;
-                        continue;
-                    }
-                    interp = fm_interp_run_block(cpu, 512u);
-                    interp_ran = 1;
-                    ++g_seq_irq_blocks;
-                    static_miss = 0;
-                    if (interp.reason != FM_INTERP_BLOCK_DONE
-                        && interp.reason != FM_INTERP_BUDGET) {
-                        g_b65_stop_code = 4u;
-                        g_b65_stop_pc = interp.pc;
-                        g_b65_stop_ra = cpu->gpr[31];
-                        g_b65_stop_detail = interp.instruction;
-                        game_running = 0;
-                    }
-                    continue;
-                }
                 /* Deliver hardware completion outside guest CD/data/tick callbacks. */
                 if (!g_media_irq_active && !g_cd_tick_active && !g_b34_ready_active && !g_b35_finalizer_active
                     && fm_b33_deliver_cd_callback(cpu, frame))
@@ -20067,7 +20062,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.30\nvideo_mode=%08lX\n"
+                            "video_probe=B136.31\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20135,7 +20130,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.30\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.31\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"
@@ -20261,7 +20256,12 @@ int main(void)
                                 (unsigned long)g_seq_irq_calls,
                                 (unsigned long)g_seq_irq_done,
                                 (unsigned long)g_seq_irq_blocks,
-                                (unsigned)(g_media_irq_active && g_media_irq_native));
+                                0u);
+                            fprintf(intro_file,
+                                "seq_delivery=serviced:%lu skipped:%lu max_ms:%lu cadence:host-vblank\n",
+                                (unsigned long)g_seq_irq_serviced,
+                                (unsigned long)g_seq_irq_skipped,
+                                (unsigned long)g_seq_irq_max_ms);
                             fprintf(intro_file, "spu_reverb_mask=%08lX\n",
                                 (unsigned long)fm_memory_read_word(0x1F801D98u));
                             uint32_t seq_ctx = fm_memory_read_word(0x8009C7D8u);
@@ -20887,6 +20887,14 @@ int main(void)
         if (memory_status == 0)
         {
             fm_memory_vblank_tick();
+            if (game_running && fm_execute_guest_timer_callback(cpu) < 0) {
+                /* An incomplete native ISR must never leave a reentrancy
+                 * gate set while the game silently continues. */
+                g_b65_stop_code = 4u;
+                g_b65_stop_pc = 0x8004BBC4u;
+                g_b65_stop_detail = g_seq_irq_blocks;
+                game_running = 0;
+            }
 
             /*
              * B12 : executer le vrai callback VBlank du jeu dans un

@@ -17,18 +17,14 @@ class MediaIrqHostTests(unittest.TestCase):
             self.skipTest("Host C compiler required")
         source = (ROOT / "3ds/source/main.c").read_text()
         start = source.index("static int g_media_irq_active;")
-        end = source.index("static int fm_execute_guest_vblank_callback(", start)
+        end = source.index("static uint32_t g_seq_irq_calls", start)
         code = r'''
 #include <assert.h>
 #include <stdint.h>
 #include <string.h>
 typedef struct { uint32_t gpr[32], pc, hi, lo; } CPUState;
 static int g_b33_cb_active, g_cd_tick_active, g_b34_ready_active, g_b35_finalizer_active;
-static unsigned pending, taken, timer_pending;
-static int fm_runtime_take_timer_callback(uint32_t *callback) {
-    if (!timer_pending) return 0;
-    --timer_pending; *callback = 0x8004BBC4; return 1;
-}
+static unsigned pending, taken;
 static int fm_memory_mdec_take_callback(uint32_t *callback, uint32_t *gp) {
     if (!pending) return 0;
     --pending; ++taken; *callback = 0x8006A704; *gp = 0x8009C298; return 1;
@@ -57,26 +53,6 @@ int main(void) {
     cpu.pc = g_media_irq_sentinel; assert(fm_media_irq_dispatch(&cpu));
     assert(!memcmp(&cpu, &saved, sizeof(cpu)));
     assert(!fm_media_irq_dispatch(&cpu));
-    assert(g_seq_irq_blocks == 0);
-    timer_pending = 1;
-    assert(!fm_media_irq_dispatch(&cpu) && timer_pending == 1);
-    cpu.pc = 0x80012C50; saved = cpu;
-    assert(fm_media_irq_dispatch(&cpu) && cpu.pc == 0x8004BBC4);
-    assert(g_media_irq_native && g_seq_irq_calls == 1);
-    assert(cpu.gpr[28] == saved.gpr[28]);
-    timer_pending = 1;
-    assert(!fm_media_irq_dispatch(&cpu) && timer_pending == 1);
-    cpu.pc = g_media_irq_sentinel; assert(fm_media_irq_dispatch(&cpu));
-    assert(!g_media_irq_native && g_seq_irq_done == 1);
-    assert(!memcmp(&cpu, &saved, sizeof(cpu)));
-    /* A timer raised while the callback ran must not interrupt the same
-     * restored entry again before the game gets one dispatcher turn. */
-    assert(!fm_media_irq_dispatch(&cpu) && timer_pending == 1);
-    cpu.pc = 0x80012CB8; /* The interrupted frame service has progressed. */
-    assert(!fm_media_irq_dispatch(&cpu) && timer_pending == 1);
-    cpu.pc = 0x80012C50; /* Next frame service can accept the pending IRQ. */
-    assert(fm_media_irq_dispatch(&cpu) && timer_pending == 0);
-    assert(g_seq_irq_calls == 2);
     return 0;
 }
 '''
