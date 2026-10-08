@@ -34,6 +34,39 @@ void gte_write_ctrl(CPUState *c, uint8_t r, uint32_t v)
 #define REVERB 0x1F801D98u
 static unsigned char ram[2 * 1024 * 1024];
 
+static void timer2_clock(void)
+{
+    const uint32_t count = 0x1F801120u, mode = 0x1F801124u, target = 0x1F801128u;
+    /* Both source choices accumulate a full second of hardware clock.
+     * COUNT polling itself must not change it. */
+    for (unsigned divided = 0; divided < 2; ++divided) {
+        fm_memory_write_half(mode, divided ? 0x200 : 0);
+        for (unsigned frame = 0; frame < 60; ++frame) fm_memory_vblank_tick();
+        unsigned hz = divided ? 4233600u : 33868800u;
+        assert(fm_memory_read_half(count) == (hz & 0xFFFFu));
+        assert(fm_memory_read_half(count) == (hz & 0xFFFFu));
+    }
+    /* The actual SEQ configuration must produce pending timer2 IRQs every
+     * host interval, rather than once every 14 intervals as in B136.29. */
+    fm_memory_write_half(target, 0xE000);
+    fm_memory_write_half(mode, 0x258);
+    for (unsigned frame = 0; frame < 60; ++frame) {
+        fm_memory_write_half(0x1F801070u, (uint16_t)~0x40u);
+        fm_memory_vblank_tick();
+        assert(fm_memory_i_stat() & 0x40);
+    }
+    assert(fm_memory_read_half(count) == 4233600u % 0xE001u);
+    /* Without reset-on-target, a large delta crosses any target even when
+     * its final modulo count falls short of it. Only one IRQ bit is latched. */
+    fm_memory_write_half(target, 20000);
+    fm_memory_write_half(mode, 0x250);
+    fm_memory_write_half(count, 65000);
+    fm_memory_write_half(0x1F801070u, (uint16_t)~0x40u);
+    fm_memory_vblank_tick();
+    assert(fm_memory_i_stat() & 0x40);
+    assert(fm_memory_read_half(count) == ((65000u + 70560u) & 0xFFFFu));
+}
+
 static void reverb_mask(void)
 {
     fm_memory_write_half(REVERB | 0xA0000000u, 0x8001);
@@ -200,6 +233,7 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "spu_word")) spu_word();
     else if (!strcmp(argv[1], "reverb_mask")) reverb_mask();
     else if (!strcmp(argv[1], "native_reverb_poll")) native_reverb_poll();
+    else if (!strcmp(argv[1], "timer2_clock")) timer2_clock();
     else if (!strcmp(argv[1], "dma_partial")) dma_partial();
     else if (!strcmp(argv[1], "dma_completion")) dma_completion();
     else if (!strcmp(argv[1], "reset")) reset();

@@ -32,7 +32,7 @@ class SpuDma4HostTests(unittest.TestCase):
                 result = subprocess.run(cmd, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 for case in ("spu_half", "spu_word", "reverb_mask", "native_reverb_poll",
-                             "dma_partial", "dma_completion", "reset"):
+                             "timer2_clock", "dma_partial", "dma_completion", "reset"):
                     with self.subTest(profile=profile, case=case):
                         result = subprocess.run([str(binary), case], capture_output=True, text=True)
                         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

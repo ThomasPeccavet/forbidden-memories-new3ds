@@ -20067,7 +20067,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.29\nvideo_mode=%08lX\n"
+                            "video_probe=B136.30\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20135,7 +20135,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.29\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.30\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"
@@ -20264,6 +20264,26 @@ int main(void)
                                 (unsigned)(g_media_irq_active && g_media_irq_native));
                             fprintf(intro_file, "spu_reverb_mask=%08lX\n",
                                 (unsigned long)fm_memory_read_word(0x1F801D98u));
+                            uint32_t seq_ctx = fm_memory_read_word(0x8009C7D8u);
+                            uint32_t seq_engine = fm_memory_read_word(0x8009C7E0u);
+                            if (seq_ctx >= 0x80000000u && seq_ctx <= 0x801FF000u
+                                && seq_engine >= 0x80000000u && seq_engine <= 0x801FE000u) {
+                                FMMemoryQuickState seq_clock;
+                                fm_memory_quick_save(&seq_clock);
+                                fprintf(intro_file,
+                                    "seq_state=status:%04lX channels:%u ended:%u cursor:%08lX delay:%lu flags:%04lX\n",
+                                    (unsigned long)fm_memory_read_half(seq_ctx + 0x7E2u),
+                                    (unsigned)fm_memory_read_half(seq_ctx + 0x7FAu),
+                                    (unsigned)fm_memory_read_byte(seq_ctx + 0x53Cu),
+                                    (unsigned long)fm_memory_read_word(seq_ctx + 0x518u),
+                                    (unsigned long)fm_memory_read_word(seq_ctx + 0x534u),
+                                    (unsigned long)fm_memory_read_half(seq_engine + 0x40u));
+                                fprintf(intro_file, "seq_timer=count:%04X mode:%04X target:%04X irq:%04X mask:%04X\n",
+                                    (unsigned)seq_clock.timers[2].count,
+                                    (unsigned)seq_clock.timers[2].mode,
+                                    (unsigned)seq_clock.timers[2].target,
+                                    (unsigned)seq_clock.i_stat, (unsigned)seq_clock.i_mask);
+                            }
                             for (unsigned si = 0u; si < 3u; ++si)
                             {
                                 uint32_t slot = 0x800EC220u + si * 0x14u;

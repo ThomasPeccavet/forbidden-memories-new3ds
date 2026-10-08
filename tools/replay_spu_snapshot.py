@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("snapshot", type=Path)
-    parser.add_argument("mode", choices=("menu", "sequence"))
+    parser.add_argument("mode", choices=("menu", "sequence", "timed-sequence"))
     args = parser.parse_args()
     with tempfile.TemporaryDirectory() as temp:
         binary = Path(temp) / "replay-spu"

@@ -2,6 +2,19 @@
 
 Dernière mise à jour : **8 octobre 2026**.
 
+## B136.30 : timer du séquenceur 17 fois trop lent
+
+Le log utilisateur B136.29 confirme les retours des interruptions audio
+(279 appels / 279 retours), mais le script attend encore la fin du SEQ.
+Le compteur 2 avançait de 4096 ticks par VBlank 3DS ; sa source système/8
+demande 70560 ticks à 60 Hz. Cette erreur de cadence pouvait prolonger
+l'attente de plusieurs minutes.
+
+Le rejeu avec le vrai timer termine la même séquence après 13833 intervalles
+avec l'ancien code, contre 989 après correction (230,55 s contre 16,48 s
+simulées à 60 Hz). Le parcours Azahar reste à confirmer. Voir
+[le détail de cadence et les limites du rejeu](B136_30_SEQ_CLOCK.md).
+
 ## B136.29 : registre SPU manquant, freeze menu reproduit
 
 Les captures menu B136.24/25 et fin d'intro B136.27 ont été rejouées avec

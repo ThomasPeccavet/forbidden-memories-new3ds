@@ -36,7 +36,8 @@ static int call(CPUState *cpu, uint32_t entry, unsigned *blocks)
 
 int main(int argc, char **argv)
 {
-    if (argc != 3 || (strcmp(argv[2], "menu") && strcmp(argv[2], "sequence")))
+    if (argc != 3 || (strcmp(argv[2], "menu") && strcmp(argv[2], "sequence")
+        && strcmp(argv[2], "timed-sequence")))
         return 2;
     FILE *f = fopen(argv[1], "rb");
     if (!f) return 2;
@@ -71,16 +72,33 @@ int main(int argc, char **argv)
     uint32_t engine = fm_memory_read_word(0x8009C7E0);
     if (sound < 0x80000000 || sound > 0x801FF000
         || engine < 0x80000000 || engine > 0x801FE000) return 2;
-    for (unsigned tick = 1; tick <= 2000; ++tick) {
+    int timed = !strcmp(argv[2], "timed-sequence");
+    unsigned irqs = 0;
+    if (timed) {
+        /* Enable timer2 at this controlled scheduler boundary. The capture
+         * can have I_MASK=0 while the interrupted main thread is in DrawSync.
+         * Timer mode/count/target remain the actual captured configuration. */
+        fm_memory_write_half(0x1F801074u, fm_memory_i_mask() | 0x40u);
+        fm_memory_write_half(0x1F801070u, (uint16_t)~0x40u);
+    }
+    for (unsigned tick = 1; tick <= (timed ? 30000u : 2000u); ++tick) {
+        if (timed) {
+            fm_memory_vblank_tick();
+            if (!(fm_memory_i_stat() & fm_memory_i_mask() & 0x40u)) continue;
+            fm_memory_write_half(0x1F801070u, (uint16_t)~0x40u);
+        }
+        ++irqs;
         if (!call(&cpu, 0x8004BBC4, &blocks)) return 1;
         if (!call(&cpu, 0x8004A3E0, &blocks)) return 1;
         if (cpu.gpr[2] != 3) continue;
         if (!call(&cpu, 0x800463F8, &blocks)) return 1;
         unsigned flags = fm_memory_read_half(engine + 0x40);
         printf("SEQ finished after %u IRQs; channel=%u sound_flags=%04X\n",
-            tick, fm_memory_read_byte(sound + 0x53C), flags);
+            irqs, fm_memory_read_byte(sound + 0x53C), flags);
+        if (timed) printf("Timer-paced replay: %u host intervals, %.2fs at 60 Hz\n",
+            tick, tick / 60.0);
         return (flags & 0x80) ? 1 : 0;
     }
-    fprintf(stderr, "SEQ did not finish within 2000 IRQs\n");
+    fprintf(stderr, "SEQ did not finish within replay budget\n");
     return 1;
 }

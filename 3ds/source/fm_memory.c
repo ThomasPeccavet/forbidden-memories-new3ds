@@ -63,6 +63,9 @@
 #define PSX_TIMER2_TARGET   0x1F801128u
 
 #define PSX_TIMER_COUNT     3u
+/* main.c advances timers once per 60 Hz 3DS VBlank. */
+#define PSX_CPU_CLOCK_HZ    33868800u
+#define FM_HOST_VBLANK_HZ   60u
 
 
 /*
@@ -539,8 +542,8 @@ static uint8_t *fm_scratch_ptr(
  *   12     reached FFFF
  *
  * The emulation is intentionally deterministic rather than
- * cycle-perfect. Timers move on every host VBlank and also make
- * a small amount of progress when COUNT is polled repeatedly.
+ * cycle-perfect. Timers move on every host VBlank; COUNT reads are stable.
+ * Timer2 uses the PS1 system clock; timer0/1 retain bring-up approximations.
  */
 
 static uint16_t fm_timer_irq_bit(
@@ -813,7 +816,8 @@ static void fm_timer_advance(
     else
     {
         if (
-            target > old_count
+            delta >= 0x10000u
+            || target > old_count
             ||
             target <= new_count
         )
@@ -854,9 +858,7 @@ static uint32_t fm_timer_vblank_delta(
         &g_timers[index];
 
 
-    /*
-     * PAL-oriented approximations for bring-up.
-     */
+    /* Timer0/1 retain their existing bring-up approximations. */
     if (index == 1u)
     {
         uint32_t source =
@@ -885,14 +887,19 @@ static uint32_t fm_timer_vblank_delta(
 
     if (index == 2u)
     {
+        /* B136.30: the sequencer selects system clock / 8, target E000.
+         * 4096 ticks per host VBlank made the music clock 17.2x too slow.
+         * Accumulate one 60 Hz host interval, regardless of PAL display mode.
+         * IRQs still coalesce in I_STAT; no synthetic callback backlog. */
+        uint32_t cycles = PSX_CPU_CLOCK_HZ / FM_HOST_VBLANK_HZ;
         return
             (
                 timer->mode
                 &
                 0x0200u
             )
-                ? 4096u
-                : 32768u;
+                ? cycles / 8u
+                : cycles;
     }
 
 
