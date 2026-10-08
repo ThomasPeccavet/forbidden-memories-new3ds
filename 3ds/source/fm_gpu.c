@@ -899,6 +899,34 @@ static inline uint16_t b124_fetch_texel(
 }
 
 
+/* B136.39: opaque sprites, constant depth and constant modulation rows.
+ * Texture and CLUT reads stay live, including destination/source aliasing. */
+static inline __attribute__((always_inline)) void b13639_sprite_span(
+    uint16_t *dst, unsigned width, int tu, int tv, const B13512TexCtx *ctx,
+    unsigned depth, const unsigned char *r, const unsigned char *g,
+    const unsigned char *b, int identity)
+{
+    for (unsigned px=0; px<width; ++px, ++dst, tu=(tu+1)&255) {
+        uint16_t texel;
+        if (depth < 2u) {
+            unsigned shift=depth==0u ? 2u : 1u;
+            unsigned bits=depth==0u ? 4u : 8u;
+            uint16_t packed=b124_vram_get(ctx->tpx+(tu>>shift),ctx->tpy+tv);
+            unsigned index=(packed >> (((unsigned)tu & ((1u<<shift)-1u))*bits))
+                & ((1u<<bits)-1u);
+            texel=b124_vram_get(ctx->clx+(int)index,ctx->cly);
+        } else texel=b124_vram_get(ctx->tpx+tu,ctx->tpy+tv);
+        ++g_b124_rect_texels;
+        if (!texel) continue;
+        uint16_t out=identity ? texel & 0x7fffu :
+            (uint16_t)(r[texel&31u] | g[(texel>>5)&31u]<<5 | b[(texel>>10)&31u]<<10);
+        *dst=out;
+#if FM_PERF_PROFILE
+        ++g_b13543_rect_nonzero_texels; ++g_b13543_rect_writes;
+#endif
+    }
+}
+
 static int b124_try_textured_rect(
     uint8_t opcode,
     int x,
@@ -1017,6 +1045,23 @@ static int b124_try_textured_rect(
             cly,
             texpage
         );
+
+    if (!semi && !g_mask_check && !g_mask_set
+        && !(texctx.mask_x | texctx.mask_y)) {
+        const unsigned char *r=b13637_modulate+mod_r*32;
+        const unsigned char *g=b13637_modulate+mod_g*32;
+        const unsigned char *b=b13637_modulate+mod_b*32;
+        int identity=raw_texture || (mod_r==16 && mod_g==16 && mod_b==16);
+        for (int py=y0; py<y1; ++py) {
+            uint16_t *dst=g_vram+(size_t)py*1024u+(size_t)x0;
+            int tu=(u+x0-x)&255, tv=(v+py-y)&255;
+            unsigned width=(unsigned)(x1-x0);
+            if (texctx.depth==0u) b13639_sprite_span(dst,width,tu,tv,&texctx,0u,r,g,b,identity);
+            else if (texctx.depth==1u) b13639_sprite_span(dst,width,tu,tv,&texctx,1u,r,g,b,identity);
+            else b13639_sprite_span(dst,width,tu,tv,&texctx,2u,r,g,b,identity);
+        }
+        return 1;
+    }
 
     for (int py = y0; py < y1; ++py)
     {

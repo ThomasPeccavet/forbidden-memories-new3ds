@@ -2,6 +2,16 @@
 
 Dernière mise à jour : **8 octobre 2026**.
 
+## B136.39 : boucle spécialisée des sprites opaques
+
+Au repos, B136.38 mesure 469 ms pour les sprites 64h sur 2004 ms,
+contre 26 ms de parcours/autres opérations DMA. B136.39 spécialise les
+formats texture et utilise des tables de modulation constantes par sprite.
+700 cas dans deux modes conservent tous les pixels et compteurs de texels,
+y compris les accès VRAM chevauchants. Le débit du cas modulé est environ
+2–2,45 fois supérieur sur le banc x86 ; le gain ARM/global reste à mesurer.
+Voir [validation et limites](B136_39_SPRITE_SPANS.md).
+
 ## B136.38 : diagnostic complet du coût GPU
 
 B136.37 mesure 982 ms DMA2 sur 2049 ms dans une autre fenêtre de duel.
