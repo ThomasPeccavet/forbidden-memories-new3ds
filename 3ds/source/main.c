@@ -10596,77 +10596,6 @@ static void fm_bg_change(
 }
 
 /*
- * Resout les deux indices speciaux 0x10/0x11 exactement comme la
- * routine PAL 0x8002E11C. Le choix depend de DAT_8009C44B.
- */
-static uint32_t fm_bg_resolve_runtime_index(
-    CPUState *cpu,
-    uint32_t raw_index
-)
-{
-    uint32_t idx = raw_index & 0xFFFFu;
-
-    if (!cpu)
-    {
-        return idx;
-    }
-
-    if (idx == 0x10u || idx == 0x11u)
-    {
-        uint8_t variant = cpu->read_byte(0x8009C44Bu);
-
-        if (variant >= 1u && variant <= 4u)
-        {
-            uint32_t base =
-                idx == 0x10u
-                    ? 0x42u
-                    : 0x43u;
-
-            idx = base + (uint32_t)(variant - 1u) * 2u;
-        }
-    }
-
-    return idx;
-}
-
-
-static int fm_bg_load_game_index(
-    CPUState *cpu,
-    uint16_t *pixels,
-    uint32_t game_index
-)
-{
-    uint32_t group = (game_index >> 8) & 0xFFu;
-    uint32_t low = game_index & 0xFFu;
-    uint32_t tens = (low >> 4) & 0x0Fu;
-    uint32_t ones = low & 0x0Fu;
-
-    if (group > 2u || tens > 9u || ones > 9u)
-    {
-        return 0;
-    }
-
-    uint32_t ordinal = tens * 10u + ones;
-
-    /* Eviter de relire 0x21..0x71 secteurs si le jeu redemande
-       exactement le background deja affiche. */
-    if (
-        g_bg.loaded
-        && g_bg.group == group
-        && g_bg.ordinal == ordinal
-    )
-    {
-        return 1;
-    }
-
-    g_bg.group = group;
-    g_bg.ordinal = ordinal;
-
-    return fm_bg_load(cpu, pixels);
-}
-
-
-/*
  * ============================================================
  * Preview
  * ============================================================
@@ -12204,8 +12133,8 @@ int main(void)
 
 
     /*
-     * B24 : garder un background de reference immediat, puis le runtime
-     * remplacera automatiquement cet index via le hook 8002E11C.
+     * B24 : garder un background de reference pour le mode preview.
+     * B136.23 : les decors du jeu sont charges par le chemin CD natif.
      */
     if (disc_status == 0 && cpu && memory_status == 0)
     {
@@ -14625,67 +14554,12 @@ int main(void)
                 }
 
 
-                /*
-                 * ============================================
-                 * B25 - Background loader PAL HLE
-                 *
-                 * FUN_8002E11C (SLES_039.48 FR)
-                 *
-                 * Le code original calcule :
-                 *   sector = 0x29E8 + group_offset + ordinal * size
-                 * puis demarre FUN_80014E08() en asynchrone.
-                 *
-                 * Notre CD bas niveau n'achemine pas encore ce flux
-                 * completement. On lit donc le meme bloc depuis disc.bin,
-                 * on le decode avec le format natif WA_MRG valide en B23,
-                 * puis on retourne synchronement. Ainsi, c'est bien
-                 * l'index demande par le runtime qui choisit le decor.
-                 * ============================================
+                /* B136.23: let 8002E11C create its native CD request.
+                 * Its 8002DFE8 callback uploads all indexed background
+                 * layers and CLUTs through 80013B44 / LoadImage. The old
+                 * synchronous preview hook returned without uploading any
+                 * of those textures, while the scene still rendered them.
                  */
-                if (phys == 0x0002E11Cu)
-                {
-                    uint32_t object = cpu->gpr[4];
-                    uint32_t raw_index = cpu->gpr[5] & 0xFFFFu;
-                    uint32_t resolved =
-                        fm_bg_resolve_runtime_index(cpu, raw_index);
-
-                    ++g_bg_hle_calls;
-                    g_bg_hle_raw = raw_index;
-                    g_bg_hle_resolved = resolved;
-                    g_bg_hle_object = object;
-
-                    /* La routine native memorise l'index final en +0x3C. */
-                    if (object != 0u)
-                    {
-                        cpu->write_half(
-                            object + 0x3Cu,
-                            (uint16_t)resolved
-                        );
-                    }
-
-                    if (
-                        fm_bg_load_game_index(
-                            cpu,
-                            preview,
-                            resolved
-                        )
-                    )
-                    {
-                        ++g_bg_hle_ok;
-                    }
-                    else
-                    {
-                        ++g_bg_hle_fail;
-                    }
-
-                    /* Completion synchrone : ne pas poser le busy flag
-                       0x10 de DAT_8009C460. L'attente 80013700 verra le
-                       chargeur idle et le state machine peut continuer. */
-                    cpu->pc = cpu->gpr[31];
-                    cpu->gpr[0] = 0u;
-                    static_miss = 0;
-                    continue;
-                }
 
 
                 /*
@@ -20147,7 +20021,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.22\nvideo_mode=%08lX\n"
+                            "video_probe=B136.23\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20215,7 +20089,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.22\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.23\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"
