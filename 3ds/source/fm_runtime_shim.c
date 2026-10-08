@@ -1414,6 +1414,13 @@ void psx_check_interrupts_dispatch_entry(
     uint32_t phys =
         resume_pc & 0x1FFFFFFFu;
 
+    /* B136.26: escape before any compiled SPU wrapper prologue.
+     * The outer dispatcher executes these short helpers as native MIPS,
+     * including the callee's return and the wrapper's stack epilogue. */
+    if (g_probe_armed && phys >= 0x00076D28u && phys < 0x000770A4u) {
+        fm_probe_stop(FM_STOP_BUDGET, resume_pc);
+        return;
+    }
     /* Escape before the native prologue for a direct generated VLC call.
      * Failed translations are transactional and continue through native code. */
     if (g_probe_armed && phys == 0x000914A8u && fm_vlc_try(cpu)) {
