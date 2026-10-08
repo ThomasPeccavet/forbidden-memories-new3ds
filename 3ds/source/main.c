@@ -30,6 +30,7 @@
 #include "fm_runtime_shim.h"
 #include "fm_interp.h"
 #include "fm_gpu.h"
+#include "fm_unai.h"
 #include "fm_media.h"
 #include "fm_vlc.h"
 #include "fm_audio.h"
@@ -7081,7 +7082,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         /* A single stdio buffer avoids small writes per formatted line. */
         char report_buffer[8192];
         setvbuf(fp, report_buffer, _IOFBF, sizeof(report_buffer));
-        fprintf(fp, "probe=B136.43 window_ms=%llu pc=%08lX script=%04lX\n",
+        fprintf(fp, "probe=B136.44 window_ms=%llu pc=%08lX script=%04lX\n",
             (unsigned long long)elapsed, (unsigned long)(cpu ? cpu->pc : 0u),
             (unsigned long)fm_memory_read_half(0x8009C610u));
         fprintf(fp, "host_fps_x100=%llu new_images_fps_x100=%llu samples=%lu\n",
@@ -7146,6 +7147,17 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         fprintf(fp, "texture_fast format_specialization=1 color_lookup=1 neutral_triangles=%lu fast_triangles=%lu neutral_pixels=%llu fast_pixels=%llu\n",
             (unsigned long)neutral_triangles, (unsigned long)fast_triangles,
             (unsigned long long)neutral_pixels, (unsigned long long)fast_pixels);
+#if FM_GPU_UNAI
+        uint32_t unai_s=0,unai_p=0,unai_f=0;
+        static uint32_t previous_s,previous_p,previous_f;
+        fm_unai_counts(&unai_s,&unai_p,&unai_f);
+        fprintf(fp,"renderer=unai-experiment sprites=%lu polygons=%lu fallback=%lu\n",
+            (unsigned long)(unai_s-previous_s),(unsigned long)(unai_p-previous_p),
+            (unsigned long)(unai_f-previous_f));
+        previous_s=unai_s; previous_p=unai_p; previous_f=unai_f;
+#else
+        fprintf(fp,"renderer=native-reference\n");
+#endif
         fprintf(fp, "gpu_timing=all_completed_commands profiling_overhead_included\n");
         for (unsigned rank=0; rank<6; ++rank) {
             FMGpuOpcodePerf hot = {0}; fm_gpu_perf_window_rank(rank, &hot);
@@ -13108,7 +13120,7 @@ int main(void)
         }
 
 
-        /* B136.43: input is sampled above; service due clock callbacks before
+        /* B136.44: input is sampled above; service due clock callbacks before
          * guest execution, including VBlanks elapsed during the host wait. */
         unsigned clock_due=fm_host_clock_due(&g_ps1_host_clock,osGetTime());
         for (unsigned clock_tick=0; clock_tick<clock_due; ++clock_tick) {
@@ -13117,7 +13129,7 @@ int main(void)
 
 
             /*
-             * B136.43: consume elapsed VBlanks before guest VSync is retested.
+             * B136.44: consume elapsed VBlanks before guest VSync is retested.
              */
             if (memory_status == 0)
             {
@@ -20561,7 +20573,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.43\nvideo_mode=%08lX\n"
+                            "video_probe=B136.44\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20629,7 +20641,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.43\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.44\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"

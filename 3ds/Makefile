@@ -37,6 +37,7 @@ GENERATED_COMBINED := \
 #
 
 PROFILE ?= 0
+UNAI ?= 0
 
 ifeq ($(PROFILE),1)
 TARGET := fm-new3ds-profile
@@ -48,6 +49,11 @@ BUILD := build-clean
 PERF_MODE_DEFS := -DFM_PERF_PROFILE=0
 endif
 
+# B136.44: opt-in backend and isolated outputs allow an honest A/B comparison.
+ifeq ($(UNAI),1)
+TARGET := $(TARGET)-unai
+BUILD := $(BUILD)-unai
+endif
 
 # ============================================================
 # ARM11
@@ -82,6 +88,7 @@ CFLAGS := \
 	-DNDEBUG \
 	-DPSX_NO_DEBUG_TOOLS \
 	$(PERF_MODE_DEFS) \
+	-DFM_GPU_UNAI=$(UNAI) \
 	-fomit-frame-pointer \
 	-Wall \
 	-Wextra \
@@ -124,6 +131,13 @@ OBJECTS := \
 	$(BUILD)/gpu_sw_renderer.o \
 	$(BUILD)/gpu_vram_dirty.o
 
+ifeq ($(UNAI),1)
+OBJECTS += $(BUILD)/fm_unai.o $(BUILD)/gpu_unai_arm.o
+LINK_DRIVER := $(CXX)
+else
+LINK_DRIVER := $(CC)
+endif
+
 
 .PHONY: all clean generated-release profile
 
@@ -145,6 +159,13 @@ $(BUILD):
 
 $(BUILD)/%.o: source/%.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/fm_unai.o: source/fm_unai.cpp $(wildcard source/unai/*.h) | $(BUILD)
+	$(CXX) $(filter-out -std=gnu11,$(CFLAGS)) -std=gnu++11 -marm -mfpu=vfp \
+		-fno-exceptions -fno-rtti -fno-strict-aliasing -Isource/unai -c $< -o $@
+
+$(BUILD)/gpu_unai_arm.o: source/unai/gpu_arm.S source/unai/arm_features.h | $(BUILD)
+	$(CC) $(ARCH) -marm -mfpu=vfp -Isource/unai -c $< -o $@
 
 
 # ============================================================
@@ -177,7 +198,7 @@ $(GENERATED_COMBINED): generated-release
 
 
 $(TARGET).elf: $(OBJECTS) $(GENERATED_COMBINED)
-	$(CC) \
+	$(LINK_DRIVER) \
 		$(LDFLAGS) \
 		$(OBJECTS) \
 		$(GENERATED_COMBINED) \
@@ -196,10 +217,14 @@ clean:
 		build \
 		build-clean \
 		build-profile \
+		build-clean-unai \
+		build-profile-unai \
 		fm-new3ds.elf \
 		fm-new3ds.3dsx \
 		fm-new3ds-profile.elf \
-		fm-new3ds-profile.3dsx
+		fm-new3ds-profile.3dsx \
+		fm-new3ds-unai.elf fm-new3ds-unai.3dsx \
+		fm-new3ds-profile-unai.elf fm-new3ds-profile-unai.3dsx
 
 
 -include $(OBJECTS:.o=.d)

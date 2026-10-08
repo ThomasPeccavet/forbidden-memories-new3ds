@@ -2,6 +2,17 @@
 
 Dernière mise à jour : **8 octobre 2026**.
 
+## B136.44 : expérience Unai pour les commandes graphiques coûteuses
+
+`UNAI=1` active les sprites 64h et les polygones texturés Gouraud 34h/3Ch
+du moteur Unai de PCSX ReARMed, avec son assembleur ARMv6. Les sorties
+et objets sont séparés de la référence `UNAI=0`, conservée par défaut.
+Le rapport identifie le backend et ses commandes/fallbacks par fenêtre.
+Horloges, CD, séquenceur et entrées restent identiques. Les tests hôte
+couvrent les sprites et les gardes ; le gain et les différences visuelles
+doivent être mesurés sur la même sauvegarde dans Azahar.
+Voir [l'intégration et les commandes de comparaison](B136_44_UNAI_EXPERIMENT.md).
+
 ## B136.43 : chaînage natif des routines d'objets
 
 Le chaînage sous un seul setjmp inclut désormais les routines résidentes

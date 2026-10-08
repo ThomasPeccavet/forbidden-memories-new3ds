@@ -3,12 +3,13 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from test_gpu_perf_window_host import function
 ROOT = Path(__file__).resolve().parents[1]
 class PerfWindowTests(unittest.TestCase):
     def test_window_rates_and_nested_time(self):
         source = (ROOT / "3ds/source/main.c").read_text()
         begin = source.index("static void fm_perf_window(")
-        end = source.index("\n#endif", begin)
+        body = function(source,"fm_perf_window")
         code = r'''#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -20,6 +21,9 @@ static void fm_gpu_perf_texture_window(uint64_t *n, uint64_t *f, uint32_t *nt, u
     *n=1000; *f=2000; *nt=10; *ft=20;
 }
 static unsigned gpu_resets;
+static __attribute__((unused)) void fm_unai_counts(uint32_t *s,uint32_t *p,uint32_t *f) {
+    static unsigned n; ++n; *s=n*3; *p=n*4; *f=n*5;
+}
 static unsigned g_perf_wait_reason;
 static uint32_t g_clock_ticks,g_budget_wait_skips,g_native_probe_calls,g_b13514_chain_entries;
 static uint64_t g_b13514_chain_dispatches;
@@ -62,7 +66,7 @@ static int report_close(FILE *fp) {
     return result;
 }
 #define fclose report_close
-''' + source[begin:end] + r'''int main(void) {
+''' + body + r'''int main(void) {
     report = tmpfile(); assert(report);
     CPUState cpu={0x80041EE8};
     fm_perf_window(1000,100,12,&cpu);
@@ -85,6 +89,11 @@ static int report_close(FILE *fp) {
     assert(strstr(text,"legacy_file_dumps=0"));
     assert(strstr(text,"dma2_split payload_parser_raster_us=300000 traversal_other_us=100000 coarse_total_us=400000"));
     assert(strstr(text,"gpu_timing=all_completed_commands"));
+#if FM_GPU_UNAI
+    assert(strstr(text,"renderer=unai-experiment sprites=3 polygons=4 fallback=5"));
+#else
+    assert(strstr(text,"renderer=native-reference"));
+#endif
     assert(strstr(text,"native_sampling=random_1/64"));
     assert(strstr(text,"gpu0 opcode=30 calls=10 us=1234 max_us=500"));
     assert(gpu_resets==2);
@@ -98,5 +107,6 @@ static int report_close(FILE *fp) {
         with tempfile.TemporaryDirectory() as temp:
             path=Path(temp)/"perf.c"; binary=Path(temp)/"perf"
             path.write_text(code)
-            subprocess.run(["cc","-std=c11","-Wall","-Werror",str(path),"-o",str(binary)],check=True)
-            subprocess.run([str(binary)],check=True)
+            for unai in (0,1):
+                subprocess.run(["cc","-std=c11","-Wall","-Werror",f"-DFM_GPU_UNAI={unai}",str(path),"-o",str(binary)],check=True)
+                subprocess.run([str(binary)],check=True)

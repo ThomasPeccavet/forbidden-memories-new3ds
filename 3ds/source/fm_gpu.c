@@ -1,5 +1,11 @@
 #include "fm_gpu.h"
 #include "fm_modulate_lut.h"
+#ifndef FM_GPU_UNAI
+#define FM_GPU_UNAI 0
+#endif
+#if FM_GPU_UNAI
+#include "fm_unai.h"
+#endif
 
 #include "gpu_sw_renderer.h"
 #include "gpu_vram_dirty.h"
@@ -3537,6 +3543,22 @@ static void execute_command(void)
         ++g_packet_other;
     }
 
+
+    /* B136.44: independent rendering backend; parser and environment remain
+     * owned here. Unsupported packets fall through without side effects. */
+#if FM_GPU_UNAI
+    if (sw_renderer_scale()==1 && sw_wide_width()==0 && sw_texture_filter()==0
+        && fm_unai_draw(g_vram,g_cmd,g_cmd_have,g_texpage,g_texture_window,
+            g_mask_set,g_mask_check,g_draw_x1,g_draw_y1,g_draw_x2,g_draw_y2,
+            g_offset_x,g_offset_y)) {
+        if ((opcode&0xfcu)==0x34u || (opcode&0xfcu)==0x3cu)
+            g_texpage=packet_texpage(g_cmd[5]);
+        gpu_vram_dirty_mark_rect(g_draw_x1,g_draw_y1,
+            g_draw_x2-g_draw_x1+1,g_draw_y2-g_draw_y1+1);
+        g_has_frame=1;
+        return;
+    }
+#endif
 
     /*
      * --------------------------------------------------------

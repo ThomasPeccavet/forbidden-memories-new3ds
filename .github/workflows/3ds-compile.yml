@@ -49,3 +49,17 @@ jobs:
             build-profile/fm_gpu.o \
             build-profile/gpu_sw_renderer.o \
             build-profile/gpu_vram_dirty.o
+      - name: Compile experimental Unai frontend and ARMv6 renderer
+        run: |
+          export PATH="$DEVKITARM/bin:$PATH"
+          make -C 3ds PROFILE=1 UNAI=1 -j2 \
+            build-profile-unai/main.o \
+            build-profile-unai/fm_gpu.o \
+            build-profile-unai/fm_unai.o \
+            build-profile-unai/gpu_unai_arm.o
+          "$DEVKITARM/bin/arm-none-eabi-g++" -r \
+            build-profile-unai/fm_unai.o build-profile-unai/gpu_unai_arm.o \
+            -o /tmp/unai-linked.o
+          if "$DEVKITARM/bin/arm-none-eabi-nm" -u /tmp/unai-linked.o | grep -E 'sprite_driver_|poly_.*_asm|tile_driver_'; then
+            echo "Missing Unai assembly implementation"; exit 1
+          fi
