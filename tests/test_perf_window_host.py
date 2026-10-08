@@ -15,6 +15,12 @@ class PerfWindowTests(unittest.TestCase):
 #include <assert.h>
 typedef struct { uint32_t pc; } CPUState;
 typedef struct { uint32_t start_pc,end_pc,hits,max_us; uint64_t total_us; } B110ProbeStat;
+typedef struct { uint8_t opcode; uint32_t calls; uint64_t total_us; uint32_t max_us; } FMGpuOpcodePerf;
+static unsigned gpu_resets;
+static void fm_gpu_perf_window_reset(void) { ++gpu_resets; }
+static void fm_gpu_perf_window_rank(unsigned rank, FMGpuOpcodePerf *out) {
+    if (!rank) { out->opcode=0x30; out->calls=10; out->total_us=1234; out->max_us=500; }
+}
 #define B110_PROF_SLOTS 12
 #define FM_OT_DIAGNOSTICS 0
 #define FM_LEGACY_FILE_DIAGNOSTICS 0
@@ -68,6 +74,8 @@ static int report_close(FILE *fp) {
     assert(strstr(text,"dma2_nested_ms=400 transfers=100"));
     assert(strstr(text,"legacy_file_dumps=0"));
     assert(strstr(text,"native_sampling=random_1/64"));
+    assert(strstr(text,"gpu0 opcode=30 samples=10 us=1234 max_us=500"));
+    assert(gpu_resets==2);
     return 0;
 }
 '''

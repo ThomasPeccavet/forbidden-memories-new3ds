@@ -2,6 +2,16 @@
 
 Dernière mise à jour : **8 octobre 2026**.
 
+## B136.35 : calcul exact des gradients Gouraud et classement GPU
+
+B136.34 mesure 920 ms de DMA2 sur 2064 ms en duel. B136.35 remplace
+les divisions 64 bits du setup Gouraud non texturé par une estimation
+corrigée et vérifiée en entier, avec fallback exact. Les tests comparent
+250000 quotients et 600 triangles pixel par pixel avec B136.34.
+Le rapport compact classe désormais les opcodes GPU sur toute sa fenêtre.
+56 tests passent ; le gain sur ARM/Azahar reste à mesurer.
+Voir [les changements et leurs limites](B136_35_EXACT_GOURAUD.md).
+
 ## B136.34 : suppression des dumps lourds pendant les mesures
 
 La seconde mesure en duel B136.33 indique 12,45 latches/s, sans gain

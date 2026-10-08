@@ -282,3 +282,7 @@ int fm_gpu_bios_call(
     CPUState *cpu,
     uint32_t fn
 );
+
+/* Sampled opcode timings accumulated across a complete host time window. */
+void fm_gpu_perf_window_reset(void);
+void fm_gpu_perf_window_rank(unsigned rank, FMGpuOpcodePerf *out);

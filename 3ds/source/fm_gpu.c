@@ -92,6 +92,9 @@ static uint64_t g_b122_upload_words = 0u;
  * turning the profiler itself into the bottleneck.
  */
 static uint32_t g_b13530_sample_phase = 0u;
+static uint64_t g_window_opcode_ticks[256], g_window_opcode_max[256];
+static uint32_t g_window_opcode_samples[256];
+static uint32_t g_window_sample_rng = 0x13635u;
 
 /*
  * B124 - native 3DS fast path for variable-size textured rectangles
@@ -233,6 +236,9 @@ static void b122_record_opcode(
     }
 
     g_b122_exec_ticks += ticks;
+    g_window_opcode_ticks[opcode] += ticks;
+    ++g_window_opcode_samples[opcode];
+    if (ticks > g_window_opcode_max[opcode]) g_window_opcode_max[opcode] = ticks;
 }
 
 /* B28: diagnostic/preservation des clears framebuffer. */
@@ -1564,6 +1570,36 @@ static void b125_textured_triangle(
 }
 
 
+/* B136.35: exact 16.16 division with a VFP estimate, integer correction,
+ * and the original integer divide fallback for steep/exceptional slopes.
+ * The estimate alone is never accepted as a rounding result. */
+#ifndef FM_GPU_EXACT_GRADIENTS
+#define FM_GPU_EXACT_GRADIENTS 1
+#endif
+static inline int32_t b13635_gradient(
+    int32_t numerator, int64_t denominator, float inverse_abs_fp16
+)
+{
+    if (!denominator) return 0;
+    int64_t scaled = (int64_t)numerator * 65536;
+    uint64_t n = numerator < 0 ? (uint64_t)-scaled : (uint64_t)scaled;
+    uint64_t d = denominator < 0 ? (uint64_t)-denominator : (uint64_t)denominator;
+    uint32_t magnitude = numerator < 0 ? 0u-(uint32_t)numerator : (uint32_t)numerator;
+    float estimate = (float)magnitude * inverse_abs_fp16;
+    if (FM_GPU_EXACT_GRADIENTS && d <= 0x7fffffffu
+        && estimate >= 0.0f && estimate < 4194304.0f) {
+        uint32_t q = (uint32_t)estimate;
+        uint64_t product = (uint64_t)q * d;
+        if (product > n && q) { --q; product -= d; }
+        if (product <= n && n-product >= d) { ++q; product += d; }
+        /* This proves truncation of |numerator*65536|/|denominator|.
+         * If rounding ever needs more correction, use exact division. */
+        if (product <= n && n-product < d)
+            return ((numerator < 0) != (denominator < 0)) ? -(int32_t)q : (int32_t)q;
+    }
+    return (int32_t)(scaled / denominator);
+}
+
 static void b125_gouraud_triangle(
     int x0, int y0, uint16_t c0,
     int x1, int y1, uint16_t c1,
@@ -1625,41 +1661,25 @@ static void b125_gouraud_triangle(
     int g2 = (c2 >> 5) & 31;
     int b2 = (c2 >> 10) & 31;
 
-#define B128_GRAD_X(a0,a1,a2) \
-    ((int32_t)(((((int64_t)((a1)-(a0)) * (y2-y0)) - \
-                  ((int64_t)((a2)-(a0)) * (y1-y0))) << 16) / det))
-
-#define B128_GRAD_Y(a0,a1,a2) \
-    ((int32_t)(((((int64_t)(x1-x0) * ((a2)-(a0))) - \
-                  ((int64_t)(x2-x0) * ((a1)-(a0)))) << 16) / det))
-
-    int32_t dr_dx = B128_GRAD_X(r0,r1,r2);
-    int32_t dr_dy = B128_GRAD_Y(r0,r1,r2);
-    int32_t dg_dx = B128_GRAD_X(g0,g1,g2);
-    int32_t dg_dy = B128_GRAD_Y(g0,g1,g2);
-    int32_t db_dx = B128_GRAD_X(b0,b1,b2);
-    int32_t db_dy = B128_GRAD_Y(b0,b1,b2);
-
-#undef B128_GRAD_X
-#undef B128_GRAD_Y
-
-    int32_t dx_long =
-        b128_div_fp16(
-            (int64_t)(x2 - x0),
-            dy02
-        );
-
-    int32_t dx_upper =
-        b128_div_fp16(
-            (int64_t)(x1 - x0),
-            y1 - y0
-        );
-
-    int32_t dx_lower =
-        b128_div_fp16(
-            (int64_t)(x2 - x1),
-            y2 - y1
-        );
+    float inv_det = 65536.0f / (float)(det < 0 ? -det : det);
+#define B13635_GX(a0,a1,a2) \
+    b13635_gradient(((a1)-(a0))*(y2-y0)-((a2)-(a0))*(y1-y0), det, inv_det)
+#define B13635_GY(a0,a1,a2) \
+    b13635_gradient((x1-x0)*((a2)-(a0))-(x2-x0)*((a1)-(a0)), det, inv_det)
+    int32_t dr_dx = B13635_GX(r0,r1,r2);
+    int32_t dr_dy = B13635_GY(r0,r1,r2);
+    int32_t dg_dx = B13635_GX(g0,g1,g2);
+    int32_t dg_dy = B13635_GY(g0,g1,g2);
+    int32_t db_dx = B13635_GX(b0,b1,b2);
+    int32_t db_dy = B13635_GY(b0,b1,b2);
+#undef B13635_GX
+#undef B13635_GY
+    int32_t dx_long = b13635_gradient(x2-x0, dy02, 65536.0f/(float)dy02);
+    int32_t dx_upper = b13635_gradient(x1-x0, y1-y0,
+        y1 != y0 ? 65536.0f/(float)(y1-y0) : 0.0f);
+    int32_t dx_lower = b13635_gradient(x2-x1, y2-y1,
+        y2 != y1 ? 65536.0f/(float)(y2-y1) : 0.0f);
+    uint32_t pixels = 0u;
 
     int ys = y0;
     int ye = y2;
@@ -1750,8 +1770,7 @@ static void b125_gouraud_triangle(
             +
             (size_t)sx;
 
-        g_b125_pixels +=
-            (uint64_t)(ex - sx);
+        pixels += (uint32_t)(ex - sx);
 
         for (int x = sx; x < ex; ++x, ++dst)
         {
@@ -1784,6 +1803,8 @@ static void b125_gouraud_triangle(
             b_fp += db_dx;
         }
     }
+
+    g_b125_pixels += pixels;
 
 #undef B128_SWAP_INT2
 #undef B128_SWAP_U16
@@ -5075,6 +5096,7 @@ void fm_gpu_init(
 
     g_b13530_sample_phase =
         0u;
+    fm_gpu_perf_window_reset();
 
     g_b124_rect_hits =
         0u;
@@ -5562,7 +5584,8 @@ void fm_gpu_gp0_write(
 
         ++g_b13530_sample_phase;
 
-        if ((g_b13530_sample_phase & 15u) == 0u)
+        g_window_sample_rng = g_window_sample_rng * 1664525u + 1013904223u;
+        if ((g_window_sample_rng >> 28) == 0u)
         {
             uint64_t sample_start =
                 svcGetSystemTick();
@@ -5978,6 +6001,35 @@ void fm_gpu_b122_rank(
     }
 }
 
+
+/* B136.35 window statistics survive per-DMA diagnostic resets. */
+void fm_gpu_perf_window_reset(void)
+{
+    memset(g_window_opcode_ticks, 0, sizeof(g_window_opcode_ticks));
+    memset(g_window_opcode_max, 0, sizeof(g_window_opcode_max));
+    memset(g_window_opcode_samples, 0, sizeof(g_window_opcode_samples));
+}
+void fm_gpu_perf_window_rank(unsigned rank, FMGpuOpcodePerf *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    uint8_t selected[256] = {0};
+    for (unsigned pick=0; pick<=rank; ++pick) {
+        int best=-1;
+        for (unsigned op=0; op<256; ++op)
+            if (!selected[op] && g_window_opcode_samples[op]
+                && (best<0 || g_window_opcode_ticks[op]>g_window_opcode_ticks[best]))
+                best=(int)op;
+        if (best<0) return;
+        selected[best]=1;
+        if (pick==rank) {
+            out->opcode=(uint8_t)best;
+            out->calls=g_window_opcode_samples[best];
+            out->total_us=b122_ticks_to_us(g_window_opcode_ticks[best]);
+            out->max_us=(uint32_t)b122_ticks_to_us(g_window_opcode_max[best]);
+        }
+    }
+}
 
 void fm_gpu_b13532_profile_reset(void)
 {

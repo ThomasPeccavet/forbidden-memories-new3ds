@@ -7045,6 +7045,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         irq_before = g_seq_irq_done; seq_before = g_seq_irq_total_ms;
         dma_before = dma.dma2_linked_total_ms;
         dma_calls_before = dma.dma2_linked_transfer_count;
+        fm_gpu_perf_window_reset();
         return;
     }
     pre += pre_ms; render += g_b105_render_ms; vb += g_b105_vblank_ms;
@@ -7059,7 +7060,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         /* A single stdio buffer avoids small writes per formatted line. */
         char report_buffer[8192];
         setvbuf(fp, report_buffer, _IOFBF, sizeof(report_buffer));
-        fprintf(fp, "probe=B136.34 window_ms=%llu pc=%08lX script=%04lX\n",
+        fprintf(fp, "probe=B136.35 window_ms=%llu pc=%08lX script=%04lX\n",
             (unsigned long long)elapsed, (unsigned long)(cpu ? cpu->pc : 0u),
             (unsigned long)fm_memory_read_half(0x8009C610u));
         fprintf(fp, "host_fps_x100=%llu new_images_fps_x100=%llu samples=%lu\n",
@@ -7092,6 +7093,14 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
             (unsigned long long)g_b91_fast_instructions,
             (unsigned long)g_b91_slow_handoff_pc, (unsigned long)g_b91_slow_handoff_ms);
         fprintf(fp, "diagnostic_ot_scans=%u\n", (unsigned)FM_OT_DIAGNOSTICS);
+        fprintf(fp, "gpu_sampling=random_1/16 totals_are_sampled_not_estimated\n");
+        for (unsigned rank=0; rank<6; ++rank) {
+            FMGpuOpcodePerf hot = {0}; fm_gpu_perf_window_rank(rank, &hot);
+            if (!hot.calls) continue;
+            fprintf(fp, "gpu%u opcode=%02X samples=%lu us=%llu max_us=%lu\n",
+                rank, (unsigned)hot.opcode, (unsigned long)hot.calls,
+                (unsigned long long)hot.total_us, (unsigned long)hot.max_us);
+        }
         fprintf(fp, "native_sampling=random_1/64 totals_are_sampled_not_estimated\n");
         for (unsigned rank=0; rank<B110_PROF_SLOTS; ++rank) {
             B110ProbeStat hot = {0}; b110_get_rank(rank, &hot);
@@ -7107,6 +7116,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
     start=now; pre=render=vb=gfx=wait=loops=0; samples=max_loop=0;
     frame_before=frame; image_before=g_b84_latch_count;
     seq_before=g_seq_irq_total_ms; irq_before=g_seq_irq_done;
+    fm_gpu_perf_window_reset();
     dma_before=dma.dma2_linked_total_ms;
     dma_calls_before=dma.dma2_linked_transfer_count;
     memset(g_b110_prof, 0, sizeof(g_b110_prof));
@@ -20216,7 +20226,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.34\nvideo_mode=%08lX\n"
+                            "video_probe=B136.35\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20284,7 +20294,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.34\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.35\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"
