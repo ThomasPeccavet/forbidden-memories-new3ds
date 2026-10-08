@@ -26,3 +26,5 @@ void ndspChnWaveBufClear(int);
 void ndspChnWaveBufAdd(int, ndspWaveBuf *);
 void ndspChnSetPaused(int, bool);
 void DSP_FlushDataCache(void *, uint32_t);
+
+static inline uint64_t svcGetSystemTick(void) { return 0; }

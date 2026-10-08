@@ -380,6 +380,7 @@ static uint32_t g_dma2_max_empty_ot_nodes = 0u;
 static uint32_t g_dma2_linked_last_ms = 0u;
 static uint32_t g_dma2_linked_max_ms = 0u;
 static uint64_t g_dma2_linked_total_ms = 0u;
+static uint64_t g_dma2_payload_ticks = 0u;
 static uint32_t g_dma2_linked_over20 = 0u;
 static uint32_t g_dma2_linked_over33 = 0u;
 
@@ -2065,6 +2066,9 @@ static int fm_dma2_linked_list(void)
             &
             0x001FFFFCu;
 
+#if FM_PERF_PROFILE
+        uint64_t payload_start = count ? svcGetSystemTick() : 0u;
+#endif
         for (
             uint32_t i = 0;
             i < count;
@@ -2093,6 +2097,10 @@ static int fm_dma2_linked_list(void)
                 &
                 0x001FFFFCu;
         }
+
+#if FM_PERF_PROFILE
+        if (count) g_dma2_payload_ticks += svcGetSystemTick() - payload_start;
+#endif
 
         /*
          * Linked-list terminator.
@@ -3396,6 +3404,7 @@ void fm_memory_init(
     g_dma2_linked_max_ms =
         0u;
 
+    g_dma2_payload_ticks = 0u;
     g_dma2_linked_total_ms =
         0u;
 
@@ -5324,6 +5333,8 @@ void fm_memory_dma_debug(
 
     out->dma2_linked_max_ms =
         g_dma2_linked_max_ms;
+
+    out->dma2_payload_us = g_dma2_payload_ticks * 1000000ull / 268123480ull;
 
     out->dma2_linked_total_ms =
         g_dma2_linked_total_ms;

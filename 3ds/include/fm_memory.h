@@ -122,6 +122,7 @@ typedef struct FMDmaDebugStats
     uint32_t dma2_linked_last_ms;
     uint32_t dma2_linked_max_ms;
     uint64_t dma2_linked_total_ms;
+    uint64_t dma2_payload_us;
     uint32_t dma2_linked_over20;
     uint32_t dma2_linked_over33;
 

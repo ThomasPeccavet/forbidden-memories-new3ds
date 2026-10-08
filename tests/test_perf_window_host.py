@@ -27,7 +27,7 @@ static void fm_gpu_perf_window_rank(unsigned rank, FMGpuOpcodePerf *out) {
 #define B110_PROF_SLOTS 12
 #define FM_OT_DIAGNOSTICS 0
 #define FM_LEGACY_FILE_DIAGNOSTICS 0
-typedef struct { uint64_t dma2_linked_total_ms; uint32_t dma2_linked_transfer_count,
+typedef struct { uint64_t dma2_linked_total_ms, dma2_payload_us; uint32_t dma2_linked_transfer_count,
     dma2_linked_last_ms, dma2_linked_max_ms; } FMDmaDebugStats;
 static FMDmaDebugStats dma;
 static void fm_memory_dma_debug(FMDmaDebugStats *out) { *out=dma; }
@@ -64,7 +64,7 @@ static int report_close(FILE *fp) {
     for(unsigned i=1;i<=100;++i) {
         g_b84_latch_count=i/5;
         g_seq_irq_done=i; g_seq_irq_total_ms=i*3;
-        dma.dma2_linked_total_ms=i*4; dma.dma2_linked_transfer_count=i;
+        dma.dma2_payload_us=i*3000; dma.dma2_linked_total_ms=i*4; dma.dma2_linked_transfer_count=i;
         fm_perf_window(1000+i*20,100+i,12,&cpu);
     }
     rewind(report); char text[4096]={0}; fread(text,1,sizeof(text)-1,report);
@@ -76,8 +76,10 @@ static int report_close(FILE *fp) {
     assert(strstr(text,"unclassified_ms=0"));
     assert(strstr(text,"dma2_nested_ms=400 transfers=100"));
     assert(strstr(text,"legacy_file_dumps=0"));
+    assert(strstr(text,"dma2_split payload_parser_raster_us=300000 traversal_other_us=100000 coarse_total_us=400000"));
+    assert(strstr(text,"gpu_timing=all_completed_commands"));
     assert(strstr(text,"native_sampling=random_1/64"));
-    assert(strstr(text,"gpu0 opcode=30 samples=10 us=1234 max_us=500"));
+    assert(strstr(text,"gpu0 opcode=30 calls=10 us=1234 max_us=500"));
     assert(gpu_resets==2);
     assert(strstr(text,"texture_fast format_specialization=1 color_lookup=1 neutral_triangles=10 fast_triangles=20 neutral_pixels=1000 fast_pixels=2000"));
     return 0;

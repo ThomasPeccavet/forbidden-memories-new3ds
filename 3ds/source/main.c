@@ -7036,14 +7036,14 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
     static uint64_t start, pre, render, vb, gfx, wait, loops, seq_before;
     static uint32_t samples, max_loop, image_before, frame_before, irq_before;
     static uint32_t report_ms;
-    static uint64_t dma_before;
+    static uint64_t dma_before, payload_before;
     static uint32_t dma_calls_before;
     FMDmaDebugStats dma = {0};
     fm_memory_dma_debug(&dma);
     if (!start) {
         start = now; frame_before = frame; image_before = g_b84_latch_count;
         irq_before = g_seq_irq_done; seq_before = g_seq_irq_total_ms;
-        dma_before = dma.dma2_linked_total_ms;
+        dma_before = dma.dma2_linked_total_ms; payload_before = dma.dma2_payload_us;
         dma_calls_before = dma.dma2_linked_transfer_count;
         fm_gpu_perf_window_reset();
         return;
@@ -7060,7 +7060,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         /* A single stdio buffer avoids small writes per formatted line. */
         char report_buffer[8192];
         setvbuf(fp, report_buffer, _IOFBF, sizeof(report_buffer));
-        fprintf(fp, "probe=B136.37 window_ms=%llu pc=%08lX script=%04lX\n",
+        fprintf(fp, "probe=B136.38 window_ms=%llu pc=%08lX script=%04lX\n",
             (unsigned long long)elapsed, (unsigned long)(cpu ? cpu->pc : 0u),
             (unsigned long)fm_memory_read_half(0x8009C610u));
         fprintf(fp, "host_fps_x100=%llu new_images_fps_x100=%llu samples=%lu\n",
@@ -7084,6 +7084,12 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
             (unsigned long)dma.dma2_linked_last_ms,
             (unsigned long)dma.dma2_linked_max_ms,
             (unsigned)FM_LEGACY_FILE_DIAGNOSTICS);
+        uint64_t payload_us = dma.dma2_payload_us-payload_before;
+        uint64_t dma_us = (dma.dma2_linked_total_ms-dma_before)*1000u;
+        fprintf(fp, "dma2_split payload_parser_raster_us=%llu traversal_other_us=%llu coarse_total_us=%llu\n",
+            (unsigned long long)payload_us,
+            (unsigned long long)(dma_us > payload_us ? dma_us-payload_us : 0u),
+            (unsigned long long)dma_us);
         fprintf(fp, "ot_last_window_ms repair=%llu submit_raster=%llu merge=%llu calls=%lu\n",
             (unsigned long long)g_b115_last_repair_ms,
             (unsigned long long)g_b115_last_submit_ms,
@@ -7100,11 +7106,11 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         fprintf(fp, "texture_fast format_specialization=1 color_lookup=1 neutral_triangles=%lu fast_triangles=%lu neutral_pixels=%llu fast_pixels=%llu\n",
             (unsigned long)neutral_triangles, (unsigned long)fast_triangles,
             (unsigned long long)neutral_pixels, (unsigned long long)fast_pixels);
-        fprintf(fp, "gpu_sampling=random_1/16 totals_are_sampled_not_estimated\n");
+        fprintf(fp, "gpu_timing=all_completed_commands profiling_overhead_included\n");
         for (unsigned rank=0; rank<6; ++rank) {
             FMGpuOpcodePerf hot = {0}; fm_gpu_perf_window_rank(rank, &hot);
             if (!hot.calls) continue;
-            fprintf(fp, "gpu%u opcode=%02X samples=%lu us=%llu max_us=%lu\n",
+            fprintf(fp, "gpu%u opcode=%02X calls=%lu us=%llu max_us=%lu\n",
                 rank, (unsigned)hot.opcode, (unsigned long)hot.calls,
                 (unsigned long long)hot.total_us, (unsigned long)hot.max_us);
         }
@@ -7124,7 +7130,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
     frame_before=frame; image_before=g_b84_latch_count;
     seq_before=g_seq_irq_total_ms; irq_before=g_seq_irq_done;
     fm_gpu_perf_window_reset();
-    dma_before=dma.dma2_linked_total_ms;
+    dma_before=dma.dma2_linked_total_ms; payload_before=dma.dma2_payload_us;
     dma_calls_before=dma.dma2_linked_transfer_count;
     memset(g_b110_prof, 0, sizeof(g_b110_prof));
 }
@@ -20233,7 +20239,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.37\nvideo_mode=%08lX\n"
+                            "video_probe=B136.38\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20301,7 +20307,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.37\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.38\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"

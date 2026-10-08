@@ -95,7 +95,7 @@ static uint64_t g_b122_upload_words = 0u;
 static uint32_t g_b13530_sample_phase = 0u;
 static uint64_t g_window_opcode_ticks[256], g_window_opcode_max[256];
 static uint32_t g_window_opcode_samples[256];
-static uint32_t g_window_sample_rng = 0x13635u;
+
 static uint32_t g_window_neutral_triangles;
 static uint32_t g_window_fast_tex_triangles;
 static uint64_t g_window_neutral_pixels;
@@ -5601,7 +5601,7 @@ void fm_gpu_gp0_write(
     {
 #if FM_PERF_PROFILE
         /*
-         * B135.30/34/35: sampled opcode/raster timing is PROFILE-only.
+         * B136.38: complete opcode timing is PROFILE-only.
          * CLEAN executes the exact same GP0 command path without clocks.
          */
         uint8_t completed_opcode =
@@ -5609,8 +5609,7 @@ void fm_gpu_gp0_write(
 
         ++g_b13530_sample_phase;
 
-        g_window_sample_rng = g_window_sample_rng * 1664525u + 1013904223u;
-        if ((g_window_sample_rng >> 28) == 0u)
+        /* B136.38 measurement build: time every completed command. */
         {
             uint64_t sample_start =
                 svcGetSystemTick();
@@ -5628,13 +5627,7 @@ void fm_gpu_gp0_write(
                 svcGetSystemTick() - sample_start
             );
         }
-        else
-        {
-            g_b13534_sample_active =
-                0;
 
-            execute_command();
-        }
 #else
         execute_command();
 #endif

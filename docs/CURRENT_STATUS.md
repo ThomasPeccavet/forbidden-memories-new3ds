@@ -2,6 +2,15 @@
 
 Dernière mise à jour : **8 octobre 2026**.
 
+## B136.38 : diagnostic complet du coût GPU
+
+B136.37 mesure 982 ms DMA2 sur 2049 ms dans une autre fenêtre de duel.
+Une commande 2Ah échantillonnée prend 30,9 ms. B136.38 chronomètre toutes
+les commandes terminées et sépare le traitement des paquets du reste du
+DMA. Ce build PROFILE sert à identifier le prochain hotspot ; aucun gain
+de FPS n'est annoncé. Les mesures comprennent leur coût d'instrumentation.
+Voir [la définition des compteurs](B136_38_COMPLETE_GPU_TIMING.md).
+
 ## B136.37 : modulation exacte des couleurs par table
 
 B136.36 reste à 16,50 latches/s dans le duel utilisateur : aucun triangle
