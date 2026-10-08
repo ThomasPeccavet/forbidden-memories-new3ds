@@ -2,6 +2,16 @@
 
 Dernière mise à jour : **8 octobre 2026**.
 
+## B136.41 : reprise des tranches et horloge VBlank indépendante
+
+B136.40 mesure 285 ms d'attente après épuisement du budget sur 2006 ms.
+B136.41 reprend ces tranches sans attendre si aucun VSync guest n'est actif.
+Le VBlank PS1 et les root timers suivent désormais le temps hôte à 60 Hz,
+avec rattrapage borné et reset à la reprise d'une longue pause/quick-load.
+Les frontières de présentation et l'isolation SEQ sont conservées.
+Le gain de FPS et le rythme visible restent à vérifier dans Azahar.
+Voir [les règles et limites](B136_41_WALL_CLOCK.md).
+
 ## B136.40 : attribution des attentes du planificateur
 
 B136.39 divise par deux le coût moyen des sprites au repos, mais le temps
