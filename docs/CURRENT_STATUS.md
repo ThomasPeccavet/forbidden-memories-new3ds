@@ -2,6 +2,16 @@
 
 Dernière mise à jour : **9 octobre 2026**.
 
+## B136.48 : accès RAM alignés du cœur recompilé
+
+Les callbacks RAM 16/32 bits utilisent une copie alignée lorsque le pointeur
+hôte le permet ; les adresses non alignées gardent l'assemblage par octets.
+Le chemin RAM précède les tests MMIO, et la surveillance des écritures teste
+deux intervalles au lieu de dix adresses. Pour le prochain essai en combat,
+utiliser `PROFILE=0 UNAI=1` afin de retirer l'instrumentation du build de test.
+Cela vise le coût CPU par accès ; aucun gain de FPS en jeu n'est encore validé.
+Voir [les changements et les limites](B136_48_RAM_ACCESS.md).
+
 ## B136.47 : secteurs ignorés lors du chargement des miniatures
 
 Le curseur CD avance désormais à chaque événement DataReady, même lorsque

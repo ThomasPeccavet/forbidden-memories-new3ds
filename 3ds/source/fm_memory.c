@@ -135,6 +135,48 @@ static size_t g_ram_size = 0;
 
 static uint8_t g_scratch[PSX_SCRATCH_SIZE];
 
+/* B136.48: RAM callbacks are used by the recompiled core as well as HLE.
+ * ARM11 must not perform unaligned LDR/STR: retain byte assembly there.
+ * memcpy keeps aliasing valid; assume_aligned is used only after checking
+ * the actual host pointer (fm_memory_init accepts arbitrary RAM storage). */
+static inline uint32_t fm_ram_load32(const uint8_t *p)
+{
+    if (((uintptr_t)p & 3u) == 0u) {
+        uint32_t value;
+        memcpy(&value, __builtin_assume_aligned(p, 4), sizeof(value));
+        return value;
+    }
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+        | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+static inline void fm_ram_store32(uint8_t *p, uint32_t value)
+{
+    if (((uintptr_t)p & 3u) == 0u) {
+        memcpy(__builtin_assume_aligned(p, 4), &value, sizeof(value));
+        return;
+    }
+    p[0] = (uint8_t)value; p[1] = (uint8_t)(value >> 8);
+    p[2] = (uint8_t)(value >> 16); p[3] = (uint8_t)(value >> 24);
+}
+static inline uint16_t fm_ram_load16(const uint8_t *p)
+{
+    if (((uintptr_t)p & 1u) == 0u) {
+        uint16_t value;
+        memcpy(&value, __builtin_assume_aligned(p, 2), sizeof(value));
+        return value;
+    }
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+static inline void fm_ram_store16(uint8_t *p, uint16_t value)
+{
+    if (((uintptr_t)p & 1u) == 0u) {
+        memcpy(__builtin_assume_aligned(p, 2), &value, sizeof(value));
+        return;
+    }
+    p[0] = (uint8_t)value; p[1] = (uint8_t)(value >> 8);
+}
+
+
 /*
  * B136.0 - exact guest RAM write watch.
  *
@@ -161,27 +203,14 @@ static FMMemoryWatchEvent g_memory_watch[FM_MEMORY_WATCH_CAP];
 static uint32_t g_memory_watch_seq = 0u;
 static uint32_t g_memory_watch_count = 0u;
 
+/* Only two watched ranges: avoid testing ten addresses on every store. */
 static int fm_memory_watch_overlap(uint32_t phys, uint32_t size)
 {
-    static const uint32_t watched[] = {
-        /* B136.8: actual render-gate/fade writers, not dispatch observations.
-         * Quiet CD/VSync writes must not evict the interesting transitions. */
-        0x0009C4B8u,
-        0x000EB248u, 0x000EB249u, 0x000EB24Au, 0x000EB24Bu,
-        0x000EB24Cu, 0x000EB24Du, 0x000EB24Eu, 0x000EB24Fu,
-        0x000EB250u
-    };
-
     uint32_t end = phys + size;
-    for (unsigned i = 0u; i < sizeof(watched) / sizeof(watched[0]); ++i)
-    {
-        if (watched[i] >= phys && watched[i] < end)
-        {
-            return 1;
-        }
-    }
-    return 0;
+    return (phys <= 0x0009C4B8u && end > 0x0009C4B8u)
+        || (phys < 0x000EB251u && end > 0x000EB248u);
 }
+
 
 static void fm_memory_watch_store(uint32_t phys, uint32_t size, uint32_t value)
 {
@@ -3799,6 +3828,24 @@ uint16_t fm_memory_read_half(
             addr
         );
 
+    /* B92 - hot RAM fast path before timer/DMA decoding. */
+    if (
+        g_ram
+        &&
+        g_ram_size >= 2u
+        &&
+        phys < PSX_RAM_MIRROR_END
+    )
+    {
+        uint32_t offset =
+            phys & 0x001FFFFFu;
+
+        if (offset <= g_ram_size - 2u)
+        {
+            return fm_ram_load16(g_ram + offset);
+        }
+    }
+
     if (
         phys == PSX_SPU_REVERB_MASK
         || phys == PSX_SPU_REVERB_MASK + 2u
@@ -3814,26 +3861,7 @@ uint16_t fm_memory_read_half(
         return fm_spu_read_half(phys);
     }
 
-    /* B92 - hot RAM fast path before timer/DMA decoding. */
-    if (
-        g_ram
-        &&
-        g_ram_size >= 2u
-        &&
-        phys < PSX_RAM_MIRROR_END
-    )
-    {
-        uint32_t offset =
-            phys & 0x001FFFFFu;
 
-        if (offset <= g_ram_size - 2u)
-        {
-            return
-                (uint16_t)g_ram[offset + 0u]
-                |
-                ((uint16_t)g_ram[offset + 1u] << 8);
-        }
-    }
 
     /*
      * --------------------------------------------------------
@@ -4048,20 +4076,6 @@ void fm_memory_write_half(
 
     fm_memory_watch_store(phys, 2u, (uint32_t)value);
 
-    /* Psy-Q programs these 16-bit registers with SH, not only SW. */
-    if (
-        phys == PSX_SPU_REVERB_MASK
-        || phys == PSX_SPU_REVERB_MASK + 2u
-        || phys == PSX_SPU_XFER_ADDR
-        || phys == PSX_SPU_XFER_DATA
-        || phys == PSX_SPU_CTRL
-        || phys == PSX_SPU_STAT
-    )
-    {
-        fm_spu_write_half(phys, value);
-        return;
-    }
-
     /* B92 - hot RAM fast path before timer/DMA decoding. */
     if (
         g_ram
@@ -4076,11 +4090,26 @@ void fm_memory_write_half(
 
         if (offset <= g_ram_size - 2u)
         {
-            g_ram[offset + 0u] = (uint8_t)value;
-            g_ram[offset + 1u] = (uint8_t)(value >> 8);
+            fm_ram_store16(g_ram + offset, value);
             return;
         }
     }
+
+    /* Psy-Q programs these 16-bit registers with SH, not only SW. */
+    if (
+        phys == PSX_SPU_REVERB_MASK
+        || phys == PSX_SPU_REVERB_MASK + 2u
+        || phys == PSX_SPU_XFER_ADDR
+        || phys == PSX_SPU_XFER_DATA
+        || phys == PSX_SPU_CTRL
+        || phys == PSX_SPU_STAT
+    )
+    {
+        fm_spu_write_half(phys, value);
+        return;
+    }
+
+
 
     /*
      * --------------------------------------------------------
@@ -4355,10 +4384,6 @@ uint32_t fm_memory_read_word(
             addr
         );
 
-    if (phys == 0x1F801820u || phys == 0x1F801824u) {
-        uint32_t result = mdec_read(phys); fm_mdec_dma_service(); return result;
-    }
-    if (fm_mdec_dma_register(phys) && !(phys & 3u)) return fm_mdec_dma_read(phys);
     /* B92 - hot RAM fast path before all MMIO tests. */
     if (
         g_ram
@@ -4373,16 +4398,15 @@ uint32_t fm_memory_read_word(
 
         if (offset <= g_ram_size - 4u)
         {
-            return
-                (uint32_t)g_ram[offset + 0u]
-                |
-                ((uint32_t)g_ram[offset + 1u] << 8)
-                |
-                ((uint32_t)g_ram[offset + 2u] << 16)
-                |
-                ((uint32_t)g_ram[offset + 3u] << 24);
+            return fm_ram_load32(g_ram + offset);
         }
     }
+
+    if (phys == 0x1F801820u || phys == 0x1F801824u) {
+        uint32_t result = mdec_read(phys); fm_mdec_dma_service(); return result;
+    }
+    if (fm_mdec_dma_register(phys) && !(phys & 3u)) return fm_mdec_dma_read(phys);
+
 
     /*
      * --------------------------------------------------------
@@ -4663,10 +4687,6 @@ void fm_memory_write_word(
             addr
         );
 
-    if (phys == 0x1F801820u || phys == 0x1F801824u) {
-        mdec_write(phys, value); fm_mdec_dma_service(); return;
-    }
-    if (fm_mdec_dma_register(phys) && !(phys & 3u)) { fm_mdec_dma_write(phys, value); return; }
     fm_memory_watch_store(phys, 4u, value);
 
     /* B92 - hot RAM fast path before all MMIO tests. */
@@ -4683,13 +4703,17 @@ void fm_memory_write_word(
 
         if (offset <= g_ram_size - 4u)
         {
-            g_ram[offset + 0u] = (uint8_t)value;
-            g_ram[offset + 1u] = (uint8_t)(value >> 8);
-            g_ram[offset + 2u] = (uint8_t)(value >> 16);
-            g_ram[offset + 3u] = (uint8_t)(value >> 24);
+            fm_ram_store32(g_ram + offset, value);
             return;
         }
     }
+
+    if (phys == 0x1F801820u || phys == 0x1F801824u) {
+        mdec_write(phys, value); fm_mdec_dma_service(); return;
+    }
+    if (fm_mdec_dma_register(phys) && !(phys & 3u)) { fm_mdec_dma_write(phys, value); return; }
+
+
 
     /*
      * --------------------------------------------------------

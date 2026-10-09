@@ -34,6 +34,49 @@ void gte_write_ctrl(CPUState *c, uint8_t r, uint32_t v)
 #define REVERB 0x1F801D98u
 static unsigned char ram[2 * 1024 * 1024];
 
+static void ram_fast(void)
+{
+    const uint32_t aliases[] = {0, 0x00200000u, 0x00400000u,
+        0x00600000u, 0x80000000u, 0x80200000u, 0xA0000000u};
+    const unsigned offsets[] = {0, 1, 2, 3, 4, 0x12340, 0x12341,
+        0x1FFFF8, 0x1FFFFB, 0x1FFFFC};
+    for (unsigned base_shift = 0; base_shift < 4; ++base_shift) {
+        /* Host storage can itself be unaligned, even for a guest SW/LW. */
+        fm_memory_init(ram + base_shift, sizeof(ram) - base_shift);
+        for (unsigned a = 0; a < sizeof(aliases) / sizeof(aliases[0]); ++a) {
+            for (unsigned o = 0; o < sizeof(offsets) / sizeof(offsets[0]); ++o) {
+                unsigned offset = offsets[o];
+                if (offset + 4 > sizeof(ram) - base_shift) continue;
+                uint32_t address = aliases[a] + offset;
+                uint32_t value = 0xBADC0000u + offset + a;
+                fm_memory_write_word(address, value);
+                assert(fm_memory_read_word(address) == value);
+                assert(fm_memory_read_word(0x80000000u + offset) == value);
+                for (unsigned b = 0; b < 4; ++b)
+                    assert(ram[base_shift + offset + b] == (uint8_t)(value >> (8 * b)));
+                fm_memory_write_half(address, 0xC581);
+                assert(fm_memory_read_half(address) == 0xC581);
+                assert(ram[base_shift + offset] == 0x81);
+                assert(ram[base_shift + offset + 1] == 0xC5);
+                assert(fm_memory_read_word(address) == ((value & 0xFFFF0000u) | 0xC581));
+                fm_memory_write_byte(address + 1, 0x12);
+                assert(fm_memory_read_half(address) == 0x1281);
+            }
+        }
+        assert(fm_memory_unmapped_count() == 0);
+    }
+    fm_memory_init(ram, sizeof ram);
+    /* All watch bytes, plus stores overlapping the range from below. */
+    for (unsigned i = 0; i < 9; ++i) {
+        fm_memory_write_byte(0x800EB248u + i, (uint8_t)(i + 1));
+        assert(fm_memory_read_byte(0x800EB248u + i) == i + 1);
+    }
+    fm_memory_write_word(0x8009C4B5, 0x56781234);
+    assert(fm_memory_read_byte(0x8009C4B8) == 0x56);
+    fm_memory_write_word(0x800EB245, 0x78ABCDEF);
+    assert(fm_memory_read_byte(0x800EB248) == 0x78);
+}
+
 static void timer2_clock(void)
 {
     const uint32_t count = 0x1F801120u, mode = 0x1F801124u, target = 0x1F801128u;
@@ -229,7 +272,8 @@ int main(int argc, char **argv)
 {
     assert(argc == 2);
     fm_memory_init(ram, sizeof ram);
-    if (!strcmp(argv[1], "spu_half")) spu_half();
+    if (!strcmp(argv[1], "ram_fast")) ram_fast();
+    else if (!strcmp(argv[1], "spu_half")) spu_half();
     else if (!strcmp(argv[1], "spu_word")) spu_word();
     else if (!strcmp(argv[1], "reverb_mask")) reverb_mask();
     else if (!strcmp(argv[1], "native_reverb_poll")) native_reverb_poll();
