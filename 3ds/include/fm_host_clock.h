@@ -1,21 +1,39 @@
 #ifndef FM_HOST_CLOCK_H
 #define FM_HOST_CLOCK_H
 #include <stdint.h>
-/* 60 Hz wall clock shared by PS1 VBlank and root timers. Millisecond
- * fractions are retained. Long pauses reset instead of replaying input. */
-typedef struct { uint64_t last_ms; uint32_t fraction; unsigned valid; } FMHostClock;
+/* B136.54: retain every elapsed tick during gameplay. Bound delivery to
+ * eight callbacks per host pass; excess ticks remain queued for later passes.
+ * Only explicit pause, suspend, quick-load or time reversal drops the debt. */
+#define FM_HOST_CLOCK_BATCH 8u
+typedef struct {
+    uint64_t last_ms, pending;
+    uint32_t fraction;
+    unsigned valid;
+} FMHostClock;
 static inline void fm_host_clock_reset(FMHostClock *clock) {
-    clock->valid=0; clock->fraction=0;
+    clock->valid=0; clock->fraction=0; clock->pending=0;
 }
 static inline unsigned fm_host_clock_due(FMHostClock *clock, uint64_t now) {
     if (!clock->valid || now < clock->last_ms) {
-        clock->last_ms=now; clock->fraction=0; clock->valid=1; return 0;
+        clock->last_ms=now; clock->fraction=0; clock->pending=0;
+        clock->valid=1; return 0;
     }
     uint64_t elapsed=now-clock->last_ms; clock->last_ms=now;
-    if (elapsed>250u) { clock->fraction=0; return 0; }
-    uint32_t phase=clock->fraction+(uint32_t)elapsed*60u;
-    unsigned due=phase/1000u; clock->fraction=phase%1000u;
-    /* At most four callbacks per slice: discard excess after a long stall. */
-    return due>4u ? 4u : due;
+    /* Split milliseconds to avoid the old 32-bit elapsed truncation. */
+    uint32_t phase=clock->fraction+(uint32_t)(elapsed%1000u)*60u;
+    clock->pending+=(elapsed/1000u)*60u+phase/1000u;
+    clock->fraction=phase%1000u;
+    unsigned due=clock->pending>FM_HOST_CLOCK_BATCH
+        ? FM_HOST_CLOCK_BATCH : (unsigned)clock->pending;
+    clock->pending-=due;
+    return due;
+}
+static inline unsigned fm_host_clock_update(FMHostClock *clock, uint64_t now,
+    int running) {
+    if (!running) { fm_host_clock_reset(clock); return 0; }
+    return fm_host_clock_due(clock,now);
+}
+static inline int fm_host_clock_pending(const FMHostClock *clock) {
+    return clock->pending!=0;
 }
 #endif

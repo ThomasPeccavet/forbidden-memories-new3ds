@@ -2297,6 +2297,15 @@ static uint32_t g_b106_wait_ms = 0u;
 /* PROFILE wait attribution: budget, guest VSync, other, skipped-late. */
 static unsigned g_perf_wait_reason = 3u;
 static FMHostClock g_ps1_host_clock;
+static aptHookCookie g_clock_apt_hook;
+static volatile unsigned g_clock_resume_reset;
+static void fm_clock_apt_hook(APT_HookType hook, void *param)
+{
+    (void)param;
+    if (hook==APTHOOK_ONSUSPEND || hook==APTHOOK_ONRESTORE
+        || hook==APTHOOK_ONSLEEP || hook==APTHOOK_ONWAKEUP)
+        g_clock_resume_reset=1u;
+}
 static uint32_t g_clock_ticks, g_budget_wait_skips;
 static uint32_t g_native_probe_calls;
 
@@ -7115,7 +7124,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         /* A single stdio buffer avoids small writes per formatted line. */
         char report_buffer[8192];
         setvbuf(fp, report_buffer, _IOFBF, sizeof(report_buffer));
-        fprintf(fp, "probe=B136.53 window_ms=%llu pc=%08lX script=%04lX\n",
+        fprintf(fp, "probe=B136.54 window_ms=%llu pc=%08lX script=%04lX\n",
             (unsigned long long)elapsed, (unsigned long)(cpu ? cpu->pc : 0u),
             (unsigned long)fm_memory_read_half(0x8009C610u));
         fprintf(fp, "host_fps_x100=%llu new_images_fps_x100=%llu samples=%lu\n",
@@ -7147,6 +7156,8 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         fprintf(fp, "ps1_clock=wall_60hz ticks=%lu budget_wait_skips=%lu\n",
             (unsigned long)(g_clock_ticks-clock_before),
             (unsigned long)(g_budget_wait_skips-skips_before));
+        fprintf(fp, "clock_debt pending=%llu batch_limit=%u\n",
+            (unsigned long long)g_ps1_host_clock.pending, FM_HOST_CLOCK_BATCH);
         fprintf(fp, "native_batch probes=%lu chains=%lu blocks=%llu object_limit=64 time_budget_ms=2\n",
             (unsigned long)(g_native_probe_calls-probes_before),
             (unsigned long)(g_b13514_chain_entries-chains_before),
@@ -12497,6 +12508,7 @@ int main(void)
      * ========================================================
      */
 
+    aptHook(&g_clock_apt_hook,fm_clock_apt_hook,NULL);
     while (aptMainLoop())
     {
         uint64_t b105_loop_start_ms = osGetTime();
@@ -13165,7 +13177,13 @@ int main(void)
 
         /* B136.44: input is sampled above; service due clock callbacks before
          * guest execution, including VBlanks elapsed during the host wait. */
-        unsigned clock_due=fm_host_clock_due(&g_ps1_host_clock,osGetTime());
+        /* A long running slice is debt, not a pause. APT events and manual
+         * pause explicitly reset the timeline so sleep/input is not replayed. */
+        if (g_clock_resume_reset) {
+            g_clock_resume_reset=0u;
+            fm_host_clock_reset(&g_ps1_host_clock);
+        }
+        unsigned clock_due=fm_host_clock_update(&g_ps1_host_clock,osGetTime(),game_running);
         for (unsigned clock_tick=0; clock_tick<clock_due; ++clock_tick) {
             ++frame;
             ++g_clock_ticks;
@@ -20649,7 +20667,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.53\nvideo_mode=%08lX\n"
+                            "video_probe=B136.54\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20717,7 +20735,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.53\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.54\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"
@@ -21575,6 +21593,9 @@ int main(void)
              */
             int continue_budget = g_b84_budget_yields != perf_budget_before_loop
                 && !g_vsync_wait_active && !g_frame_wait_active;
+            /* Clock debt must not incur an additional host VBlank sleep,
+             * even when the guest is waiting on VSync/frame completion. */
+            continue_budget |= game_running && fm_host_clock_pending(&g_ps1_host_clock);
             if (g_b105_work_ms < 16u && !continue_budget)
             {
 #if FM_PERF_PROFILE
@@ -21646,6 +21667,7 @@ int main(void)
      */
 
     fm_audio_exit();
+    aptUnhook(&g_clock_apt_hook);
     fm_disc_close();
 
     free(vram);

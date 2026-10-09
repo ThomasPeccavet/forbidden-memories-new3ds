@@ -2,6 +2,17 @@
 
 Dernière mise à jour : **9 octobre 2026**.
 
+## B136.54 : conserver et rattraper les ticks en retard
+
+Les ticks de jeu ne sont plus supprimés après une tranche longue : une
+dette 64 bits conserve les ticks entiers, livrés par lots de huit au maximum.
+Le scheduler ne dort pas sur un VBlank hôte tant qu'une dette reste à traiter.
+Pause, veille/restauration APT et quick-load remettent explicitement l'horloge
+à zéro. Le test de mille tranches de 90 ms retrouve 60 Hz au lieu de 44,44 Hz.
+Timer2, VSync et la cadence nominale restent inchangés pour isoler l'essai.
+La vitesse réelle et les transitions du jeu restent à valider sur le matériel.
+Voir [les tests et les limites](B136_54_CLOCK_DEBT.md).
+
 ## Audit temporel après B136.53 — aucune modification des horloges
 
 B136.53 n'a pas changé la fluidité selon l'utilisateur. L'audit reproduit

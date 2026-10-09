@@ -14,6 +14,8 @@ class PerfWindowTests(unittest.TestCase):
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
+#include "fm_host_clock.h"
+static FMHostClock g_ps1_host_clock;
 typedef struct { uint32_t pc; } CPUState;
 typedef struct { uint32_t start_pc,end_pc,hits,max_us; uint64_t total_us; } B110ProbeStat;
 typedef struct { uint8_t opcode; uint32_t calls; uint64_t total_us; uint32_t max_us; } FMGpuOpcodePerf;
@@ -72,6 +74,7 @@ static int report_close(FILE *fp) {
 ''' + body + r'''int main(void) {
     report = tmpfile(); assert(report);
     CPUState cpu={0x80041EE8};
+    g_ps1_host_clock.pending=13;
     fm_perf_window(1000,100,12,&cpu);
     for(unsigned i=1;i<=100;++i) {
         g_b84_latch_count=i/5; g_clock_ticks=i*6/5; g_budget_wait_skips=i/4;
@@ -103,6 +106,7 @@ static int report_close(FILE *fp) {
     assert(gpu_resets==2);
     assert(strstr(text,"frame_wait stops=100 resumes=50 active=1 target_probes=200 target_probe_us=700"));
     assert(strstr(text,"ps1_clock=wall_60hz ticks=120 budget_wait_skips=25"));
+    assert(strstr(text,"clock_debt pending=13 batch_limit=8"));
     assert(strstr(text,"wait_reasons budget_ms=50 budget_loops=25 vsync_ms=50 vsync_loops=25 other_ms=50 other_loops=25 no_wait_loops=25"));
     assert(strstr(text,"scheduler budget_ms=12 budget_yields=100 vsync_mode0=20 vsync_modeN=0 vsync_immediate=0 vsync_completed=20"));
     assert(strstr(text,"texture_fast format_specialization=1 color_lookup=1 neutral_triangles=10 fast_triangles=20 neutral_pixels=1000 fast_pixels=2000"));
@@ -113,5 +117,5 @@ static int report_close(FILE *fp) {
             path=Path(temp)/"perf.c"; binary=Path(temp)/"perf"
             path.write_text(code)
             for unai in (0,1):
-                subprocess.run(["cc","-std=c11","-Wall","-Werror",f"-DFM_GPU_UNAI={unai}",str(path),"-o",str(binary)],check=True)
+                subprocess.run(["cc","-std=c11","-Wall","-Werror",f"-DFM_GPU_UNAI={unai}","-I"+str(ROOT/"3ds/include"),str(path),"-o",str(binary)],check=True)
                 subprocess.run([str(binary)],check=True)
