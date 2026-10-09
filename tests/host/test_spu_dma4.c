@@ -319,6 +319,40 @@ static void timer2_clock(void)
         assert(fm_memory_i_stat() & 0x40);
     }
     assert(fm_memory_read_half(count) == 4233600u % 0xE001u);
+    /* B136.55: acknowledge at target boundaries, without adding VBlanks.
+     * Ten seconds gives floor(42336000/57345)=738 IRQs instead of 600. */
+    fm_memory_write_half(mode, 0x258);
+    fm_memory_write_half(0x1F801070u, (uint16_t)~0x40u);
+    unsigned delivered=0;
+    for (unsigned frame=0; frame<600u; ++frame) {
+        uint32_t remaining=fm_memory_vblank_begin_timer2();
+        unsigned slices=0;
+        do {
+            remaining=fm_memory_timer2_slice(remaining,slices++ < 8u);
+            if (fm_memory_i_stat() & 0x40u) {
+                ++delivered;
+                fm_memory_write_half(0x1F801070u,(uint16_t)~0x40u);
+            }
+        } while (remaining);
+        assert(slices<=3u);
+    }
+    assert(delivered==42336000u/0xE001u);
+    assert(fm_memory_read_half(count)==42336000u%0xE001u);
+    /* No acknowledgement: IRQs remain one latched bit, not queued events. */
+    fm_memory_write_half(mode,0x258);
+    for (unsigned frame=0; frame<60u; ++frame) {
+        uint32_t remaining=fm_memory_vblank_begin_timer2();
+        while (remaining) remaining=fm_memory_timer2_slice(remaining,1);
+    }
+    assert(fm_memory_i_stat() & 0x40u);
+    assert(fm_memory_read_half(count)==4233600u%0xE001u);
+    /* A pathological target is bounded and still consumes every clock tick. */
+    fm_memory_write_half(target,0);
+    fm_memory_write_half(mode,0x258);
+    uint32_t remaining=fm_memory_vblank_begin_timer2();
+    unsigned slices=0;
+    do { remaining=fm_memory_timer2_slice(remaining,slices++ < 8u); } while (remaining);
+    assert(slices==9u && fm_memory_read_half(count)==0);
     /* Without reset-on-target, a large delta crosses any target even when
      * its final modulo count falls short of it. Only one IRQ bit is latched. */
     fm_memory_write_half(target, 20000);

@@ -31,6 +31,8 @@ uint32_t fm_memory_last_unmapped(void);
 unsigned fm_memory_unmapped_count(void);
 
 void fm_memory_vblank_tick(void);
+uint32_t fm_memory_vblank_begin_timer2(void);
+uint32_t fm_memory_timer2_slice(uint32_t remaining, int split);
 
 uint16_t fm_memory_i_stat(void);
 uint16_t fm_memory_i_mask(void);

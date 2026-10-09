@@ -2,6 +2,18 @@
 
 Dernière mise à jour : **9 octobre 2026**.
 
+## B136.55 : livrer les échéances Timer2 séparément
+
+Le temps Timer2 de chaque VBlank est découpé aux échéances du compteur.
+Le callback BIOS peut acquitter chaque interruption avant la suivante :
+738 livraisons sur dix secondes pour la configuration SEQ E000, contre
+600 avec la livraison coalescée. VSync, Timer0/1 et VBlank restent inchangés.
+Les interruptions masquées restent coalescées dans I_STAT ; aucune file
+artificielle de callbacks. Au maximum neuf tranches par tick, et le reste
+du temps est consommé même avec une cible anormalement petite.
+Gain attendu sur le rythme du séquenceur, pas une garantie de FPS.
+Essai en jeu nécessaire pour les transitions, la musique et les animations.
+
 ## B136.54 : conserver et rattraper les ticks en retard
 
 Les ticks de jeu ne sont plus supprimés après une tranche longue : une

@@ -5129,6 +5129,34 @@ void fm_memory_vblank_tick(void)
     }
 }
 
+/* B136.55: keep VBlank/Timer0/1 cadence, but let the host acknowledge
+ * each Timer2 target crossing before advancing the remainder of this tick.
+ * I_STAT still coalesces events when the BIOS event is disabled or masked. */
+uint32_t fm_memory_vblank_begin_timer2(void)
+{
+    g_i_stat |= PSX_IRQ_VBLANK;
+    for (unsigned i=0; i<2u; ++i)
+        fm_timer_advance(i, fm_timer_vblank_delta(i));
+    return fm_timer_vblank_delta(2u);
+}
+
+uint32_t fm_memory_timer2_slice(uint32_t remaining, int split)
+{
+    FMRootCounter *timer=&g_timers[2];
+    uint32_t step=remaining;
+    if (split && remaining) {
+        uint32_t period=(timer->mode & 8u) ? (uint32_t)timer->target+1u : 65536u;
+        uint32_t count=(uint32_t)timer->count % period;
+        uint32_t edge=period-count;
+        if (!(timer->mode & 8u) && timer->target > count &&
+            (uint32_t)timer->target-count < edge)
+            edge=(uint32_t)timer->target-count;
+        if (step>edge) step=edge;
+    }
+    fm_timer_advance(2u,step);
+    return remaining-step;
+}
+
 
 uint16_t fm_memory_i_stat(void)
 {
