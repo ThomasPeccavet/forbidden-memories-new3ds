@@ -2,6 +2,18 @@
 
 Dernière mise à jour : **9 octobre 2026**.
 
+## B136.51 : RAM directe dans les copies du cœur recompilé
+
+B136.50 n'a pas apporté de gain visible, ou seulement un gain faible selon
+l'utilisateur. La nouvelle expérience cible les lectures et écritures du
+code C résident généré, plutôt que les pixels. Le rebuild crée des copies
+spécialisées, sans modifier les sources originales : RAM ordinaire en ligne,
+callbacks conservés pour MMIO, scratchpad, BIOS, limites, callbacks remplacés
+et écritures surveillées. Les helpers de cycles restent intacts lorsque
+PSX_ENABLE_BLOCK_CYCLES est activé. Le build d'essai reste PROFILE=0 UNAI=1.
+69 tests hôte passent ; les FPS du jeu ne sont pas validés sur l'hôte.
+Voir [le périmètre et la validation](B136_51_NATIVE_RAM_INLINE.md).
+
 ## B136.50 : polygones texturés de couleur constante
 
 B136.49 n'a pas apporté de gain perceptible selon l'utilisateur. La suite

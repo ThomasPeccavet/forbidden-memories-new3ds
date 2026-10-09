@@ -1,5 +1,6 @@
 #include "fm_memory.h"
 #include "fm_ram_access.h"
+#include "fm_native_memory.h"
 #include "fm_gpu.h"
 #include "mdec.h"
 #include "fm_media.h"
@@ -131,6 +132,7 @@ static void fm_spu_write_half(uint32_t phys, uint16_t value);
  * ============================================================
  */
 
+FMNativeRam g_fm_native_ram = {NULL, 0};
 static uint8_t *g_ram = NULL;
 static size_t g_ram_size = 0;
 
@@ -3246,6 +3248,9 @@ void fm_memory_init(
 
     g_ram_size =
         ram_size;
+
+    g_fm_native_ram.base = ram;
+    g_fm_native_ram.size = ram_size;
 
     memset(
         g_scratch,

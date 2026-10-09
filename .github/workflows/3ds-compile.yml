@@ -63,3 +63,17 @@ jobs:
           if "$DEVKITARM/bin/arm-none-eabi-nm" -u /tmp/unai-linked.o | grep -E 'sprite_driver_|poly_.*_asm|tile_driver_'; then
             echo "Missing Unai assembly implementation"; exit 1
           fi
+
+      - name: Compile transformed native RAM accesses on ARM
+        run: |
+          export PATH="$DEVKITARM/bin:$PATH"
+          mkdir -p /tmp/fm-native-original
+          cp tests/host/native_memory_generated.c /tmp/fm-native-original/SLES_039.48_full_00.c
+          python3 tools/inline_native_memory.py /tmp/fm-native-original /tmp/fm-native-transformed
+          for cycles in "" "-DPSX_ENABLE_BLOCK_CYCLES"; do
+            "$DEVKITARM/bin/arm-none-eabi-gcc" -std=gnu11 -O3 \
+              -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft \
+              -Werror=implicit-function-declaration $cycles \
+              -Iwork/upstream-psxrecomp/runtime/include -I3ds/include \
+              -c /tmp/fm-native-transformed/SLES_039.48_full_00.c -o /tmp/fm-native.o
+          done

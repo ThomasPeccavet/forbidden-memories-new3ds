@@ -119,6 +119,9 @@ mkdir -p "$OUT"
 rm -rf "$REL"
 mkdir -p "$REL"
 
+NATIVE_GEN="$REL/native-sources"
+"${PYTHON:-python}" "$ROOT/tools/inline_native_memory.py" "$GEN" "$NATIVE_GEN"
+
 COMMON_FLAGS=(
     -std=gnu11
     -O3
@@ -133,6 +136,8 @@ COMMON_FLAGS=(
     -ffunction-sections
     -fdata-sections
     -I"$RUNTIME/include"
+    -I"$ROOT/3ds/include"
+    -I"$GEN"
 )
 
 echo "Compiler:"
@@ -141,7 +146,7 @@ echo
 
 count=0
 
-for f in "$GEN"/SLES_039.48_*.c; do
+for f in "$NATIVE_GEN"/SLES_039.48_*.c; do
     [[ -f "$f" ]] || continue
 
     base="$(basename "$f" .c)"

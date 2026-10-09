@@ -1,4 +1,5 @@
 #include "fm_memory.h"
+#include "fm_native_memory.h"
 #include "fm_gpu.h"
 #include "fm_interp.h"
 #include <assert.h>
@@ -33,6 +34,96 @@ void gte_write_ctrl(CPUState *c, uint8_t r, uint32_t v)
 #define DICR 0x1F8010F4u
 #define REVERB 0x1F801D98u
 static unsigned char ram[2 * 1024 * 1024];
+
+
+static unsigned native_cycle_calls;
+uint32_t psx_cyc_load_word(CPUState *c,uint32_t a,uint32_t r,uint32_t m)
+{ ++native_cycle_calls; (void)r; (void)m; return c->read_word(a); }
+uint16_t psx_cyc_load_half(CPUState *c,uint32_t a,uint32_t r,uint32_t m)
+{ ++native_cycle_calls; (void)r; (void)m; return c->read_half(a); }
+uint8_t psx_cyc_load_byte(CPUState *c,uint32_t a,uint32_t r,uint32_t m)
+{ ++native_cycle_calls; (void)r; (void)m; return c->read_byte(a); }
+uint32_t native_fixture(CPUState *, uint32_t);
+uint32_t native_fixture_reference(CPUState *, uint32_t);
+static unsigned native_callback_reads, native_callback_writes;
+static uint32_t native_custom_read(uint32_t a) {
+    ++native_callback_reads; return fm_memory_read_word(a);
+}
+static void native_custom_write(uint32_t a, uint32_t v) {
+    ++native_callback_writes; fm_memory_write_word(a, v);
+}
+static void native_ram_fast(void)
+{
+    CPUState cpu = {0};
+    cpu.read_word=fm_memory_read_word; cpu.read_half=fm_memory_read_half;
+    cpu.read_byte=fm_memory_read_byte; cpu.write_word=fm_memory_write_word;
+    cpu.write_half=fm_memory_write_half; cpu.write_byte=fm_memory_write_byte;
+    cpu.gpr[1]=0xabcd1234; cpu.gpr[2]=0x7654; cpu.gpr[3]=0x98;
+    fm_memory_init(ram,sizeof ram);
+    uint32_t original=native_fixture_reference(&cpu,0x80012000);
+    unsigned char expected[16]; memcpy(expected,ram+0x12000,16);
+    memset(ram+0x12000,0,16);
+    native_cycle_calls=0;
+    assert(native_fixture(&cpu,0x80012000)==original);
+#ifdef PSX_ENABLE_BLOCK_CYCLES
+    assert(native_cycle_calls==3);
+#else
+    assert(native_cycle_calls==0);
+#endif
+    assert(!memcmp(expected,ram+0x12000,16));
+    const uint32_t bases[]={0,0x80000000u,0xa0000000u,0x00200000u,0x00600000u};
+    for(unsigned shift=0;shift<4;++shift) {
+        fm_memory_init(ram+shift, sizeof ram-shift);
+        for(unsigned b=0;b<5;++b) for(unsigned o=0;o<128;++o) {
+            uint32_t a=bases[b]+0x12000+o;
+            uint32_t value=0x5a123456u+o;
+            fm_native_write_word(&cpu,a,value);
+            assert(fm_memory_read_word(a)==value);
+            assert(fm_native_read_word(&cpu,a)==cpu.read_word(a));
+            fm_native_write_half(&cpu,a,0x9876);
+            assert(fm_memory_read_half(a)==0x9876);
+            assert(fm_native_read_half(&cpu,a)==cpu.read_half(a));
+            fm_native_write_byte(&cpu,a,0x42);
+            assert(fm_memory_read_byte(a)==0x42);
+            assert(fm_native_read_byte(&cpu,a)==cpu.read_byte(a));
+        }
+    }
+    fm_memory_init(ram, sizeof ram);
+    /* RAM mirror end, incomplete spans, scratchpad, BIOS and MMIO must
+     * retain the original behavior, including unmapped accounting. */
+    const uint32_t edge[]={0x1ffffc,0x1ffffd,0x1ffffe,0x1fffff,
+        0x7fffff,0x800000,0x1f800000,0x1f8003fd,0x1fc00000,REVERB,CTRL};
+    for(unsigned i=0;i<sizeof edge/sizeof edge[0];++i) {
+        uint32_t a=edge[i];
+        assert(fm_native_read_word(&cpu,a)==cpu.read_word(a));
+        assert(fm_native_read_half(&cpu,a)==cpu.read_half(a));
+        assert(fm_native_read_byte(&cpu,a)==cpu.read_byte(a));
+        fm_native_write_word(&cpu,a,0x76543210);
+        assert(fm_native_read_word(&cpu,a)==cpu.read_word(a));
+    }
+    assert(!fm_native_ram_ptr(0x1fffff,4));
+    /* An overridden callback is never bypassed, including ordinary RAM. */
+    cpu.read_word=native_custom_read; cpu.write_word=native_custom_write;
+    fm_native_write_word(&cpu,0x80012000,0xabcdef01);
+    assert(fm_native_read_word(&cpu,0x80012000)==0xabcdef01);
+    assert(native_callback_reads==1 && native_callback_writes==1);
+    cpu.read_word=fm_memory_read_word; cpu.write_word=fm_memory_write_word;
+    /* Watched writes, including aliases/crossing stores, take the callback. */
+    assert(fm_native_watched(0x8029c4b7,2));
+    assert(fm_native_watched(0xa02eb247,4));
+    assert(!fm_native_watched(0x80012000,4));
+    fm_native_write_byte(&cpu,0x8009c4b8,1);
+    fm_native_write_word(&cpu,0x800eb248,0xabcdef12);
+    fm_memory_watch_dump("fm-native-watch.txt");
+    /* Rebinding RAM cannot leave the generated code pointing at old data. */
+    fm_memory_init(ram+1,128);
+    assert(g_fm_native_ram.base==ram+1 && g_fm_native_ram.size==128);
+    assert(!fm_native_ram_ptr(127,2));
+    fm_native_write_word(&cpu,4,0x12345678);
+    assert(fm_memory_read_word(4)==0x12345678);
+    fm_memory_init(NULL,0);
+    assert(!fm_native_ram_ptr(0,1));
+}
 
 static void scratch_fast(void)
 {
@@ -328,7 +419,8 @@ int main(int argc, char **argv)
 {
     assert(argc == 2);
     fm_memory_init(ram, sizeof ram);
-    if (!strcmp(argv[1], "scratch_fast")) scratch_fast();
+    if (!strcmp(argv[1], "native_ram_fast")) native_ram_fast();
+    else if (!strcmp(argv[1], "scratch_fast")) scratch_fast();
     else if (!strcmp(argv[1], "interp_ram_fast")) interp_ram_fast();
     else if (!strcmp(argv[1], "ram_fast")) ram_fast();
     else if (!strcmp(argv[1], "spu_half")) spu_half();
