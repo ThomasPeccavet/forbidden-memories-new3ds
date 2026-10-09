@@ -2,6 +2,17 @@
 
 Dernière mise à jour : **9 octobre 2026**.
 
+## B136.53 : cache compact des sprites neutres Unai
+
+B136.52 n'a apporté aucun gain perceptible dans le menu deck/coffre.
+La capture contient 440 sprites neutres sur 477. Le nouveau cache décode
+les sprites opaques neutres/raw 4/8 bpp et réutilise leurs pixels ; avant
+chaque hit, les octets source et la palette sont comparés exactement.
+Textures modifiées, copies GPU, palettes et quick-load sont donc couverts
+sans dépendre d'un compteur global. Fondu, modulation, aliasing et texture
+window conservent le chemin Unai actuel. Le gain FPS reste à tester.
+Voir [les limites et la validation](B136_53_SPRITE_CACHE.md).
+
 ## B136.52 : échange mémoire du tri deck/coffre
 
 La sauvegarde du menu avant combat est arrêtée dans l'échange de deux

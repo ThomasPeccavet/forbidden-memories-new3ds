@@ -51,6 +51,86 @@ static bool overlaps(int x, int y, int w, int h,
     return x <= right && x+w > left && y <= bottom && y+h > top;
 }
 
+/* B136.53: compact decoded sprite cache. Validate source bytes and palette
+ * before each use, including after quick-load, GPU copies and palette writes.
+ * Only opaque raw/neutral paletted sprites: blending and shading remain Unai. */
+struct FMSpriteCache {
+    bool valid, opaque;
+    const uint16_t *vram;
+    uint16_t page, clut, u, v, w, h;
+    uint8_t source[4096];
+    uint16_t palette[256], pixels[4096];
+};
+static FMSpriteCache sprite_cache[128];
+static uint32_t sprite_cache_hits, sprite_cache_misses;
+#ifdef FM_UNAI_REFERENCE_TEST
+static bool reference_sprite;
+#endif
+static bool fm_cached_sprite(uint16_t *ram, const uint32_t *p, uint16_t page,
+    int left, int top, int right, int bottom, int ox, int oy)
+{
+#ifdef FM_UNAI_REFERENCE_TEST
+    if (reference_sprite) return false;
+#endif
+    unsigned op=p[0]>>24, depth=(page>>7)&3;
+    if ((op&2) || depth>1 || (!(op&1) && (p[0]&0xf8f8f8)!=0x808080))
+        return false;
+    unsigned w=p[3]&0xffff, h=p[3]>>16, u=p[2]&255, v=(p[2]>>8)&255;
+    if (!w || !h || w>128 || h>64 || w*h>4096 || u+w>256 || v+h>256)
+        return false;
+    int x=GPU_EXPANDSIGN((int16_t)p[1]+ox);
+    int y=GPU_EXPANDSIGN((int16_t)(p[1]>>16)+oy);
+    int x0=x<left?left:x, y0=y<top?top:y;
+    int x1=x+(int)w-1, y1=y+(int)h-1;
+    if(x1>right)x1=right;
+    if(y1>bottom)y1=bottom;
+    if(x1<x0 || y1<y0) return true;
+    unsigned clut=p[2]>>16, cx=(clut&63)*16, cy=(clut>>6)&511;
+    unsigned tx=(page&15)*64, ty=(page&16)*16;
+    unsigned shift=depth?0:1, first=u>>shift;
+    unsigned bytes=((u+w-1)>>shift)-first+1, colors=depth?256:16;
+    unsigned key=page*2654435761u ^ clut*2246822519u ^ u*3266489917u
+        ^ v*668265263u ^ w*374761393u ^ h*1274126177u;
+    key^=key>>16;
+    FMSpriteCache &c=sprite_cache[key&127];
+    bool hit=c.valid && c.vram==ram && c.page==page && c.clut==clut
+        && c.u==u && c.v==v && c.w==w && c.h==h
+        && !memcmp(c.palette,ram+cy*1024+cx,colors*2);
+    for(unsigned row=0;hit && row<h;++row)
+        hit=!memcmp(c.source+row*bytes,
+            (const uint8_t*)(ram+(ty+v+row)*1024+tx)+first,bytes);
+    if(!hit) {
+        c.valid=false;c.opaque=true;c.vram=ram;c.page=page;c.clut=clut;
+        c.u=u;c.v=v;c.w=w;c.h=h;
+        memcpy(c.palette,ram+cy*1024+cx,colors*2);
+        for(unsigned row=0;row<h;++row) {
+            const uint8_t *src=(const uint8_t*)(ram+(ty+v+row)*1024+tx);
+            memcpy(c.source+row*bytes,src+first,bytes);
+            for(unsigned col=0;col<w;++col) {
+                unsigned index=depth?src[u+col]:
+                    (src[(u+col)>>1]>>(((u+col)&1)*4))&15;
+                c.pixels[row*w+col]=c.palette[index];
+                if(!c.palette[index]) c.opaque=false;
+            }
+        }
+        c.valid=true;++sprite_cache_misses;
+    } else ++sprite_cache_hits;
+    for(int row=y0;row<=y1;++row) {
+        uint16_t *dst=ram+row*1024+x0;
+        const uint16_t *src=c.pixels+(row-y)*w+(x0-x);
+        if(c.opaque) {
+            memcpy(dst,src,(x1-x0+1)*sizeof(uint16_t));
+            continue;
+        }
+        for(int col=x0;col<=x1;++col) {
+            uint16_t pixel=*src++;
+            if(pixel)*dst=pixel;
+            ++dst;
+        }
+    }
+    return true;
+}
+
 extern "C" int fm_unai_draw(uint16_t *vram, const uint32_t *p, unsigned words,
     uint16_t page, uint32_t window, int mask_set, int mask_check,
     int left, int top, int right, int bottom, int ox, int oy)
@@ -106,6 +186,9 @@ extern "C" int fm_unai_draw(uint16_t *vram, const uint32_t *p, unsigned words,
     PtrUnion packet={.ptr=(void*)&gpu_unai.PacketBuffer};
     unsigned idx=gpu_unai.TEXT_MODE | ((op&2) ? gpu_unai.BLEND_MODE|2 : 0);
     if (family==0x64) {
+        if (fm_cached_sprite(vram,p,page,left,top,right,bottom,ox,oy)) {
+            ++sprite_calls; return 1;
+        }
         if (!(op&1) && (p[0]&0xf8f8f8)!=0x808080) idx|=1;
         s32 w=0,h=0;
         gpuDrawS(packet,gpuSpriteDrivers[idx],&w,&h);
@@ -147,4 +230,17 @@ extern "C" int fm_unai_draw_reference(uint16_t *vram, const uint32_t *p,
     reference_gouraud=false;
     return result;
 }
+#endif
+
+#ifdef FM_UNAI_REFERENCE_TEST
+extern "C" int fm_unai_sprite_reference(uint16_t *vram,const uint32_t *p,
+    unsigned words,uint16_t page,int left,int top,int right,int bottom,int ox,int oy)
+{
+    reference_sprite=true;
+    int result=fm_unai_draw(vram,p,words,page,0,0,0,left,top,right,bottom,ox,oy);
+    reference_sprite=false;
+    return result;
+}
+extern "C" void fm_unai_cache_counts(uint32_t *hits,uint32_t *misses)
+{ *hits=sprite_cache_hits;*misses=sprite_cache_misses; }
 #endif
