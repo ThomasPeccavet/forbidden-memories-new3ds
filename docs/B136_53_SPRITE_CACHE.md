@@ -38,3 +38,10 @@ Un benchmark hôte de sprite répété 32×32 a montré environ 1,3–1,4× sur 
 chemin transparent testé. C'est une mesure du dessin sur hôte x86, pas une
 prédiction de FPS 3DS/Azahar. Le gain total du menu reste à tester avec
 `PROFILE=0 UNAI=1` ; aucune garantie de 30 FPS.
+
+Rejeu hôte supplémentaire des 477 sprites extraits de la sauvegarde privée :
+100 passages prennent 16,87 ms sans cache et 8,72 ms avec cache (environ
+1,93×). Toute la VRAM finale est identique. Les sprites hors périmètre
+restent sur Unai ; 17 374 hits et 1 326 misses sont observés. Ce rejeu mesure
+seulement ces commandes de dessin, pas l'exécution du jeu ni ses FPS, et
+n'inclut pas les autres primitives du menu. La sauvegarde n'est pas publiée.
