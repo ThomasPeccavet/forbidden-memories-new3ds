@@ -27,6 +27,13 @@ static int psx_dispatch_game_compiled(CPUState *cpu,uint32_t current){
  if(scenario==2){now+=1;cpu->pc=current+4;return 1;}
  if(scenario==3)return 0;
  if(scenario==4){g_probe_reason=7;g_probe_detail=123;longjmp(g_probe_jmp,1);}
+ if(scenario==5){
+  if(current==0x800408BCu)cpu->pc=0x800418C0u;
+  else if(current==0x800418C0u)cpu->pc=0x80084978u;
+  else if(current==0x80084978u)cpu->pc=0x80042538u;
+  else assert(0);
+  return 1;
+ }
  cpu->pc=current==0x80084018u?0x80084978u:0x80085D98u;
  return 1;
 }
@@ -42,6 +49,18 @@ int main(void){
  assert(!fm_native_object_batch(0x80081AEC));
  assert(!fm_native_object_batch(0x800746B8));
  assert(!fm_native_object_batch(0x80153070));
+ assert(fm_native_render_batch(0x80040350));
+ assert(fm_native_render_batch(0x800418C0));
+ assert(fm_native_render_batch(0x80042508));
+ assert(fm_native_render_batch(0x80042ADC));
+ assert(fm_native_render_batch(0x80042BDC));
+ assert(!fm_native_render_batch(0x8004034C));
+ assert(!fm_native_render_batch(0x80042BE0));
+ assert(!fm_native_batchable(0x80042538));
+ assert(!fm_native_batchable(0x80043CD4));
+ assert(!fm_native_batchable(0x80012CD4));
+ assert(!fm_native_batchable(0x800914A8));
+ assert(!fm_native_batchable(0x80180CF4));
  CPUState cpu={0x80084018};unsigned count;
  scenario=0;FMRuntimeProbeResult r=run(&cpu,64,&count);
  assert(count==2 && calls==2 && cpu.pc==0x80085D98 && r.dispatch_result==1);
@@ -51,6 +70,10 @@ int main(void){
  scenario=3;cpu.pc=0x80084018;r=run(&cpu,64,&count);assert(count==1 && r.dispatch_result==0);
  scenario=4;cpu.pc=0x80084018;r=run(&cpu,64,&count);assert(r.reason==7 && r.detail==123 && !g_probe_armed);
  scenario=0;cpu.pc=0x80085D98;r=run(&cpu,64,&count);assert(count==0 && calls==0);
+ scenario=5;cpu.pc=0x800408BC;r=run(&cpu,64,&count);
+ assert(count==3 && calls==3 && r.reason==FM_STOP_RETURNED && r.pc==0x80042538);
+ /* Re-entering the diagnostic/safety boundary must never execute it. */
+ r=run(&cpu,64,&count);assert(count==0 && calls==0 && r.pc==0x80042538);
  return 0;
 }'''
   with tempfile.TemporaryDirectory() as tmp:

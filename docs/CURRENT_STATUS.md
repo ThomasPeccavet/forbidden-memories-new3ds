@@ -2,6 +2,16 @@
 
 Dernière mise à jour : **9 octobre 2026**.
 
+## B136.46 : chaînage du moteur d'affichage résident
+
+Les blocs 80040350–80042BE0 sont admis dans les lots natifs, avec 80042538
+exclu pour conserver le suivi de vie des paquets de la main. Les petits
+retours de parcours/animation/rendu passent directement au dispatcher natif
+au lieu de refaire tous les contrôles de la boucle principale. La borne de
+2 ms, les sorties HLE, le watchdog, les overlays et VSync restent identiques.
+Cette modification vise un gain réel ; aucun gain de FPS n'est encore mesuré.
+Voir [les frontières et la validation](B136_46_RENDER_BATCH.md).
+
 ## B136.45 : suspendre l'attente de compteur à 80012CD4
 
 La sonde principale rend immédiatement la main lorsque la boucle FR vérifiée

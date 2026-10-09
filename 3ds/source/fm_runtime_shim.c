@@ -931,7 +931,7 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
                 phys < phys4_end;
 
             if (
-                !fm_native_object_batch(current)
+                !fm_native_batchable(current)
                 &&
                 !in_primary
                 &&
