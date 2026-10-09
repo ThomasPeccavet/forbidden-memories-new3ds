@@ -31,7 +31,7 @@ int main(void){
    subprocess.run([str(exe)],check=True)
  def test_scheduler_gates_and_quickload_reset(self):
   s=(ROOT/'3ds/source/main.c').read_text()
-  self.assertIn('&& !g_vsync_wait_active;',s)
+  self.assertIn('&& !g_vsync_wait_active && !g_frame_wait_active;',s)
   self.assertIn('g_b105_work_ms < 16u && !continue_budget',s)
   load=s[s.index('static int fm_b135_quick_load('):s.index('static int fm_b135_quick_load(')+12000]
   self.assertIn('fm_host_clock_reset(&g_ps1_host_clock);',load)

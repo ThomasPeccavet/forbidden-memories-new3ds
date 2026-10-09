@@ -1,3 +1,4 @@
+#include "fm_frame_wait.h"
 #include "fm_native_batch.h"
 #include <3ds.h>
 #include "fm_runtime_shim.h"
@@ -1013,6 +1014,9 @@ const char *fm_runtime_stop_name(
         case FM_STOP_RETURNED:
             return "RETURN";
 
+        case FM_STOP_FRAME_WAIT:
+            return "FRAME WAIT";
+
         case FM_STOP_BUDGET:
             return "WATCHDOG";
 
@@ -1354,6 +1358,12 @@ static void fm_runtime_service_vblank_hle(
  * ============================================================
  */
 
+static CPUState *g_frame_wait_cpu;
+void fm_runtime_frame_wait_scope(CPUState *cpu)
+{
+    g_frame_wait_cpu = cpu;
+}
+
 void psx_check_interrupts_at(
     CPUState *cpu,
     uint32_t resume_pc
@@ -1403,6 +1413,11 @@ void psx_check_interrupts_at(
             resume_pc;
     }
 
+
+    /* VBlank was serviced above. Suspend only the designated main probe. */
+    if (cpu && cpu == g_frame_wait_cpu && cpu == g_probe_cpu
+        && fm_frame_wait_pending(cpu, resume_pc))
+        fm_probe_stop(FM_STOP_FRAME_WAIT, resume_pc);
 
     if (
         g_probe_budget != 0

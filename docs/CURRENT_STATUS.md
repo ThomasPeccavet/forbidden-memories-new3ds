@@ -1,6 +1,16 @@
 # État courant — New Nintendo 3DS
 
-Dernière mise à jour : **8 octobre 2026**.
+Dernière mise à jour : **9 octobre 2026**.
+
+## B136.45 : suspendre l'attente de compteur à 80012CD4
+
+La sonde principale rend immédiatement la main lorsque la boucle FR vérifiée
+attend encore le compteur de frame. Le checkpoint sert d'abord le VBlank
+existant ; la reprise reste à 80012CD4, sans changer la condition ni les
+compteurs. Les sondes de callbacks sont exclues. Le rapport compte les
+suspensions/reprises et mesure toutes les sondes 12CB8/12CD4 dans la fenêtre.
+Unai reste activé avec `UNAI=1`. Le gain de FPS reste à mesurer dans Azahar.
+Voir [la condition et les limites](B136_45_FRAME_WAIT.md).
 
 ## B136.44 : expérience Unai pour les commandes graphiques coûteuses
 

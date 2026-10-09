@@ -50,7 +50,10 @@ typedef enum FMRuntimeStopReason
      * main.c must service it with the verified C HLE before the generated
      * implementation can run.
      */
-    FM_STOP_GSSORTOT_HLE
+    FM_STOP_GSSORTOT_HLE,
+
+    /* Main-thread frame wait; resume the same PC at the next host boundary. */
+    FM_STOP_FRAME_WAIT
 
 } FMRuntimeStopReason;
 
@@ -374,3 +377,6 @@ void fm_runtime_b136_dma4_diag(uint32_t out[4]);
 
 /* Consume an enabled BIOS callback event for a pending root-counter IRQ. */
 int fm_runtime_take_timer_callback(uint32_t *callback);
+
+/* Enable only around a main-thread probe; isolated callbacks stay unchanged. */
+void fm_runtime_frame_wait_scope(CPUState *cpu);

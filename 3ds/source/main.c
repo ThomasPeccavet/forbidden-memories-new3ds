@@ -240,6 +240,13 @@ static uint32_t g_game_log_count = 0;
  *
  * On la synchronise directement sur les VBlank de la boucle 3DS.
  */
+/* B136.45: a host-only wait marker, never serialized into guest state. */
+static int g_frame_wait_active;
+static uint32_t g_frame_wait_stops, g_frame_wait_resumes;
+#if FM_PERF_PROFILE
+static uint32_t g_frame_wait_probe_calls;
+static uint64_t g_frame_wait_probe_us;
+#endif
 static int g_vsync_wait_active = 0;
 static uint32_t g_vsync_wait_until_frame = 0;
 static int32_t g_vsync_wait_mode = 0;
@@ -7047,7 +7054,8 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
     static uint64_t dma_before, payload_before;
     static uint32_t clock_before, skips_before;
     static uint32_t probes_before, chains_before;
-    static uint64_t blocks_before;
+    static uint64_t blocks_before, frame_probe_before;
+    static uint32_t frame_stops_before, frame_resumes_before, frame_calls_before;
     static uint64_t wait_reason_ms[4];
     static uint32_t wait_reason_calls[4];
     static uint32_t mode0_before, modeN_before, immediate_before, completions_before, budget_before;
@@ -7064,6 +7072,8 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         mode0_before=g_b108_vsync_mode0; modeN_before=g_b108_vsync_modeN;
         immediate_before=g_b108_vsync_immediate;
         completions_before=g_b1358_vsync_completions; budget_before=g_b84_budget_yields;
+        frame_probe_before=g_frame_wait_probe_us; frame_calls_before=g_frame_wait_probe_calls;
+        frame_stops_before=g_frame_wait_stops; frame_resumes_before=g_frame_wait_resumes;
         fm_gpu_perf_window_reset();
         return;
     }
@@ -7082,7 +7092,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         /* A single stdio buffer avoids small writes per formatted line. */
         char report_buffer[8192];
         setvbuf(fp, report_buffer, _IOFBF, sizeof(report_buffer));
-        fprintf(fp, "probe=B136.44 window_ms=%llu pc=%08lX script=%04lX\n",
+        fprintf(fp, "probe=B136.45 window_ms=%llu pc=%08lX script=%04lX\n",
             (unsigned long long)elapsed, (unsigned long)(cpu ? cpu->pc : 0u),
             (unsigned long)fm_memory_read_half(0x8009C610u));
         fprintf(fp, "host_fps_x100=%llu new_images_fps_x100=%llu samples=%lu\n",
@@ -7105,6 +7115,12 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
             (unsigned long)(g_b108_vsync_modeN-modeN_before),
             (unsigned long)(g_b108_vsync_immediate-immediate_before),
             (unsigned long)(g_b1358_vsync_completions-completions_before));
+        fprintf(fp, "frame_wait stops=%lu resumes=%lu active=%u target_probes=%lu target_probe_us=%llu\n",
+            (unsigned long)(g_frame_wait_stops-frame_stops_before),
+            (unsigned long)(g_frame_wait_resumes-frame_resumes_before),
+            (unsigned)g_frame_wait_active,
+            (unsigned long)(g_frame_wait_probe_calls-frame_calls_before),
+            (unsigned long long)(g_frame_wait_probe_us-frame_probe_before));
         fprintf(fp, "ps1_clock=wall_60hz ticks=%lu budget_wait_skips=%lu\n",
             (unsigned long)(g_clock_ticks-clock_before),
             (unsigned long)(g_budget_wait_skips-skips_before));
@@ -7191,6 +7207,8 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
     mode0_before=g_b108_vsync_mode0; modeN_before=g_b108_vsync_modeN;
     immediate_before=g_b108_vsync_immediate;
     completions_before=g_b1358_vsync_completions; budget_before=g_b84_budget_yields;
+    frame_probe_before=g_frame_wait_probe_us; frame_calls_before=g_frame_wait_probe_calls;
+    frame_stops_before=g_frame_wait_stops; frame_resumes_before=g_frame_wait_resumes;
     memset(g_b110_prof, 0, sizeof(g_b110_prof));
 }
 #endif
@@ -12031,6 +12049,8 @@ static int fm_b135_quick_load(
      * Un snapshot est pris entre deux tranches host : aucune attente HLE
      * ne doit rester armee apres un redemarrage de l'application.
      */
+    g_frame_wait_active = 0;
+    fm_runtime_frame_wait_scope(NULL);
     g_vsync_wait_active = 0u;
     g_vsync_wait_until_frame = 0u;
     g_b108_vsync_sync_valid = 0u;
@@ -16604,6 +16624,11 @@ int main(void)
                         phys < 0x00058860u
                     );
 
+                fm_runtime_frame_wait_scope(cpu);
+#if FM_PERF_PROFILE
+                int frame_wait_probe = phys == 0x00012CB8u || phys == 0x00012CD4u;
+                uint64_t frame_wait_start = frame_wait_probe ? svcGetSystemTick() : 0u;
+#endif
 #if FM_PERF_PROFILE && defined(NDEBUG)
                 static uint32_t perf_probe_rng = 0x13634u;
                 /* Use upper PRNG bits: periodic dispatch patterns must not
@@ -16710,6 +16735,25 @@ int main(void)
                     b110_profile_probe(dispatch_address, probe.pc, us);
                 }
 #endif
+
+                fm_runtime_frame_wait_scope(NULL);
+#if FM_PERF_PROFILE
+                if (frame_wait_probe) {
+                    ++g_frame_wait_probe_calls;
+                    g_frame_wait_probe_us += (svcGetSystemTick() - frame_wait_start)
+                        / (SYSCLOCK_ARM11 / 1000000u);
+                }
+#endif
+                if (g_frame_wait_active && probe.reason != FM_STOP_FRAME_WAIT) {
+                    g_frame_wait_active = 0;
+                    ++g_frame_wait_resumes;
+                }
+                if (probe.reason == FM_STOP_FRAME_WAIT) {
+                    g_frame_wait_active = 1;
+                    ++g_frame_wait_stops;
+                    static_miss = 0;
+                    break;
+                }
 
                 if (b13514_chain_count != 0u)
                 {
@@ -20573,7 +20617,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.44\nvideo_mode=%08lX\n"
+                            "video_probe=B136.45\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20641,7 +20685,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.44\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.45\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"
@@ -21498,12 +21542,13 @@ int main(void)
              * the next guest slice immediately.
              */
             int continue_budget = g_b84_budget_yields != perf_budget_before_loop
-                && !g_vsync_wait_active;
+                && !g_vsync_wait_active && !g_frame_wait_active;
             if (g_b105_work_ms < 16u && !continue_budget)
             {
 #if FM_PERF_PROFILE
                 g_perf_wait_reason = g_b84_budget_yields != perf_budget_before_loop
-                    ? 0u : g_vsync_wait_active ? 1u : 2u;
+                    ? (g_frame_wait_active ? 1u : 0u)
+                    : (g_vsync_wait_active || g_frame_wait_active) ? 1u : 2u;
 #endif
                 uint64_t b106_wait_start_ms =
                     osGetTime();

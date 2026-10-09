@@ -25,6 +25,9 @@ static __attribute__((unused)) void fm_unai_counts(uint32_t *s,uint32_t *p,uint3
     static unsigned n; ++n; *s=n*3; *p=n*4; *f=n*5;
 }
 static unsigned g_perf_wait_reason;
+static int g_frame_wait_active;
+static uint32_t g_frame_wait_stops,g_frame_wait_resumes,g_frame_wait_probe_calls;
+static uint64_t g_frame_wait_probe_us;
 static uint32_t g_clock_ticks,g_budget_wait_skips,g_native_probe_calls,g_b13514_chain_entries;
 static uint64_t g_b13514_chain_dispatches;
 static uint32_t g_b105_slice_budget_ms=12, g_b84_budget_yields;
@@ -72,6 +75,7 @@ static int report_close(FILE *fp) {
     fm_perf_window(1000,100,12,&cpu);
     for(unsigned i=1;i<=100;++i) {
         g_b84_latch_count=i/5; g_clock_ticks=i*6/5; g_budget_wait_skips=i/4;
+        g_frame_wait_stops=i; g_frame_wait_resumes=i/2; g_frame_wait_probe_calls=i*2; g_frame_wait_probe_us=i*7; g_frame_wait_active=1;
         g_perf_wait_reason=i%4; g_b106_wait_ms= g_perf_wait_reason==3 ? 0 : 2;
         g_b84_budget_yields=i; g_b108_vsync_mode0=i/5; g_b1358_vsync_completions=i/5;
         g_seq_irq_done=i; g_seq_irq_total_ms=i*3;
@@ -97,6 +101,7 @@ static int report_close(FILE *fp) {
     assert(strstr(text,"native_sampling=random_1/64"));
     assert(strstr(text,"gpu0 opcode=30 calls=10 us=1234 max_us=500"));
     assert(gpu_resets==2);
+    assert(strstr(text,"frame_wait stops=100 resumes=50 active=1 target_probes=200 target_probe_us=700"));
     assert(strstr(text,"ps1_clock=wall_60hz ticks=120 budget_wait_skips=25"));
     assert(strstr(text,"wait_reasons budget_ms=50 budget_loops=25 vsync_ms=50 vsync_loops=25 other_ms=50 other_loops=25 no_wait_loops=25"));
     assert(strstr(text,"scheduler budget_ms=12 budget_yields=100 vsync_mode0=20 vsync_modeN=0 vsync_immediate=0 vsync_completed=20"));
