@@ -34,6 +34,62 @@ void gte_write_ctrl(CPUState *c, uint8_t r, uint32_t v)
 #define REVERB 0x1F801D98u
 static unsigned char ram[2 * 1024 * 1024];
 
+static void scratch_fast(void)
+{
+    const uint32_t bases[] = {0x1F800000u, 0x9F800000u, 0xBF800000u};
+    const unsigned offsets[] = {0, 1, 2, 3, 128, 129, 1019, 1020};
+    for (unsigned i = 0; i < 3; ++i) {
+        for (unsigned j = 0; j < sizeof(offsets) / sizeof(offsets[0]); ++j) {
+            unsigned o = offsets[j]; uint32_t address = bases[i] + o;
+            fm_memory_write_word(address, 0x56781234);
+            assert(fm_memory_read_word(address) == 0x56781234);
+            assert(fm_memory_read_word(0x1F800000u + o) == 0x56781234);
+            fm_memory_write_half(address, 0x89AB);
+            assert(fm_memory_read_half(address) == 0x89AB);
+            fm_memory_write_byte(address + 1, 0xCD);
+            assert(fm_memory_read_word(address) == 0x5678CDAB);
+        }
+    }
+    fm_memory_write_half(0xBF8003FE, 0x9876);
+    assert(fm_memory_read_byte(0x9F8003FF) == 0x98);
+    assert(fm_memory_unmapped_count() == 0);
+    /* A wider access crossing the scratchpad boundary must stay invalid. */
+    assert(fm_memory_read_word(0x1F8003FD) == 0);
+    assert(fm_memory_unmapped_count() == 1);
+}
+
+static void interp_ram_fast(void)
+{
+    const uint32_t code[] = {
+        0x3C088001, 0x35082000, /* t0 = 80012000 */
+        0x8D090000, 0,         /* lw t1,0(t0); nop */
+        0x25290001, 0xAD090004, /* addiu t1,1; sw t1,4(t0) */
+        0x950A0002, 0,         /* lhu t2,2(t0); nop */
+        0xA50A0008,            /* sh t2,8(t0) */
+        0x910B0001, 0,         /* lbu t3,1(t0); nop */
+        0xA10B000A,            /* sb t3,10(t0) */
+        0x03E00008, 0          /* jr ra; nop */
+    };
+    for (unsigned shift = 0; shift < 4; ++shift) {
+        fm_memory_init(ram + shift, sizeof ram - shift);
+        fm_interp_bind_ram(ram + shift, sizeof ram - shift);
+        for (unsigned i = 0; i < sizeof code / sizeof code[0]; ++i)
+            fm_memory_write_word(0x80010000u + 4 * i, code[i]);
+        fm_memory_write_word(0x80012000, 0x12345678);
+        CPUState cpu = {0}; cpu.pc = 0x80010000; cpu.gpr[31] = 0x8000FFD0;
+        cpu.read_byte = fm_memory_read_byte; cpu.read_half = fm_memory_read_half;
+        cpu.read_word = fm_memory_read_word; cpu.write_byte = fm_memory_write_byte;
+        cpu.write_half = fm_memory_write_half; cpu.write_word = fm_memory_write_word;
+        FMInterpResult result = fm_interp_run_block(&cpu, 128);
+        assert(result.reason == FM_INTERP_BLOCK_DONE && cpu.pc == 0x8000FFD0);
+        assert(cpu.gpr[9] == 0x12345679 && cpu.gpr[10] == 0x1234 && cpu.gpr[11] == 0x56);
+        assert(fm_memory_read_word(0x80012004) == 0x12345679);
+        assert(fm_memory_read_half(0x80012008) == 0x1234);
+        assert(fm_memory_read_byte(0x8001200A) == 0x56);
+        assert(fm_memory_unmapped_count() == 0);
+    }
+}
+
 static void ram_fast(void)
 {
     const uint32_t aliases[] = {0, 0x00200000u, 0x00400000u,
@@ -272,7 +328,9 @@ int main(int argc, char **argv)
 {
     assert(argc == 2);
     fm_memory_init(ram, sizeof ram);
-    if (!strcmp(argv[1], "ram_fast")) ram_fast();
+    if (!strcmp(argv[1], "scratch_fast")) scratch_fast();
+    else if (!strcmp(argv[1], "interp_ram_fast")) interp_ram_fast();
+    else if (!strcmp(argv[1], "ram_fast")) ram_fast();
     else if (!strcmp(argv[1], "spu_half")) spu_half();
     else if (!strcmp(argv[1], "spu_word")) spu_word();
     else if (!strcmp(argv[1], "reverb_mask")) reverb_mask();

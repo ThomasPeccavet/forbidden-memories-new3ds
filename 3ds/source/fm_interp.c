@@ -1,4 +1,5 @@
 #include "fm_interp.h"
+#include "fm_ram_access.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -134,9 +135,7 @@ static inline uint16_t interp_read_half(
 
     if (interp_ram_offset(addr, 2u, &o))
     {
-        uint16_t value;
-        memcpy(&value, g_interp_ram + o, sizeof(value));
-        return value;
+        return fm_ram_load16(g_interp_ram + o);
     }
 
     return cpu->read_half(addr);
@@ -152,9 +151,7 @@ static inline uint32_t interp_read_word(
 
     if (interp_ram_offset(addr, 4u, &o))
     {
-        uint32_t value;
-        memcpy(&value, g_interp_ram + o, sizeof(value));
-        return value;
+        return fm_ram_load32(g_interp_ram + o);
     }
 
     return cpu->read_word(addr);
@@ -203,7 +200,7 @@ static inline void interp_write_half(
 
     if (interp_ram_offset(addr, 2u, &o))
     {
-        memcpy(g_interp_ram + o, &value, sizeof(value));
+        fm_ram_store16(g_interp_ram + o, value);
         return;
     }
 
@@ -228,7 +225,7 @@ static inline void interp_write_word(
 
     if (interp_ram_offset(addr, 4u, &o))
     {
-        memcpy(g_interp_ram + o, &value, sizeof(value));
+        fm_ram_store32(g_interp_ram + o, value);
         return;
     }
 

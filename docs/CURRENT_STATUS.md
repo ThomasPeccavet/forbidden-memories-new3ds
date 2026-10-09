@@ -2,6 +2,17 @@
 
 Dernière mise à jour : **9 octobre 2026**.
 
+## B136.49 : accès alignés des overlays et du scratchpad
+
+Les mêmes helpers mémoire alignés sont utilisés pour le cœur recompilé et
+l'interpréteur des overlays, y compris la lecture des instructions MIPS.
+Le scratchpad passe avant le décodage MMIO ; les accès byte en RAM aussi.
+Le build d'essai reste `PROFILE=0 UNAI=1`. B136.48 a été jugée nettement
+plus fluide par l'utilisateur (environ 20 FPS estimés) ; cette observation
+combine le mode sans instrumentation et l'optimisation mémoire, sans
+mesurer leur contribution séparément. Le gain B136.49 reste à tester.
+Voir [les chemins et les tests](B136_49_OVERLAY_RAM.md).
+
 ## B136.48 : accès RAM alignés du cœur recompilé
 
 Les callbacks RAM 16/32 bits utilisent une copie alignée lorsque le pointeur

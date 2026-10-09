@@ -1,4 +1,5 @@
 #include "fm_memory.h"
+#include "fm_ram_access.h"
 #include "fm_gpu.h"
 #include "mdec.h"
 #include "fm_media.h"
@@ -134,47 +135,6 @@ static uint8_t *g_ram = NULL;
 static size_t g_ram_size = 0;
 
 static uint8_t g_scratch[PSX_SCRATCH_SIZE];
-
-/* B136.48: RAM callbacks are used by the recompiled core as well as HLE.
- * ARM11 must not perform unaligned LDR/STR: retain byte assembly there.
- * memcpy keeps aliasing valid; assume_aligned is used only after checking
- * the actual host pointer (fm_memory_init accepts arbitrary RAM storage). */
-static inline uint32_t fm_ram_load32(const uint8_t *p)
-{
-    if (((uintptr_t)p & 3u) == 0u) {
-        uint32_t value;
-        memcpy(&value, __builtin_assume_aligned(p, 4), sizeof(value));
-        return value;
-    }
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8)
-        | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-static inline void fm_ram_store32(uint8_t *p, uint32_t value)
-{
-    if (((uintptr_t)p & 3u) == 0u) {
-        memcpy(__builtin_assume_aligned(p, 4), &value, sizeof(value));
-        return;
-    }
-    p[0] = (uint8_t)value; p[1] = (uint8_t)(value >> 8);
-    p[2] = (uint8_t)(value >> 16); p[3] = (uint8_t)(value >> 24);
-}
-static inline uint16_t fm_ram_load16(const uint8_t *p)
-{
-    if (((uintptr_t)p & 1u) == 0u) {
-        uint16_t value;
-        memcpy(&value, __builtin_assume_aligned(p, 2), sizeof(value));
-        return value;
-    }
-    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
-}
-static inline void fm_ram_store16(uint8_t *p, uint16_t value)
-{
-    if (((uintptr_t)p & 1u) == 0u) {
-        memcpy(__builtin_assume_aligned(p, 2), &value, sizeof(value));
-        return;
-    }
-    p[0] = (uint8_t)value; p[1] = (uint8_t)(value >> 8);
-}
 
 
 /*
@@ -3498,9 +3458,6 @@ uint8_t fm_memory_read_byte(
             addr
         );
 
-    if (phys >= PSX_SPU_REVERB_MASK && phys < PSX_SPU_REVERB_MASK + 4u)
-        return (uint8_t)(g_spu_reverb_mask >> ((phys - PSX_SPU_REVERB_MASK) * 8u));
-    if (phys >= 0x1F801800u && phys < 0x1F801804u) return fm_media_cd_read(phys);
     /*
      * ========================================================
      * B92 - hot RAM fast path
@@ -3527,6 +3484,17 @@ uint8_t fm_memory_read_byte(
             return g_ram[offset];
         }
     }
+
+    /* B136.49: scratchpad is plain memory, before MMIO decoding. */
+    if (phys - PSX_SCRATCH_BASE <= PSX_SCRATCH_SIZE - 1u)
+    {
+        return g_scratch[phys - PSX_SCRATCH_BASE];
+    }
+
+    if (phys >= PSX_SPU_REVERB_MASK && phys < PSX_SPU_REVERB_MASK + 4u)
+        return (uint8_t)(g_spu_reverb_mask >> ((phys - PSX_SPU_REVERB_MASK) * 8u));
+    if (phys >= 0x1F801800u && phys < 0x1F801804u) return fm_media_cd_read(phys);
+
 
     /*
      * --------------------------------------------------------
@@ -3687,13 +3655,6 @@ void fm_memory_write_byte(
 
     fm_memory_watch_store(phys, 1u, (uint32_t)value);
 
-    if (phys >= PSX_SPU_REVERB_MASK && phys < PSX_SPU_REVERB_MASK + 4u) {
-        unsigned shift = (phys - PSX_SPU_REVERB_MASK) * 8u;
-        g_spu_reverb_mask = ((g_spu_reverb_mask & ~(0xFFu << shift))
-            | ((uint32_t)value << shift)) & 0x00FFFFFFu;
-        return;
-    }
-    if (phys >= 0x1F801800u && phys < 0x1F801804u) { fm_media_cd_write(phys, value); return; }
     /* B92 - hot RAM fast path. */
     if (
         g_ram
@@ -3712,6 +3673,22 @@ void fm_memory_write_byte(
             return;
         }
     }
+
+    /* B136.49: scratchpad is plain memory, before MMIO decoding. */
+    if (phys - PSX_SCRATCH_BASE <= PSX_SCRATCH_SIZE - 1u)
+    {
+        g_scratch[phys - PSX_SCRATCH_BASE] = value;
+        return;
+    }
+
+    if (phys >= PSX_SPU_REVERB_MASK && phys < PSX_SPU_REVERB_MASK + 4u) {
+        unsigned shift = (phys - PSX_SPU_REVERB_MASK) * 8u;
+        g_spu_reverb_mask = ((g_spu_reverb_mask & ~(0xFFu << shift))
+            | ((uint32_t)value << shift)) & 0x00FFFFFFu;
+        return;
+    }
+    if (phys >= 0x1F801800u && phys < 0x1F801804u) { fm_media_cd_write(phys, value); return; }
+
 
     /*
      * --------------------------------------------------------
@@ -3844,6 +3821,12 @@ uint16_t fm_memory_read_half(
         {
             return fm_ram_load16(g_ram + offset);
         }
+    }
+
+    /* B136.49: scratchpad is plain memory, before MMIO decoding. */
+    if (phys - PSX_SCRATCH_BASE <= PSX_SCRATCH_SIZE - 2u)
+    {
+        return fm_ram_load16(g_scratch + phys - PSX_SCRATCH_BASE);
     }
 
     if (
@@ -4093,6 +4076,13 @@ void fm_memory_write_half(
             fm_ram_store16(g_ram + offset, value);
             return;
         }
+    }
+
+    /* B136.49: scratchpad is plain memory, before MMIO decoding. */
+    if (phys - PSX_SCRATCH_BASE <= PSX_SCRATCH_SIZE - 2u)
+    {
+        fm_ram_store16(g_scratch + phys - PSX_SCRATCH_BASE, value);
+        return;
     }
 
     /* Psy-Q programs these 16-bit registers with SH, not only SW. */
@@ -4402,6 +4392,12 @@ uint32_t fm_memory_read_word(
         }
     }
 
+    /* B136.49: scratchpad is plain memory, before MMIO decoding. */
+    if (phys - PSX_SCRATCH_BASE <= PSX_SCRATCH_SIZE - 4u)
+    {
+        return fm_ram_load32(g_scratch + phys - PSX_SCRATCH_BASE);
+    }
+
     if (phys == 0x1F801820u || phys == 0x1F801824u) {
         uint32_t result = mdec_read(phys); fm_mdec_dma_service(); return result;
     }
@@ -4706,6 +4702,13 @@ void fm_memory_write_word(
             fm_ram_store32(g_ram + offset, value);
             return;
         }
+    }
+
+    /* B136.49: scratchpad is plain memory, before MMIO decoding. */
+    if (phys - PSX_SCRATCH_BASE <= PSX_SCRATCH_SIZE - 4u)
+    {
+        fm_ram_store32(g_scratch + phys - PSX_SCRATCH_BASE, value);
+        return;
     }
 
     if (phys == 0x1F801820u || phys == 0x1F801824u) {
