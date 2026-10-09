@@ -2,6 +2,16 @@
 
 Dernière mise à jour : **9 octobre 2026**.
 
+## B136.52 : échange mémoire du tri deck/coffre
+
+La sauvegarde du menu avant combat est arrêtée dans l'échange de deux
+enregistrements de 16 octets, au treizième octet. Le helper reconnu est
+remplacé par un échange RAM borné, avec reprise au milieu de la boucle.
+Le tri et son comparateur restent inchangés. 69 tests passent, et la RAM
+ainsi que les registres de cette sauvegarde correspondent exactement à
+l'exécution MIPS de référence après l'échange. Le gain FPS reste à tester.
+Voir [le périmètre et la validation](B136_52_SORT_SWAP.md).
+
 ## B136.51 : RAM directe dans les copies du cœur recompilé
 
 B136.50 n'a pas apporté de gain visible, ou seulement un gain faible selon

@@ -1,5 +1,6 @@
 #include "fm_memory.h"
 #include "fm_native_memory.h"
+#include "fm_sort_swap.h"
 #include "fm_gpu.h"
 #include "fm_interp.h"
 #include <assert.h>
@@ -123,6 +124,78 @@ static void native_ram_fast(void)
     assert(fm_memory_read_word(4)==0x12345678);
     fm_memory_init(NULL,0);
     assert(!fm_native_ram_ptr(0,1));
+}
+
+
+static void sort_swap(void)
+{
+    static const uint32_t mips[]={
+        0x00804021,0x00a04821,0x10c0000a,0x00003821,0x01071821,
+        0x01272021,0x90650000,0x90820000,0x24e70001,0xa0620000,
+        0x00e6102b,0x1440fff8,0xa0850000,0x03e00008,0x00000000
+    };
+    static unsigned char expected_ram[sizeof ram];
+    fm_memory_init(ram,sizeof ram); fm_interp_bind_ram(ram,sizeof ram);
+    memcpy(ram+0x8f6c8,mips,sizeof mips);
+    CPUState initial={0};
+    initial.read_word=fm_memory_read_word; initial.read_half=fm_memory_read_half;
+    initial.read_byte=fm_memory_read_byte; initial.write_word=fm_memory_write_word;
+    initial.write_half=fm_memory_write_half; initial.write_byte=fm_memory_write_byte;
+    for(unsigned r=1;r<32;++r) initial.gpr[r]=0x12345600+r;
+    initial.gpr[31]=0x80015000;
+    const unsigned sizes[]={0,1,2,4,16,32,63,128,256};
+    for(unsigned shift=0;shift<4;++shift) for(unsigned ni=0;ni<9;++ni)
+        for(unsigned resumed=0;resumed<2;++resumed) {
+        unsigned n=sizes[ni]; if(resumed && !n) continue;
+        unsigned start=resumed ? (n==16 ? 13 : n/2) : 0;
+        CPUState cpu=initial;
+        cpu.pc=resumed ? 0x8008f6d8 : 0x8008f6c8;
+        cpu.gpr[6]=n; cpu.gpr[7]=start;
+        cpu.gpr[4]=0x80010000+shift; cpu.gpr[5]=0xa0012000+shift;
+        if(resumed) { cpu.gpr[8]=cpu.gpr[4]; cpu.gpr[9]=cpu.gpr[5];
+            cpu.gpr[4]=cpu.gpr[9]+start-1; cpu.gpr[5]=0x3f; }
+        for(unsigned o=0;o<260;++o) {
+            ram[0x10000+o]=(unsigned char)(o*17+3);
+            ram[0x12000+o]=(unsigned char)(o*5+97);
+        }
+        CPUState expected=cpu;
+        for(unsigned step=0;expected.pc!=expected.gpr[31];++step) {
+            assert(step<1024);
+            FMInterpResult result=fm_interp_run_block(&expected,32);
+            assert(result.reason==FM_INTERP_BLOCK_DONE);
+        }
+        memcpy(expected_ram,ram,sizeof ram);
+        for(unsigned o=0;o<260;++o) {
+            ram[0x10000+o]=(unsigned char)(o*17+3);
+            ram[0x12000+o]=(unsigned char)(o*5+97);
+        }
+#ifdef PSX_ENABLE_BLOCK_CYCLES
+        CPUState unchanged=cpu;
+        assert(!fm_sort_swap_try(&cpu,cpu.pc&0x1fffffff));
+        assert(!memcmp(&cpu,&unchanged,sizeof cpu));
+#else
+        assert(fm_sort_swap_try(&cpu,cpu.pc&0x1fffffff));
+        assert(!memcmp(&cpu,&expected,sizeof cpu));
+        assert(!memcmp(ram,expected_ram,sizeof ram));
+#endif
+    }
+    /* Fallbacks are transactional: no register or memory mutation. */
+    for(unsigned guard=0;guard<6;++guard) {
+        CPUState cpu=initial;
+        cpu.pc=0x8008f6c8; cpu.gpr[4]=0x80010000; cpu.gpr[5]=0x80012000;
+        cpu.gpr[6]=16;
+        if(guard==0)cpu.gpr[5]=0xa0010004; /* mirrored overlap */
+        if(guard==1)cpu.gpr[4]=0x801ffff8; /* incomplete RAM span */
+        if(guard==2)cpu.gpr[4]=0x800eb248; /* write watch */
+        if(guard==3)cpu.gpr[6]=257; /* bound */
+        if(guard==4)cpu.write_byte=NULL; /* replacement callback */
+        if(guard==5)ram[0x8f6c8]^=1; /* modified implementation */
+        CPUState before=cpu; memcpy(expected_ram,ram,sizeof ram);
+        assert(!fm_sort_swap_try(&cpu,0x8f6c8));
+        assert(!memcmp(&cpu,&before,sizeof cpu));
+        assert(!memcmp(ram,expected_ram,sizeof ram));
+        if(guard==5)ram[0x8f6c8]^=1;
+    }
 }
 
 static void scratch_fast(void)
@@ -419,7 +492,8 @@ int main(int argc, char **argv)
 {
     assert(argc == 2);
     fm_memory_init(ram, sizeof ram);
-    if (!strcmp(argv[1], "native_ram_fast")) native_ram_fast();
+    if (!strcmp(argv[1], "sort_swap")) sort_swap();
+    else if (!strcmp(argv[1], "native_ram_fast")) native_ram_fast();
     else if (!strcmp(argv[1], "scratch_fast")) scratch_fast();
     else if (!strcmp(argv[1], "interp_ram_fast")) interp_ram_fast();
     else if (!strcmp(argv[1], "ram_fast")) ram_fast();

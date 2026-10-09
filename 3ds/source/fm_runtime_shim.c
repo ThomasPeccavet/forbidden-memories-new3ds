@@ -1,5 +1,6 @@
 #include "fm_frame_wait.h"
 #include "fm_native_batch.h"
+#include "fm_sort_swap.h"
 #include <3ds.h>
 #include "fm_runtime_shim.h"
 #include "fm_memory.h"
@@ -1403,6 +1404,15 @@ void psx_check_interrupts_at(
         return;
     }
 
+
+    /* B136.52: handle both nested calls and restored loop checkpoints.
+     * Keep the qsort/comparator and the normal VBlank service above. */
+    uint32_t swap_phys=resume_pc & 0x1fffffffu;
+    if ((swap_phys==0x8f6c8u || swap_phys==0x8f6d8u)
+        && fm_sort_swap_try(cpu,swap_phys)) {
+        fm_probe_stop(FM_STOP_BUDGET,cpu->pc);
+        return;
+    }
 
     ++g_probe_checks;
 

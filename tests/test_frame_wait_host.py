@@ -46,6 +46,13 @@ static void fm_runtime_service_vblank_hle(CPUState *cpu) {
     if(pending_vblank){done=target;pending_vblank=0;}
 }
 static void b13570_sample_slot1(CPUState *cpu,unsigned a,unsigned b) {(void)cpu;(void)a;(void)b;}
+static int swap_enabled;
+static unsigned swap_calls;
+static int fm_sort_swap_try(CPUState *cpu,uint32_t phys) {
+    assert(phys==0x8f6c8 || phys==0x8f6d8); ++swap_calls;
+    if(!swap_enabled)return 0;
+    cpu->pc=cpu->gpr[31];return 1;
+}
 ''' + checkpoint + r'''
 static int psx_dispatch_game_compiled(CPUState *cpu,uint32_t addr) {
     (void)addr;psx_check_interrupts_at(cpu,0x80012CD4);
@@ -90,6 +97,13 @@ int main(void) {
     pending_vblank=1;r=fm_runtime_probe(&cpu,cpu.pc,100);
     assert(r.reason==FM_STOP_RETURNED && r.pc==0x80012CEC && done==target);
     assert(!g_probe_armed && !g_probe_cpu);
+    /* Swap completion uses the same nested-probe escape and retains RA. */
+    use_probe=0;g_probe_armed=1;g_probe_budget=0;swap_enabled=1;
+    cpu.gpr[31]=0x8008F64C;unsigned old_checks=g_probe_checks, old_services=services;
+    check(&cpu,0x8008F6D8);
+    assert(swap_calls==1 && stopped==FM_STOP_BUDGET);
+    assert(stop_pc==0x8008F64C && cpu.pc==stop_pc);
+    assert(g_probe_checks==old_checks && services==old_services+1);
     return 0;
 }
 '''
