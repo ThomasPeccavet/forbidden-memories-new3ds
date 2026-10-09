@@ -2,6 +2,17 @@
 
 Dernière mise à jour : **9 octobre 2026**.
 
+## B136.50 : polygones texturés de couleur constante
+
+B136.49 n'a pas apporté de gain perceptible selon l'utilisateur. La suite
+cible Unai : les polygones GT dont tous les sommets ont exactement le même
+RGB passent par le rendu à couleur constante, avec le format de paquet GT.
+La sauvegarde de duel contient 54 polygones constants sur les 88 GT trouvés
+dans les quatre listes OT parcourues ; ce compte n'est pas une mesure de temps.
+Les vrais dégradés conservent le chemin Gouraud. Le build reste PROFILE=0
+UNAI=1 ; le gain FPS doit être confirmé en jeu.
+Voir [l'équivalence et les limites](B136_50_CONSTANT_GOURAUD.md).
+
 ## B136.49 : accès alignés des overlays et du scratchpad
 
 Les mêmes helpers mémoire alignés sont utilisés pour le cœur recompilé et

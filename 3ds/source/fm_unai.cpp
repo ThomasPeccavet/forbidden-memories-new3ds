@@ -31,6 +31,18 @@ static_assert(offsetof(gpu_unai_inner_t,gCol)==0x28,"Unai ARM Gouraud ABI");
 static_assert(offsetof(gpu_unai_inner_t,PixelData)==0x38,"Unai ARM pixel ABI");
 #endif
 
+/* B136.50: a constant vertex color does not require Gouraud interpolation. */
+static bool fm_unai_constant_color(const uint32_t *p, unsigned vertices)
+{
+    uint32_t color = p[0] & 0xffffffu;
+    for (unsigned i = 1; i < vertices; ++i)
+        if ((p[3*i] & 0xffffffu) != color) return false;
+    return true;
+}
+#ifdef FM_UNAI_REFERENCE_TEST
+static bool reference_gouraud;
+#endif
+
 static bool initialized;
 static uint32_t sprite_calls, polygon_calls, fallbacks;
 static bool overlaps(int x, int y, int w, int h,
@@ -99,10 +111,20 @@ extern "C" int fm_unai_draw(uint16_t *vram, const uint32_t *p, unsigned words,
         gpuDrawS(packet,gpuSpriteDrivers[idx],&w,&h);
         ++sprite_calls;
     } else {
-        if (!(op&1)) {
+        bool constant = fm_unai_constant_color(p, family==0x3c ? 4u : 3u);
+        /* Keep the existing ARM Gouraud driver for additive 4bpp:
+         * Unai has no corresponding flat-lit assembly span (0x2b). */
+        if (depth==0 && (op&2) && ((page>>5)&3)==1) constant=false;
+#ifdef FM_UNAI_REFERENCE_TEST
+        if (reference_gouraud) constant=false;
+#endif
+        if (!(op&1) && !constant) {
             idx|=129; // CF_LIGHT | CF_GOURAUD
             gpuDrawPolyGT(packet,gpuPolySpanDrivers[idx],family==0x3c);
-        } else gpuDrawPolyFT(packet,gpuPolySpanDrivers[idx],family==0x3c,POLYTYPE_GT);
+        } else {
+            if (!(op&1) && (p[0]&0xffffffu)!=0x808080u) idx|=1;
+            gpuDrawPolyFT(packet,gpuPolySpanDrivers[idx],family==0x3c,POLYTYPE_GT);
+        }
         ++polygon_calls;
     }
     return 1;
@@ -112,3 +134,17 @@ extern "C" void fm_unai_counts(uint32_t *s, uint32_t *p, uint32_t *f)
 {
     *s=sprite_calls; *p=polygon_calls; *f=fallbacks;
 }
+
+#ifdef FM_UNAI_REFERENCE_TEST
+/* Test-only entry: execute the previous Gouraud path on the same backend. */
+extern "C" int fm_unai_draw_reference(uint16_t *vram, const uint32_t *p,
+    unsigned words, uint16_t page, uint32_t window, int mask_set, int mask_check,
+    int left, int top, int right, int bottom, int ox, int oy)
+{
+    reference_gouraud=true;
+    int result=fm_unai_draw(vram,p,words,page,window,mask_set,mask_check,
+        left,top,right,bottom,ox,oy);
+    reference_gouraud=false;
+    return result;
+}
+#endif

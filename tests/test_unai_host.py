@@ -30,6 +30,8 @@ class UnaiHostTests(unittest.TestCase):
 #include <assert.h>
 #include "fm_unai.h"
 static uint16_t ram[524288],initial[524288],expected[524288],restored[524288];
+extern int fm_unai_draw_reference(uint16_t*,const uint32_t*,unsigned,uint16_t,
+ uint32_t,int,int,int,int,int,int,int,int);
 static uint16_t *g_vram=ram;
 static int sw_renderer_scale(void){return 1;}
 static int sw_wide_width(void){return 0;}
@@ -63,6 +65,35 @@ int main(int argc,char **argv){(void)argv;
       RGB555 and every untouched pixel must otherwise match exactly. */
    assert((ram[j]&0x7fff)==(expected[j]&0x7fff));
    if(j/1024>255 || j%1024>319) assert(ram[j]==initial[j]);
+  }
+ }
+ /* Exact comparison against the previous Gouraud path, not against a
+    different rasterizer. Include neutral/modulated, transparency, clipping,
+    all texture depths and negative/large texture gradients. */
+ for(unsigned i=0;i<240;++i){
+  unsigned quad=i&1, depth=i%3, vertices=quad?4:3;
+  uint16_t pg=10|16|(depth<<7)|(((i/3)%4)<<5);
+  unsigned op=(quad?0x3c:0x34)|(i%4>=2?2:0);
+  uint32_t color=i%5==0?0x808080:(rnd()&0xffffff);
+  uint32_t q[12]={0}; unsigned cl=(300<<6)|32;
+  int x=(int)(rnd()%300)-20,y=(int)(rnd()%230)-20;
+  int w=2+rnd()%140,h=2+rnd()%110;
+  for(unsigned j=0;j<vertices;++j){
+   q[j*3]=color;
+   q[j*3+1]=xy(x+((j&1)?w:0)+(int)(rnd()%23)-11,
+    y+((j&2)?h:0)+(int)(rnd()%23)-11);
+   q[j*3+2]=rnd()&0xffff;
+  }
+  q[0]|=op<<24;q[2]|=cl<<16;q[5]|=(uint32_t)pg<<16;
+  if(i%11==0) q[(vertices-1)*3]^=1; // genuine gradient stays on original path
+  memcpy(ram,initial,sizeof(ram));
+  int a=fm_unai_draw_reference(ram,q,vertices*3,pg,0,0,0,0,0,319,255,0,0);
+  memcpy(expected,ram,sizeof(ram));memcpy(ram,initial,sizeof(ram));
+  int b=draw(q,vertices*3,pg);
+  assert(a==b && a==1);
+  if(memcmp(ram,expected,sizeof(ram))){
+   fprintf(stderr,"constant Gouraud mismatch case=%u op=%02x depth=%u color=%06x\n",i,op,depth,color);
+   assert(0);
   }
  }
  /* Every rejected case must leave all VRAM unchanged. */
@@ -102,6 +133,16 @@ int main(int argc,char **argv){(void)argv;
  if(argc>1){
   memcpy(ram,initial,sizeof(ram));
   for(unsigned depth=0;depth<3;++depth){
+   uint16_t pg=10|16|(depth<<7);unsigned cl=(300<<6)|32;
+   uint32_t cq[]={0x3c888888,xy(0,0),cl<<16,0x888888,xy(128,0),(uint32_t)pg<<16|127,
+    0x888888,xy(0,128),127<<8,0x888888,xy(128,128),127<<8|127};
+   clock_t a=clock();for(unsigned n=0;n<500;++n)
+    fm_unai_draw_reference(ram,cq,12,pg,0,0,0,0,0,319,255,0,0);
+   clock_t b=clock();for(unsigned n=0;n<500;++n)draw(cq,12,pg);
+   clock_t c=clock();printf("constant Gouraud depth=%u reference_ms=%.2f specialized_ms=%.2f ratio=%.2f\n",
+    depth,(b-a)*1000.0/CLOCKS_PER_SEC,(c-b)*1000.0/CLOCKS_PER_SEC,(double)(b-a)/(c-b));
+  }
+  for(unsigned depth=0;depth<3;++depth){
    uint16_t pg=10|16|(depth<<7);
    uint32_t sp[]={0x64c09060,0,((300<<6)|32)<<16,xy(200,100)};
    clock_t a=clock();for(unsigned n=0;n<500;++n)b124_try_textured_rect(0x64,0,0,200,100,0,0,512,300,pg,0xc09060,0);
@@ -126,6 +167,6 @@ int main(int argc,char **argv){(void)argv;
   with tempfile.TemporaryDirectory() as tmp:
    p=Path(tmp)/'harness.c';p.write_text(code);obj=Path(tmp)/'harness.o';exe=Path(tmp)/'unai'
    subprocess.run(['cc','-O2','-DFM_PERF_PROFILE=0','-I'+str(ROOT/'3ds/include'),'-c',str(p),'-o',str(obj)],check=True)
-   subprocess.run(['g++','-O3','-DNDEBUG','-std=gnu++11','-fno-strict-aliasing',
+   subprocess.run(['g++','-O3','-DNDEBUG','-DFM_UNAI_REFERENCE_TEST=1','-std=gnu++11','-fno-strict-aliasing',
     '-I'+str(ROOT/'3ds/include'),'-I'+str(ROOT/'3ds/source/unai'),str(ROOT/'3ds/source/fm_unai.cpp'),str(obj),'-o',str(exe)],check=True)
    subprocess.run([str(exe)]+(['bench'] if os.getenv('FM_GPU_HOST_BENCHMARK') else []),check=True)
