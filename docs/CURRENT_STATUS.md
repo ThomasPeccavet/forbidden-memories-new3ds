@@ -2,6 +2,16 @@
 
 Dernière mise à jour : **9 octobre 2026**.
 
+## B136.47 : secteurs ignorés lors du chargement des miniatures
+
+Le curseur CD avance désormais à chaque événement DataReady, même lorsque
+le callback du jeu saute un secteur sans appeler CdGetSector. Le transfert
+utilise le LBA réservé pour cet événement et ne l'avance pas une seconde fois.
+Cela corrige la sélection des images dans le cache compact des cartes.
+Une ancienne quickstate conserve les images erronées : tester avec un duel
+rechargé depuis le jeu, ou une nouvelle partie, sans restaurer cet ancien cache.
+Voir [la cause et la validation](B136_47_CARD_THUMBNAILS.md).
+
 ## B136.46 : chaînage du moteur d'affichage résident
 
 Les blocs 80040350–80042BE0 sont admis dans les lots natifs, avec 80042538

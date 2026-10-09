@@ -766,6 +766,28 @@ static uint32_t g_b57_last_remaining = 0u;
 static uint32_t g_b57_resets = 0u;
 static uint32_t g_b57_read_index = 0u;
 
+/* B136.47: the drive consumes every DataReady sector, even when the
+ * guest's 0x200000 skip flag suppresses CdGetSector. Thumbnail callback
+ * 800246A8 uses that flag to select sparse card IDs from a contiguous file. */
+static uint32_t fm_cd_begin_dataready_sector(
+    uint32_t req, uint32_t base_lba, uint32_t remaining)
+{
+    if (g_b57_req != req || g_b57_base_lba != base_lba
+        || remaining >= g_b57_last_remaining)
+    {
+        g_b57_req = req;
+        g_b57_base_lba = base_lba;
+        g_b57_next_lba = base_lba;
+        g_b57_read_index = 0u;
+        ++g_b57_resets;
+    }
+    uint32_t lba = g_b57_next_lba++;
+    g_b57_last_remaining = remaining;
+    ++g_b57_read_index;
+    g_cd_lba = g_b57_next_lba;
+    return lba;
+}
+
 /* B136.2 - generation trace for DAT_800EB1B8. */
 static uint32_t g_b136_reqgen_count = 0u;
 static uint32_t g_b136_reqgen_ra = 0u;
@@ -1207,6 +1229,7 @@ static uint32_t g_b34_ready_started = 0;
 static uint32_t g_b34_ready_done = 0;
 static uint32_t g_b34_ready_arm_frame = 0;
 static uint32_t g_b34_ready_req = 0;
+static uint32_t g_b34_ready_lba = 0;
 static uint32_t g_b34_ready_before = 0;
 static uint32_t g_b34_ready_after = 0;
 
@@ -7092,7 +7115,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         /* A single stdio buffer avoids small writes per formatted line. */
         char report_buffer[8192];
         setvbuf(fp, report_buffer, _IOFBF, sizeof(report_buffer));
-        fprintf(fp, "probe=B136.46 window_ms=%llu pc=%08lX script=%04lX\n",
+        fprintf(fp, "probe=B136.47 window_ms=%llu pc=%08lX script=%04lX\n",
             (unsigned long long)elapsed, (unsigned long)(cpu ? cpu->pc : 0u),
             (unsigned long)fm_memory_read_half(0x8009C610u));
         fprintf(fp, "host_fps_x100=%llu new_images_fps_x100=%llu samples=%lu\n",
@@ -13979,6 +14002,8 @@ int main(void)
 
                     if ((int32_t)remaining > 0)
                     {
+                        g_b34_ready_lba = fm_cd_begin_dataready_sector(
+                            req, cpu->read_word(req + 0x24u), remaining);
                         g_b34_ready_pending = 0u;
                         g_b34_ready_active = 1u;
                         g_b34_ready_resume = dispatch_address;
@@ -14959,7 +14984,10 @@ int main(void)
                             )
                         );
 
-                    if (new_request)
+                    int dataready_sector = g_b34_ready_active
+                        && req == g_b34_ready_req;
+
+                    if (!dataready_sector && new_request)
                     {
                         g_b57_req = req;
                         g_b57_base_lba = base_lba;
@@ -14968,8 +14996,8 @@ int main(void)
                         ++g_b57_resets;
                     }
 
-                    uint32_t lba =
-                        g_b57_next_lba;
+                    uint32_t lba = dataready_sector
+                        ? g_b34_ready_lba : g_b57_next_lba;
 
                     ++g_b32_getsec_calls;
                     ++g_b56_stream_reads;
@@ -15042,10 +15070,14 @@ int main(void)
 
                         /*
                          * Une CdlDataReady consomme exactement le secteur
-                         * courant. Avancer le curseur de CETTE requete.
+                         * courant. DataReady a deja reserve et avance son
+                         * LBA ; les appels hors callback l'avancent ici.
                          */
-                        ++g_b57_next_lba;
-                        ++g_b57_read_index;
+                        if (!dataready_sector)
+                        {
+                            ++g_b57_next_lba;
+                            ++g_b57_read_index;
+                        }
 
                         /*
                          * Garder g_cd_lba coherent pour CdlGetlocL et les
@@ -15067,8 +15099,8 @@ int main(void)
                         cpu->gpr[2] = 0u;
                     }
 
-                    g_b57_last_remaining =
-                        remaining;
+                    if (!dataready_sector)
+                        g_b57_last_remaining = remaining;
 
                     cpu->pc = cpu->gpr[31];
                     cpu->gpr[0] = 0u;
@@ -20617,7 +20649,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.46\nvideo_mode=%08lX\n"
+                            "video_probe=B136.47\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20685,7 +20717,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.46\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.47\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"
