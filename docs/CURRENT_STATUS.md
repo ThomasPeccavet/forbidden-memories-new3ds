@@ -2,6 +2,16 @@
 
 Dernière mise à jour : **9 octobre 2026**.
 
+## Audit temporel après B136.53 — aucune modification des horloges
+
+B136.53 n'a pas changé la fluidité selon l'utilisateur. L'audit reproduit
+une perte de ticks après les tranches longues (plafond de quatre) et relève
+la fusion des échéances Timer2 à une cadence de service 60 Hz. Le mode PAL
+est actif dans la sauvegarde, avec un modèle VBlank/HSync mixte. VSync(0)
+attend également le prochain VBlank dans le code original : ce n'est pas
+en soi une attente incorrecte. Aucun B136.54 n'est publié.
+Voir [preuves, limites et priorités](B136_53_TIMING_AUDIT.md).
+
 ## B136.53 : cache compact des sprites neutres Unai
 
 B136.52 n'a apporté aucun gain perceptible dans le menu deck/coffre.
