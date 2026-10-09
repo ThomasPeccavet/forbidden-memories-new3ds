@@ -8,3 +8,14 @@ int fm_audio_ready(void);
 int fm_audio_push(const int16_t *pcm, unsigned frames, unsigned rate);
 int32_t fm_audio_status(void);
 uint32_t fm_audio_queued(void);
+
+#define FM_AUDIO_SNAPSHOT_BUFFERS 16u
+#define FM_AUDIO_SNAPSHOT_FRAMES 4032u
+typedef struct FMAudioSnapshot {
+    uint32_t count, rate, frames[FM_AUDIO_SNAPSHOT_BUFFERS];
+    int16_t pcm[FM_AUDIO_SNAPSHOT_BUFFERS][FM_AUDIO_SNAPSHOT_FRAMES * 2u];
+} FMAudioSnapshot;
+/* Pause the DSP before capture. The playing buffer resumes from its start. */
+void fm_audio_snapshot_save(FMAudioSnapshot *out);
+int fm_audio_snapshot_valid(const FMAudioSnapshot *in);
+void fm_audio_snapshot_load(const FMAudioSnapshot *in);

@@ -49,6 +49,9 @@ class MediaHostTests(unittest.TestCase):
     def test_mdec_input_output_dma_and_rgb_depths(self):
         self.run_case("mdec")
 
+    def test_snapshot_replay_and_transactional_decoder_failure(self):
+        self.run_case("snapshot")
+
     def make_disc(self):
         image = Path(self.temp.name) / "synthetic-disc.bin"
         def raw_sector():

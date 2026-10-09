@@ -1151,6 +1151,7 @@ void mdec_snapshot_write(uint8_t *p) {
 }
 
 int mdec_snapshot_read(const uint8_t *p, uint32_t len) {
+    MDECState staged = {0};
     PstR r;
     uint32_t ver = 0, input_count = 0, output_size = 0, reserved;
     uint64_t age = 1000ull;
@@ -1158,57 +1159,68 @@ int mdec_snapshot_read(const uint8_t *p, uint32_t len) {
     if (!p || len < mdec_snap_fixed_bytes()) return 0;
     pst_r_init(&r, p, len);
     if (!pst_r_u32(&r, &ver) || ver != MDEC_SNAP_VER) return 0;
-    if (!pst_r_u32(&r, &mdec.command) ||
-        !pst_r_u32(&r, &mdec.expected_halfwords) ||
-        !pst_r_u32(&r, &mdec.last_status) ||
-        !pst_r_u32(&r, &mdec.decode_macroblocks) ||
-        !pst_r_u32(&r, &mdec.decode_blocks) ||
-        !pst_r_u32(&r, &mdec.decode_stop_reason) ||
-        !pst_r_u32(&r, &mdec.decode_input_pos) ||
-        !pst_r_u32(&r, &mdec.decode_input_end) ||
-        !pst_r_u32(&r, &mdec.dma_in_words) ||
-        !pst_r_u32(&r, &mdec.dma_out_words) ||
-        !pst_r_u32(&r, &mdec.dma_read_underflows) ||
-        !pst_r_u32(&r, &mdec.output_pos) ||
+    if (!pst_r_u32(&r, &staged.command) ||
+        !pst_r_u32(&r, &staged.expected_halfwords) ||
+        !pst_r_u32(&r, &staged.last_status) ||
+        !pst_r_u32(&r, &staged.decode_macroblocks) ||
+        !pst_r_u32(&r, &staged.decode_blocks) ||
+        !pst_r_u32(&r, &staged.decode_stop_reason) ||
+        !pst_r_u32(&r, &staged.decode_input_pos) ||
+        !pst_r_u32(&r, &staged.decode_input_end) ||
+        !pst_r_u32(&r, &staged.dma_in_words) ||
+        !pst_r_u32(&r, &staged.dma_out_words) ||
+        !pst_r_u32(&r, &staged.dma_read_underflows) ||
+        !pst_r_u32(&r, &staged.output_pos) ||
         !pst_r_u32(&r, &reserved) ||
         !pst_r_u32(&r, &reserved))
         return 0;
-    if (!pst_r_u8(&r, &mdec.output_bit15) ||
-        !pst_r_u8(&r, &mdec.output_signed) ||
-        !pst_r_u8(&r, &mdec.output_depth) ||
-        !pst_r_u8(&r, &mdec.current_block) ||
-        !pst_r_u8(&r, &mdec.busy) ||
-        !pst_r_u8(&r, &mdec.input_full) ||
-        !pst_r_u8(&r, &mdec.enable_dma_in) ||
-        !pst_r_u8(&r, &mdec.enable_dma_out))
+    if (!pst_r_u8(&r, &staged.output_bit15) ||
+        !pst_r_u8(&r, &staged.output_signed) ||
+        !pst_r_u8(&r, &staged.output_depth) ||
+        !pst_r_u8(&r, &staged.current_block) ||
+        !pst_r_u8(&r, &staged.busy) ||
+        !pst_r_u8(&r, &staged.input_full) ||
+        !pst_r_u8(&r, &staged.enable_dma_in) ||
+        !pst_r_u8(&r, &staged.enable_dma_out))
         return 0;
-    if (!pst_r_bytes(&r, mdec.y_quant, 64u) ||
-        !pst_r_bytes(&r, mdec.uv_quant, 64u))
+    if (!pst_r_bytes(&r, staged.y_quant, 64u) ||
+        !pst_r_bytes(&r, staged.uv_quant, 64u))
         return 0;
     for (int i = 0; i < 64; i++) {
         if (!pst_r_i16(&r, &s16)) return 0;
-        mdec.scale[i] = s16;
+        staged.scale[i] = s16;
     }
     if (!pst_r_u32(&r, &input_count) || !pst_r_u32(&r, &output_size) ||
         !pst_r_u64(&r, &age))
         return 0;
     if (input_count > MDEC_SNAP_INPUT_MAX || output_size > MDEC_SNAP_OUTPUT_MAX)
         return 0;
-    if (mdec.output_pos > output_size) return 0;
-    if ((size_t)(r.end - r.p) <
+    if (staged.output_pos > output_size) return 0;
+    if ((size_t)(r.end - r.p) !=
         (size_t)input_count * 2u + (size_t)output_size)
         return 0;
-    if (!ensure_input_capacity(input_count ? input_count : 1u)) return 0;
-    if (!ensure_output_capacity(output_size ? output_size : 1u)) return 0;
-    mdec.input_count = input_count;
-    mdec.output_size = output_size;
+    if (staged.output_bit15 > 1 || staged.output_signed > 1
+        || staged.output_depth > 3 || staged.current_block > 5
+        || staged.busy > 1 || staged.input_full > 1
+        || staged.enable_dma_in > 1 || staged.enable_dma_out > 1) return 0;
+    staged.input_cap = input_count ? input_count : 1u;
+    staged.output_cap = output_size ? output_size : 1u;
+    staged.input = malloc((size_t)staged.input_cap * sizeof(uint16_t));
+    staged.output = malloc(staged.output_cap);
+    if (!staged.input || !staged.output) {
+        free(staged.input); free(staged.output); return 0;
+    }
+    staged.input_count = input_count;
+    staged.output_size = output_size;
     for (uint32_t i = 0; i < input_count; i++) {
         uint16_t hw;
-        if (!pst_r_u16(&r, &hw)) return 0;
-        mdec.input[i] = hw;
+        if (!pst_r_u16(&r, &hw)) { free(staged.input); free(staged.output); return 0; }
+        staged.input[i] = hw;
     }
-    if (output_size && !pst_r_bytes(&r, mdec.output, output_size))
-        return 0;
+    if (output_size && !pst_r_bytes(&r, staged.output, output_size)) {
+        free(staged.input); free(staged.output); return 0;
+    }
+    free(mdec.input); free(mdec.output); mdec = staged;
     /* Age is guest cycles since last colour decode (SNAP_VER=1 payload). */
     if (age > (1ull << 40))
         age = (1ull << 40);

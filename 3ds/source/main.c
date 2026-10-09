@@ -1,3 +1,5 @@
+#include "fm_snapshot.h"
+#include "fm_irq.h"
 #include "fm_native_batch.h"
 #include "fm_host_clock.h"
 #include <3ds.h>
@@ -35,6 +37,7 @@
 #include "fm_vlc.h"
 #include "fm_audio.h"
 #include "fm_mdec_clock.h"
+#include "mdec.h"
 
 #include "gpu_sw_renderer.h"
 
@@ -1137,6 +1140,10 @@ static uint32_t g_b33_pending = 0u;
 static uint32_t g_b33_pending_cmd, g_b33_pending_callback;
 static uint32_t g_b33_pending_gp, g_b33_pending_frame;
 static uint32_t g_b33_saved_hi, g_b33_saved_lo;
+static CPUState g_b33_saved_cpu;
+static CPUState g_cd_tick_saved_cpu;
+static CPUState g_b34_saved_cpu;
+static CPUState g_b35_saved_cpu;
 
 static uint32_t g_b33_cb_active = 0;
 static uint32_t g_b33_cb_resume = 0;
@@ -2883,6 +2890,7 @@ static uint32_t g_vram_view_nonzero = 0;
  * l'enregistrement afin de pouvoir reproduire, de facon minimale,
  * le premier effet certain du callback.
  */
+static uint32_t g_vblank_deferred;
 static uint32_t g_vblank_registered_cb = 0;
 static uint32_t g_vblank_registered_gp = 0;
 
@@ -6969,6 +6977,7 @@ static int fm_b33_schedule_cd_callback(
 
 static int fm_b33_deliver_cd_callback(CPUState *cpu, uint32_t frame)
 {
+    if (!fm_irq_cpu_enabled(cpu)) return 0;
     if (!cpu || !g_b33_pending || g_b33_cb_active
         || (int32_t)(frame - g_b33_pending_frame) < 0)
         return 0;
@@ -6992,6 +7001,7 @@ static int fm_b33_deliver_cd_callback(CPUState *cpu, uint32_t frame)
     /* Preserve the context at delivery, not the obsolete issuing call. */
     for (unsigned i = 0u; i < 32u; ++i)
         g_b33_saved_gpr[i] = cpu->gpr[i];
+    g_b33_saved_cpu = *cpu;
     g_b33_saved_hi = cpu->hi;
     g_b33_saved_lo = cpu->lo;
     g_b33_cb_resume = cpu->pc;
@@ -7012,22 +7022,22 @@ static int fm_b33_deliver_cd_callback(CPUState *cpu, uint32_t frame)
 
 
 static int g_media_irq_active;
-static uint32_t g_media_irq_gpr[32], g_media_irq_pc, g_media_irq_hi, g_media_irq_lo;
+static CPUState g_media_irq_cpu;
 static const uint32_t g_media_irq_sentinel = 0x8000FFD0u;
 static int fm_media_irq_dispatch(CPUState *cpu)
 {
     if (g_media_irq_active) {
         if (cpu->pc != g_media_irq_sentinel) return 0;
-        memcpy(cpu->gpr, g_media_irq_gpr, sizeof(g_media_irq_gpr));
-        cpu->pc = g_media_irq_pc; cpu->hi = g_media_irq_hi; cpu->lo = g_media_irq_lo;
+        *cpu = g_media_irq_cpu;
         cpu->gpr[0] = 0; g_media_irq_active = 0;
         return 1;
     }
     if (g_b33_cb_active || g_cd_tick_active || g_b34_ready_active || g_b35_finalizer_active) return 0;
+    if (!fm_irq_cpu_enabled(cpu) || !(fm_memory_i_mask() & 8u)) return 0;
     uint32_t callback, gp;
     if (!fm_memory_mdec_take_callback(&callback, &gp)) return 0;
-    memcpy(g_media_irq_gpr, cpu->gpr, sizeof(g_media_irq_gpr));
-    g_media_irq_pc = cpu->pc; g_media_irq_hi = cpu->hi; g_media_irq_lo = cpu->lo;
+    g_media_irq_cpu = *cpu;
+    cpu->cop0[12] &= ~1u;
     cpu->pc = callback; cpu->gpr[28] = gp;
     cpu->gpr[31] = g_media_irq_sentinel; cpu->gpr[0] = 0;
     g_media_irq_active = 1; return 1;
@@ -7042,11 +7052,12 @@ static uint64_t g_seq_irq_total_ms;
  * cannot consume successive main-thread slices or starve the restored PC. */
 static int fm_execute_guest_timer_callback(CPUState *cpu)
 {
-    if (!cpu || g_media_irq_active || g_b33_cb_active || g_cd_tick_active
+    if (!fm_irq_cpu_enabled(cpu) || g_media_irq_active || g_b33_cb_active || g_cd_tick_active
         || g_b34_ready_active || g_b35_finalizer_active) return 0;
     uint32_t callback;
     if (!fm_runtime_take_timer_callback(&callback)) return 0;
     CPUState irq_cpu = *cpu;
+    irq_cpu.cop0[12] &= ~1u; /* No nested external IRQ until this isolated ISR returns. */
     irq_cpu.pc = callback;
     irq_cpu.gpr[29] = 0x801FF800u;
     irq_cpu.gpr[31] = g_media_irq_sentinel;
@@ -7124,7 +7135,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         /* A single stdio buffer avoids small writes per formatted line. */
         char report_buffer[8192];
         setvbuf(fp, report_buffer, _IOFBF, sizeof(report_buffer));
-        fprintf(fp, "probe=B136.55 window_ms=%llu pc=%08lX script=%04lX\n",
+        fprintf(fp, "probe=B136.56 window_ms=%llu pc=%08lX script=%04lX\n",
             (unsigned long long)elapsed, (unsigned long)(cpu ? cpu->pc : 0u),
             (unsigned long)fm_memory_read_half(0x8009C610u));
         fprintf(fp, "host_fps_x100=%llu new_images_fps_x100=%llu samples=%lu\n",
@@ -7262,6 +7273,14 @@ static int fm_execute_guest_vblank_callback(
         return 0;
     }
 
+    if (!fm_irq_cpu_enabled(cpu) || !(fm_memory_i_mask() & 1u)
+        || g_media_irq_active || g_b33_cb_active || g_cd_tick_active
+        || g_b34_ready_active || g_b35_finalizer_active) {
+        g_vblank_deferred = 1u;
+        return 0;
+    }
+    g_vblank_deferred = 0u;
+
     g_vblank_sig_words[0] = cpu->read_word(0x80012BD8u);
     g_vblank_sig_words[1] = cpu->read_word(0x80012BDCu);
     g_vblank_sig_words[2] = cpu->read_word(0x80012BE0u);
@@ -7295,6 +7314,7 @@ static int fm_execute_guest_vblank_callback(
 
     CPUState irq_cpu = *cpu;
 
+    irq_cpu.cop0[12] &= ~1u;
     irq_cpu.pc = g_vblank_registered_cb;
     irq_cpu.gpr[28] = g_vblank_registered_gp;
 
@@ -7517,6 +7537,7 @@ static int fm_execute_guest_vblank_callback(
             }
             ++g_b33_ctx_restored;
 
+            irq_cpu = g_b33_saved_cpu;
             irq_cpu.hi = g_b33_saved_hi;
             irq_cpu.lo = g_b33_saved_lo;
             irq_cpu.gpr[2] = g_b33_cb_return_value;
@@ -11789,7 +11810,7 @@ static int fm_b93_hle_800917f8(
  * Le snapshot ne serialise jamais les pointeurs de fonctions CPU.
  */
 #define FM_B135_QS_MAGIC       0x35333142u /* "B135" little-endian */
-#define FM_B135_QS_VERSION     3u
+#define FM_B135_QS_VERSION     4u
 #define FM_B135_QS_RAM_SIZE    (2u * 1024u * 1024u)
 #define FM_B135_QS_VRAM_WORDS  (1024u * 512u)
 #define FM_B135_QS_PATH        "sdmc:/3ds/fm-new3ds/quickstate-b135.bin"
@@ -11838,6 +11859,308 @@ typedef struct FMB135QuickStateHeader
     FMGpuQuickState gpu;
     FMRuntimeQuickState runtime;
 } FMB135QuickStateHeader;
+
+/* V4 extends the frozen v3 ABI; never serialize CPU host function pointers. */
+typedef struct FMQuickExtension {
+    uint32_t extension_bytes, mdec_bytes;
+    uint8_t cd_sector[2048];
+    char cd_search_path[256];
+    FMMemoryAsyncState async;
+    FMMediaSnapshot media;
+    FMAudioSnapshot audio;
+    uint32_t g_cd_lba;
+    uint32_t g_cd_pos;
+    uint32_t g_cd_last_cmd;
+    uint32_t g_cd_sector_count;
+    uint32_t g_cd_reading;
+    uint32_t g_cd_error;
+    uint32_t g_cd_streaming;
+    uint32_t g_cd_mode;
+    uint32_t g_cd_stream_fraction;
+    uint32_t g_cd_search_lba;
+    uint32_t g_cd_search_size;
+    uint32_t g_cd_search_ok;
+    uint32_t g_b57_req;
+    uint32_t g_b57_base_lba;
+    uint32_t g_b57_next_lba;
+    uint32_t g_b57_last_remaining;
+    uint32_t g_b57_read_index;
+    uint32_t g_b32_getsec_ok;
+    uint32_t g_b32_43e_returned;
+    uint32_t g_b32_43e_return_frame;
+    uint32_t g_b33_pending;
+    uint32_t g_b33_pending_cmd;
+    uint32_t g_b33_pending_callback;
+    uint32_t g_b33_pending_gp;
+    uint32_t g_b33_pending_frame;
+    uint32_t g_b34_ready_pending;
+    uint32_t g_b34_ready_arm_frame;
+    uint32_t g_b34_ready_req;
+    uint32_t g_b34_ready_lba;
+    uint32_t g_b34_last_mode;
+    uint32_t g_b34_last_command;
+    uint32_t g_cd_tick_last_frame;
+    uint32_t g_vblank_registered_cb;
+    uint32_t g_vblank_registered_gp;
+    uint32_t g_vblank_deferred;
+    uint32_t g_hit_vblank_cb;
+    uint32_t g_fast401_forced;
+    uint32_t g_fast401_frame;
+    uint32_t g_fast43e_forced;
+    uint32_t g_fast43e_frame;
+    uint32_t g_hit_401a4;
+    uint32_t g_hit_delay_wait;
+    uint32_t g_b47_m_43eb8;
+    uint32_t g_b47_m_43f3c;
+    uint32_t g_b47_m_43f44;
+    uint32_t g_b47_m_43f4c;
+    uint32_t g_b47_m_43f54;
+    uint32_t g_b47_m_43ff8;
+    uint32_t g_b47_m_44054;
+    uint32_t g_b47_m_44064;
+    uint32_t g_b47_m_4406c;
+    uint32_t g_b50_cleanup_done;
+    uint32_t g_b50_cleanup_triggered;
+    uint32_t g_b81_pending_mask;
+    uint32_t g_b81_cleanup_mask;
+    uint32_t g_b81_sel_before;
+    uint32_t g_b81_last_update;
+    uint32_t g_b81_last_frame;
+    uint32_t g_b73_hit_menu_init;
+    uint32_t g_b73_hit_menu_update;
+    uint32_t g_b73_hit_menu_destroy;
+    uint32_t g_vsync_wait_active;
+    uint32_t g_vsync_wait_until_frame;
+    uint32_t g_vsync_wait_mode;
+    uint32_t g_b108_vsync_sync_valid;
+    uint32_t g_b108_vsync_last_sync_frame;
+    uint32_t g_frame_wait_active;
+    uint32_t g_title_graphics_ready;
+    uint32_t g_b102_menu_bridge_cleanup;
+    uint32_t g_b103_name_active_frames;
+    uint32_t g_b103_name_pending_mask;
+    uint32_t g_b103_name_cleanup_mask;
+    uint32_t g_b81_edge_before;
+    uint32_t g_b81_repeat_before;
+    uint32_t g_b81_held_before;
+} FMQuickExtension;
+static uint32_t g_snapshot_save_requested;
+static uint64_t g_snapshot_disc;
+static uint32_t fm_snapshot_schema(void)
+{
+    /* Same sizes alone do not make a schema compatible: bump the tag when
+     * field semantics/order changes. Build label is informational. */
+    uint32_t sizes[5]={0xB1365604u,sizeof(FMB135QuickStateHeader),
+        sizeof(FMQuickExtension),sizeof(FMMediaSnapshot),sizeof(FMAudioSnapshot)};
+    return fm_snapshot_crc(sizes,sizeof(sizes));
+}
+static uint64_t fm_snapshot_disc_id(void)
+{
+    if (g_snapshot_disc) return g_snapshot_disc;
+    const uint32_t sectors[4]={0u,16u,0x442u,233174u};
+    uint8_t raw[2352]; uint64_t h=14695981039346656037ull;
+    for (unsigned i=0;i<4;++i) {
+        if (fm_disc_read_raw_sector(sectors[i],raw)) return 0;
+        for (unsigned n=0;n<sizeof(raw);++n) { h^=raw[n]; h*=1099511628211ull; }
+    }
+    /* Sampled disc identity, not a cryptographic whole-image hash. */
+    g_snapshot_disc=h ? h : 1u; return g_snapshot_disc;
+}
+static void fm_snapshot_status(const char *action,int result,int legacy)
+{
+    FILE *f=fopen("sdmc:/3ds/fm-new3ds/snapshot-status.txt","w");
+    if (!f) return;
+    fprintf(f,"probe=B136.56 action=%s result=%d format=%s\n"
+        "0=success 1=deferred -7=unsafe_legacy -8=invalid_state\n",
+        action,result,legacy ? "v3-partial" : "v4");
+    fclose(f);
+}
+static int fm_snapshot_safe(const CPUState *cpu)
+{
+    return cpu && !g_media_irq_active && !g_b33_cb_active && !g_cd_tick_active
+        && !g_b34_ready_active && !g_b35_finalizer_active && !g_b50_cleanup_active;
+}
+static void fm_snapshot_host_save(FMQuickExtension *out)
+{
+    memcpy(out->cd_sector,g_cd_sector,sizeof(g_cd_sector));
+    memcpy(out->cd_search_path,g_cd_search_path,sizeof(g_cd_search_path));
+    fm_memory_async_save(&out->async); fm_media_snapshot_save(&out->media);
+    fm_audio_snapshot_save(&out->audio);
+    out->g_cd_lba=(uint32_t)g_cd_lba;
+    out->g_cd_pos=(uint32_t)g_cd_pos;
+    out->g_cd_last_cmd=(uint32_t)g_cd_last_cmd;
+    out->g_cd_sector_count=(uint32_t)g_cd_sector_count;
+    out->g_cd_reading=(uint32_t)g_cd_reading;
+    out->g_cd_error=(uint32_t)g_cd_error;
+    out->g_cd_streaming=(uint32_t)g_cd_streaming;
+    out->g_cd_mode=(uint32_t)g_cd_mode;
+    out->g_cd_stream_fraction=(uint32_t)g_cd_stream_fraction;
+    out->g_cd_search_lba=(uint32_t)g_cd_search_lba;
+    out->g_cd_search_size=(uint32_t)g_cd_search_size;
+    out->g_cd_search_ok=(uint32_t)g_cd_search_ok;
+    out->g_b57_req=(uint32_t)g_b57_req;
+    out->g_b57_base_lba=(uint32_t)g_b57_base_lba;
+    out->g_b57_next_lba=(uint32_t)g_b57_next_lba;
+    out->g_b57_last_remaining=(uint32_t)g_b57_last_remaining;
+    out->g_b57_read_index=(uint32_t)g_b57_read_index;
+    out->g_b32_getsec_ok=(uint32_t)g_b32_getsec_ok;
+    out->g_b32_43e_returned=(uint32_t)g_b32_43e_returned;
+    out->g_b32_43e_return_frame=(uint32_t)g_b32_43e_return_frame;
+    out->g_b33_pending=(uint32_t)g_b33_pending;
+    out->g_b33_pending_cmd=(uint32_t)g_b33_pending_cmd;
+    out->g_b33_pending_callback=(uint32_t)g_b33_pending_callback;
+    out->g_b33_pending_gp=(uint32_t)g_b33_pending_gp;
+    out->g_b33_pending_frame=(uint32_t)g_b33_pending_frame;
+    out->g_b34_ready_pending=(uint32_t)g_b34_ready_pending;
+    out->g_b34_ready_arm_frame=(uint32_t)g_b34_ready_arm_frame;
+    out->g_b34_ready_req=(uint32_t)g_b34_ready_req;
+    out->g_b34_ready_lba=(uint32_t)g_b34_ready_lba;
+    out->g_b34_last_mode=(uint32_t)g_b34_last_mode;
+    out->g_b34_last_command=(uint32_t)g_b34_last_command;
+    out->g_cd_tick_last_frame=(uint32_t)g_cd_tick_last_frame;
+    out->g_vblank_registered_cb=(uint32_t)g_vblank_registered_cb;
+    out->g_vblank_registered_gp=(uint32_t)g_vblank_registered_gp;
+    out->g_vblank_deferred=(uint32_t)g_vblank_deferred;
+    out->g_hit_vblank_cb=(uint32_t)g_hit_vblank_cb;
+    out->g_fast401_forced=(uint32_t)g_fast401_forced;
+    out->g_fast401_frame=(uint32_t)g_fast401_frame;
+    out->g_fast43e_forced=(uint32_t)g_fast43e_forced;
+    out->g_fast43e_frame=(uint32_t)g_fast43e_frame;
+    out->g_hit_401a4=(uint32_t)g_hit_401a4;
+    out->g_hit_delay_wait=(uint32_t)g_hit_delay_wait;
+    out->g_b47_m_43eb8=(uint32_t)g_b47_m_43eb8;
+    out->g_b47_m_43f3c=(uint32_t)g_b47_m_43f3c;
+    out->g_b47_m_43f44=(uint32_t)g_b47_m_43f44;
+    out->g_b47_m_43f4c=(uint32_t)g_b47_m_43f4c;
+    out->g_b47_m_43f54=(uint32_t)g_b47_m_43f54;
+    out->g_b47_m_43ff8=(uint32_t)g_b47_m_43ff8;
+    out->g_b47_m_44054=(uint32_t)g_b47_m_44054;
+    out->g_b47_m_44064=(uint32_t)g_b47_m_44064;
+    out->g_b47_m_4406c=(uint32_t)g_b47_m_4406c;
+    out->g_b50_cleanup_done=(uint32_t)g_b50_cleanup_done;
+    out->g_b50_cleanup_triggered=(uint32_t)g_b50_cleanup_triggered;
+    out->g_b81_pending_mask=(uint32_t)g_b81_pending_mask;
+    out->g_b81_cleanup_mask=(uint32_t)g_b81_cleanup_mask;
+    out->g_b81_sel_before=(uint32_t)g_b81_sel_before;
+    out->g_b81_last_update=(uint32_t)g_b81_last_update;
+    out->g_b81_last_frame=(uint32_t)g_b81_last_frame;
+    out->g_b73_hit_menu_init=(uint32_t)g_b73_hit_menu_init;
+    out->g_b73_hit_menu_update=(uint32_t)g_b73_hit_menu_update;
+    out->g_b73_hit_menu_destroy=(uint32_t)g_b73_hit_menu_destroy;
+    out->g_vsync_wait_active=(uint32_t)g_vsync_wait_active;
+    out->g_vsync_wait_until_frame=(uint32_t)g_vsync_wait_until_frame;
+    out->g_vsync_wait_mode=(uint32_t)g_vsync_wait_mode;
+    out->g_b108_vsync_sync_valid=(uint32_t)g_b108_vsync_sync_valid;
+    out->g_b108_vsync_last_sync_frame=(uint32_t)g_b108_vsync_last_sync_frame;
+    out->g_frame_wait_active=(uint32_t)g_frame_wait_active;
+    out->g_title_graphics_ready=(uint32_t)g_title_graphics_ready;
+    out->g_b102_menu_bridge_cleanup=(uint32_t)g_b102_menu_bridge_cleanup;
+    out->g_b103_name_active_frames=(uint32_t)g_b103_name_active_frames;
+    out->g_b103_name_pending_mask=(uint32_t)g_b103_name_pending_mask;
+    out->g_b103_name_cleanup_mask=(uint32_t)g_b103_name_cleanup_mask;
+    out->g_b81_edge_before=(uint32_t)g_b81_edge_before;
+    out->g_b81_repeat_before=(uint32_t)g_b81_repeat_before;
+    out->g_b81_held_before=(uint32_t)g_b81_held_before;
+
+}
+static void fm_snapshot_host_load(const FMQuickExtension *in)
+{
+    memcpy(g_cd_sector,in->cd_sector,sizeof(g_cd_sector));
+    memcpy(g_cd_search_path,in->cd_search_path,sizeof(g_cd_search_path));
+    fm_memory_async_load(&in->async); fm_media_snapshot_load(&in->media);
+    fm_audio_snapshot_load(&in->audio);
+    g_cd_lba=in->g_cd_lba;
+    g_cd_pos=in->g_cd_pos;
+    g_cd_last_cmd=in->g_cd_last_cmd;
+    g_cd_sector_count=in->g_cd_sector_count;
+    g_cd_reading=in->g_cd_reading;
+    g_cd_error=in->g_cd_error;
+    g_cd_streaming=in->g_cd_streaming;
+    g_cd_mode=in->g_cd_mode;
+    g_cd_stream_fraction=in->g_cd_stream_fraction;
+    g_cd_search_lba=in->g_cd_search_lba;
+    g_cd_search_size=in->g_cd_search_size;
+    g_cd_search_ok=in->g_cd_search_ok;
+    g_b57_req=in->g_b57_req;
+    g_b57_base_lba=in->g_b57_base_lba;
+    g_b57_next_lba=in->g_b57_next_lba;
+    g_b57_last_remaining=in->g_b57_last_remaining;
+    g_b57_read_index=in->g_b57_read_index;
+    g_b32_getsec_ok=in->g_b32_getsec_ok;
+    g_b32_43e_returned=in->g_b32_43e_returned;
+    g_b32_43e_return_frame=in->g_b32_43e_return_frame;
+    g_b33_pending=in->g_b33_pending;
+    g_b33_pending_cmd=in->g_b33_pending_cmd;
+    g_b33_pending_callback=in->g_b33_pending_callback;
+    g_b33_pending_gp=in->g_b33_pending_gp;
+    g_b33_pending_frame=in->g_b33_pending_frame;
+    g_b34_ready_pending=in->g_b34_ready_pending;
+    g_b34_ready_arm_frame=in->g_b34_ready_arm_frame;
+    g_b34_ready_req=in->g_b34_ready_req;
+    g_b34_ready_lba=in->g_b34_ready_lba;
+    g_b34_last_mode=in->g_b34_last_mode;
+    g_b34_last_command=in->g_b34_last_command;
+    g_cd_tick_last_frame=in->g_cd_tick_last_frame;
+    g_vblank_registered_cb=in->g_vblank_registered_cb;
+    g_vblank_registered_gp=in->g_vblank_registered_gp;
+    g_vblank_deferred=in->g_vblank_deferred;
+    g_hit_vblank_cb=in->g_hit_vblank_cb;
+    g_fast401_forced=in->g_fast401_forced;
+    g_fast401_frame=in->g_fast401_frame;
+    g_fast43e_forced=in->g_fast43e_forced;
+    g_fast43e_frame=in->g_fast43e_frame;
+    g_hit_401a4=in->g_hit_401a4;
+    g_hit_delay_wait=in->g_hit_delay_wait;
+    g_b47_m_43eb8=in->g_b47_m_43eb8;
+    g_b47_m_43f3c=in->g_b47_m_43f3c;
+    g_b47_m_43f44=in->g_b47_m_43f44;
+    g_b47_m_43f4c=in->g_b47_m_43f4c;
+    g_b47_m_43f54=in->g_b47_m_43f54;
+    g_b47_m_43ff8=in->g_b47_m_43ff8;
+    g_b47_m_44054=in->g_b47_m_44054;
+    g_b47_m_44064=in->g_b47_m_44064;
+    g_b47_m_4406c=in->g_b47_m_4406c;
+    g_b50_cleanup_done=in->g_b50_cleanup_done;
+    g_b50_cleanup_triggered=in->g_b50_cleanup_triggered;
+    g_b81_pending_mask=in->g_b81_pending_mask;
+    g_b81_cleanup_mask=in->g_b81_cleanup_mask;
+    g_b81_sel_before=in->g_b81_sel_before;
+    g_b81_last_update=in->g_b81_last_update;
+    g_b81_last_frame=in->g_b81_last_frame;
+    g_b73_hit_menu_init=in->g_b73_hit_menu_init;
+    g_b73_hit_menu_update=in->g_b73_hit_menu_update;
+    g_b73_hit_menu_destroy=in->g_b73_hit_menu_destroy;
+    g_vsync_wait_active=in->g_vsync_wait_active;
+    g_vsync_wait_until_frame=in->g_vsync_wait_until_frame;
+    g_vsync_wait_mode=in->g_vsync_wait_mode;
+    g_b108_vsync_sync_valid=in->g_b108_vsync_sync_valid;
+    g_b108_vsync_last_sync_frame=in->g_b108_vsync_last_sync_frame;
+    g_frame_wait_active=in->g_frame_wait_active;
+    g_title_graphics_ready=in->g_title_graphics_ready;
+    g_b102_menu_bridge_cleanup=in->g_b102_menu_bridge_cleanup;
+    g_b103_name_active_frames=in->g_b103_name_active_frames;
+    g_b103_name_pending_mask=in->g_b103_name_pending_mask;
+    g_b103_name_cleanup_mask=in->g_b103_name_cleanup_mask;
+    g_b81_edge_before=in->g_b81_edge_before;
+    g_b81_repeat_before=in->g_b81_repeat_before;
+    g_b81_held_before=in->g_b81_held_before;
+
+    g_cd_stream_last_ms=osGetTime();
+}
+static int fm_snapshot_header_valid(const FMB135QuickStateHeader *in)
+{
+    if (in->magic!=FM_B135_QS_MAGIC || in->header_size!=sizeof(*in)
+        || in->ram_size!=FM_B135_QS_RAM_SIZE || in->vram_words!=FM_B135_QS_VRAM_WORDS
+        || in->cpu.read_absorb_which>32 || in->cpu.ld_which_t>32
+        || in->gpu.parser_state>3 || in->gpu.cmd_have>16 || in->gpu.cmd_need>16
+        || in->gpu.upload_index>in->gpu.upload_pixels || in->gpu.upload_pixels>1024u*512u
+        || in->gpu.upload_w>1024 || in->gpu.upload_h>512) return 0;
+    for (unsigned i=0;i<32;++i) {
+        if (in->runtime.events[i].used>1 || in->runtime.events[i].enabled>1
+            || in->runtime.events[i].ready>1) return 0;
+    }
+    return 1;
+}
 
 static int32_t g_b135_qs_last_result = 0;
 static uint32_t g_b135_qs_save_count = 0u;
@@ -11909,6 +12232,8 @@ static int fm_b135_quick_save(
         return -1;
     }
 
+    if (!fm_snapshot_safe(cpu)) return 1;
+    uint64_t disc=fm_snapshot_disc_id(); if (!disc) return -9;
     FMB135QuickStateHeader state;
     memset(&state, 0, sizeof(state));
 
@@ -11946,31 +12271,23 @@ static int fm_b135_quick_save(
         &state.runtime
     );
 
-    FILE *fp = fopen(FM_B135_QS_PATH, "wb");
-
-    if (!fp)
-    {
-        return -2;
-    }
-
-    int ok =
-        fwrite(&state, sizeof(state), 1u, fp) == 1u
-        &&
-        fwrite(ram, FM_B135_QS_RAM_SIZE, 1u, fp) == 1u
-        &&
-        fwrite(
-            vram,
-            sizeof(uint16_t) * FM_B135_QS_VRAM_WORDS,
-            1u,
-            fp
-        ) == 1u;
-
-    if (fclose(fp) != 0)
-    {
-        ok = 0;
-    }
-
-    return ok ? 0 : -3;
+    uint32_t fixed=sizeof(state)+FM_B135_QS_RAM_SIZE+2u*FM_B135_QS_VRAM_WORDS;
+    uint32_t mdec_bytes=mdec_snapshot_bytes();
+    if (mdec_bytes>FM_SNAPSHOT_MAX-fixed-sizeof(FMQuickExtension)) return -6;
+    uint32_t total=fixed+sizeof(FMQuickExtension)+mdec_bytes;
+    uint8_t *blob=malloc(total); if (!blob) return -6;
+    memcpy(blob,&state,sizeof(state)); memcpy(blob+sizeof(state),ram,FM_B135_QS_RAM_SIZE);
+    memcpy(blob+sizeof(state)+FM_B135_QS_RAM_SIZE,vram,2u*FM_B135_QS_VRAM_WORDS);
+    FMQuickExtension *ext=(FMQuickExtension *)(blob+fixed);
+    memset(ext,0,sizeof(*ext)); ext->extension_bytes=sizeof(*ext); ext->mdec_bytes=mdec_bytes;
+    fm_audio_pause(1); fm_snapshot_host_save(ext);
+    mdec_snapshot_write(blob+fixed+sizeof(*ext));
+    int result=fm_snapshot_write(FM_B135_QS_PATH,blob,total,fm_snapshot_schema(),disc,13656u);
+    free(blob); fm_audio_pause(0);
+    /* File I/O is an explicit pause, never clock/CD transport catch-up debt. */
+    fm_host_clock_reset(&g_ps1_host_clock); g_cd_stream_last_ms=osGetTime();
+    fm_snapshot_status("save",result,0);
+    return result;
 }
 
 
@@ -11987,69 +12304,48 @@ static int fm_b135_quick_load(
         return -1;
     }
 
-    FILE *fp = fopen(FM_B135_QS_PATH, "rb");
-
-    if (!fp)
-    {
-        return -2;
+    void *owned=NULL; uint32_t bytes=0; int legacy=0;
+    int result=fm_snapshot_read(FM_B135_QS_PATH,&owned,&bytes,
+        fm_snapshot_schema(),fm_snapshot_disc_id(),&legacy);
+    if (result) { fm_snapshot_status("load",result,legacy); return result; }
+    uint8_t *blob=owned;
+    uint32_t fixed=sizeof(FMB135QuickStateHeader)+FM_B135_QS_RAM_SIZE+2u*FM_B135_QS_VRAM_WORDS;
+    if (bytes<fixed) { free(blob); fm_snapshot_status("load",-8,legacy); return -8; }
+    FMB135QuickStateHeader state; memcpy(&state,blob,sizeof(state));
+    FMQuickExtension *ext=NULL;
+    if (!fm_snapshot_header_valid(&state) || state.version!=(legacy ? 3u : 4u)) goto invalid;
+    if (legacy) {
+        const uint8_t *saved_ram=blob+sizeof(state);
+        uint32_t remaining; memcpy(&remaining,saved_ram+0xEB1C8u,sizeof(remaining));
+        /* v3 omitted CD/MDEC host progress and active callback contexts. */
+        if (bytes!=fixed || remaining || !saved_ram[0x9C3EBu]
+            || (state.gpu.display_mode & 0x10u)
+            || (state.cpu.pc>=0x8000FF00u && state.cpu.pc<0x80010000u)) {
+            free(blob); fm_snapshot_status("load",-7,1); return -7;
+        }
+    } else {
+        if (bytes<fixed+sizeof(FMQuickExtension)) goto invalid;
+        ext=(FMQuickExtension *)(blob+fixed);
+        if (ext->extension_bytes!=sizeof(*ext)
+            || ext->mdec_bytes!=bytes-fixed-sizeof(*ext)
+            || ext->g_cd_pos>2048 || ext->g_cd_lba>449849u
+            || ext->g_cd_stream_fraction>=1000 || ext->g_b33_pending>1
+            || ext->g_b34_ready_pending>1 || ext->g_vblank_deferred>1
+            || !fm_memory_async_valid(&ext->async) || !fm_media_snapshot_valid(&ext->media)
+            || !fm_audio_snapshot_valid(&ext->audio)) goto invalid;
+        /* The decoder stages its allocations/parse. Failure preserves its
+         * live FIFOs too, before RAM/MMIO/CPU or the CD are touched. */
+        uint64_t old_frame=fm_mdec_host_frame,old_cycles=fm_mdec_host_cycles;
+        fm_mdec_host_frame=state.frame; fm_mdec_host_cycles=(uint64_t)state.frame*677376u;
+        if (!mdec_snapshot_read(blob+fixed+sizeof(*ext),ext->mdec_bytes)) {
+            fm_mdec_host_frame=old_frame; fm_mdec_host_cycles=old_cycles; goto invalid;
+        }
     }
-
-    const long expected_size =
-        (long)sizeof(FMB135QuickStateHeader)
-        +
-        (long)FM_B135_QS_RAM_SIZE
-        +
-        (long)(sizeof(uint16_t) * FM_B135_QS_VRAM_WORDS);
-
-    if (
-        fseek(fp, 0, SEEK_END) != 0
-        ||
-        ftell(fp) != expected_size
-        ||
-        fseek(fp, 0, SEEK_SET) != 0
-    )
-    {
-        fclose(fp);
-        return -3;
-    }
-
-    FMB135QuickStateHeader state;
-
-    if (
-        fread(&state, sizeof(state), 1u, fp) != 1u
-        ||
-        state.magic != FM_B135_QS_MAGIC
-        ||
-        state.version != FM_B135_QS_VERSION
-        ||
-        state.header_size != sizeof(state)
-        ||
-        state.ram_size != FM_B135_QS_RAM_SIZE
-        ||
-        state.vram_words != FM_B135_QS_VRAM_WORDS
-    )
-    {
-        fclose(fp);
-        return -4;
-    }
-
-    if (
-        fread(ram, FM_B135_QS_RAM_SIZE, 1u, fp) != 1u
-        ||
-        fread(
-            vram,
-            sizeof(uint16_t) * FM_B135_QS_VRAM_WORDS,
-            1u,
-            fp
-        ) != 1u
-    )
-    {
-        fclose(fp);
-        return -5;
-    }
-
-    fclose(fp);
-
+    /* No fallible operations beyond this point: commit all subsystems. */
+    fm_audio_pause(1); fm_cd_hle_reset();
+    if (legacy) mdec_init();
+    memcpy(ram,blob+sizeof(state),FM_B135_QS_RAM_SIZE);
+    memcpy(vram,blob+sizeof(state)+FM_B135_QS_RAM_SIZE,2u*FM_B135_QS_VRAM_WORDS);
     fm_memory_quick_load(
         &state.memory
     );
@@ -12089,6 +12385,21 @@ static int fm_b135_quick_load(
     g_vsync_wait_until_frame = 0u;
     g_b108_vsync_sync_valid = 0u;
 
+    if (ext) fm_snapshot_host_load(ext);
+    else {
+        /* Explicit partial import for existing idle-scene v3 saves. */
+        g_title_graphics_ready=1u;
+        g_fast401_forced=g_fast43e_forced=1u;
+        g_b47_m_43f3c=g_b47_m_43f4c=1u;
+        g_vblank_registered_cb=0x80012BD8u; g_vblank_registered_gp=state.cpu.gpr[28];
+        g_hit_vblank_cb=0u; g_vblank_deferred=0u;
+        g_cd_lba=state.cpu.pc ? fm_memory_read_word(0x800EB1DCu) : 0u;
+        g_b81_pending_mask=g_b81_cleanup_mask=0u;
+    }
+    g_snapshot_save_requested=0u;
+    fm_mdec_host_frame=state.frame; fm_mdec_host_cycles=(uint64_t)state.frame*677376u;
+    free(blob); fm_audio_pause(0); fm_snapshot_status("load",0,legacy);
+
     /*
      * B135.88:
      * The serialized GPU/VRAM state is restored here, but the host-side
@@ -12105,6 +12416,7 @@ static int fm_b135_quick_load(
     g_b13578_page_hash[2] = 0u;
     g_b13578_page_hash[3] = 0u;
     g_b1357_last_latched_gp0 = 0u;
+    g_b13589_hold_active = 0u;
     g_b13588_reseed_presenter = 1u;
 
     g_b65_stop_code = 0u;
@@ -12113,6 +12425,8 @@ static int fm_b135_quick_load(
     g_b65_stop_detail = 0u;
 
     return 0;
+invalid:
+    free(blob); fm_snapshot_status("load",-8,legacy); return -8;
 }
 
 /*
@@ -12610,7 +12924,7 @@ int main(void)
          *   Cross/Circle       = 0040/0020
          *   Triangle/Square    = 0010/0080
          */
-        if (g_b102_menu_bridge_active != 0u)
+        if (g_b102_menu_bridge_active != 0u && !(held & KEY_SELECT))
         {
             uint32_t b81_mask = 0u;
 
@@ -12687,7 +13001,7 @@ int main(void)
          * chaque passage. Hors de cet ecran, ce bridge s'eteint
          * tout seul et ne pollue pas le reste du jeu.
          */
-        if (g_b103_name_active_frames != 0u)
+        if (g_b103_name_active_frames != 0u && !(held & KEY_SELECT))
         {
             uint32_t b103_mask = 0u;
 
@@ -12935,19 +13249,15 @@ int main(void)
         {
             b135_qs_chord = 1;
 
-            g_b135_qs_last_result =
-                fm_b135_quick_save(
-                    cpu,
-                    ram,
-                    vram,
-                    frame,
-                    last_dispatch_address
-                );
-
-            if (g_b135_qs_last_result == 0)
-            {
-                ++g_b135_qs_save_count;
-            }
+            g_snapshot_save_requested=1u;
+        }
+        if (g_snapshot_save_requested && cpu && memory_status==0) {
+            g_b135_qs_last_result=fm_b135_quick_save(cpu,ram,vram,frame,last_dispatch_address);
+            if (g_b135_qs_last_result!=1) {
+                g_snapshot_save_requested=0u;
+                if (!g_b135_qs_last_result) ++g_b135_qs_save_count;
+                else fm_snapshot_status("save",g_b135_qs_last_result,0);
+            } else if (b135_qs_chord) fm_snapshot_status("save",1,0);
         }
 
         if (
@@ -12961,12 +13271,6 @@ int main(void)
         )
         {
             b135_qs_chord = 1;
-
-            /*
-             * Nettoyer d'abord l'etat HLE host. Le quick-load restaure
-             * ensuite les quelques flags de phase qui doivent survivre.
-             */
-            fm_cd_hle_reset();
 
             g_b135_qs_last_result =
                 fm_b135_quick_load(
@@ -13550,6 +13854,14 @@ int main(void)
                     game_running = 0;
                     break;
                 }
+                if (g_vblank_deferred && fm_irq_cpu_enabled(cpu)
+                    && (fm_memory_i_mask() & 1u) && !g_media_irq_active
+                    && !g_b33_cb_active && !g_cd_tick_active
+                    && !g_b34_ready_active && !g_b35_finalizer_active) {
+                    if (fm_execute_guest_vblank_callback(cpu, frame) < 0) {
+                        g_b65_stop_code = 4u; game_running = 0; break;
+                    }
+                }
                 fm_media_guest_entry(cpu, phys);
                 if (fm_media_irq_dispatch(cpu)) { static_miss = 0; continue; }
                 /* Deliver hardware completion outside guest CD/data/tick callbacks. */
@@ -13699,6 +14011,7 @@ int main(void)
                  */
                 if (
                     !g_cd_tick_active
+                    && fm_irq_cpu_enabled(cpu)
                     && frame != g_cd_tick_last_frame
                     && fm_memory_read_word(0x80094CB0u) != 0u
                     && fm_memory_read_word(0x800F7270u) != 0u
@@ -13709,6 +14022,7 @@ int main(void)
                 )
                 {
                     g_cd_tick_last_frame = frame;
+                    g_cd_tick_saved_cpu = *cpu;
                     g_cd_tick_saved_pc = dispatch_address;
                     for (unsigned i = 0; i < 32u; ++i)
                         g_cd_tick_saved_gpr[i] = cpu->gpr[i];
@@ -13735,6 +14049,7 @@ int main(void)
                     for (unsigned i = 0; i < 32u; ++i)
                         cpu->gpr[i] = g_cd_tick_saved_gpr[i];
 
+                    *cpu = g_cd_tick_saved_cpu;
                     cpu->pc = g_cd_tick_saved_pc;
                     cpu->gpr[0] = 0u;
 
@@ -13793,6 +14108,7 @@ int main(void)
                      * Le haut niveau 8007B78C gere desormais lui-meme
                      * son ID et son historique dans le guest.
                      */
+                    *cpu = g_b33_saved_cpu;
                     cpu->hi = g_b33_saved_hi;
                     cpu->lo = g_b33_saved_lo;
                     cpu->gpr[2] = g_b33_cb_return_value;
@@ -13850,6 +14166,7 @@ int main(void)
                     {
                         cpu->gpr[i] = g_b35_saved_gpr[i];
                     }
+                    *cpu = g_b35_saved_cpu;
                     ++g_b35_ctx_restored;
 
                     cpu->pc = resume_pc;
@@ -13892,6 +14209,7 @@ int main(void)
                     {
                         cpu->gpr[i] = g_b34_ready_saved_gpr[i];
                     }
+                    *cpu = g_b34_saved_cpu;
                     ++g_b34_ready_ctx_restored;
                     cpu->pc = resume_pc;
                     cpu->gpr[0] = 0u;
@@ -13916,6 +14234,7 @@ int main(void)
                         {
                             g_b35_saved_gpr[i] = cpu->gpr[i];
                         }
+                        g_b35_saved_cpu = *cpu;
                         ++g_b35_ctx_saved;
 
                         g_b35_c460_before = cpu->read_word(0x8009C460u);
@@ -14003,6 +14322,8 @@ int main(void)
                  */
                 if (
                     g_b34_ready_pending
+                    && fm_irq_cpu_enabled(cpu)
+                    && !g_cd_tick_active && !g_b35_finalizer_active
                     && !g_b34_ready_active
                     && !g_b33_cb_active
                     && !g_media_irq_active
@@ -14036,6 +14357,7 @@ int main(void)
                         {
                             g_b34_ready_saved_gpr[i] = cpu->gpr[i];
                         }
+                        g_b34_saved_cpu = *cpu;
                         ++g_b34_ready_ctx_saved;
                         ++g_b34_ready_started;
 
@@ -14143,6 +14465,7 @@ int main(void)
                                 cpu->gpr[i];
                         }
 
+                        g_b35_saved_cpu = *cpu;
                         ++g_b35_ctx_saved;
 
                         g_b35_c460_before =
@@ -14284,60 +14607,6 @@ int main(void)
                     dispatch_address;
 
 
-                /*
-                 * ============================================
-                 * TEMP HLE - B0:18 ResetEntryInt
-                 *
-                 * Le handler existe déjà dans
-                 * fm_runtime_shim.c, mais sur le bring-up actuel
-                 * fm_bios_try_hle() retourne malgré tout 0 pour
-                 * cet appel. On le court-circuite ici afin de
-                 * poursuivre le boot et d'exposer le prochain
-                 * vrai verrou.
-                 * ============================================
-                 */
-                if (
-                    phys == 0x000000B0u
-                    &&
-                    (
-                        cpu->gpr[9]
-                        &
-                        0xFFu
-                    )
-                    ==
-                    0x18u
-                )
-                {
-                    /*
-                     * ResetEntryInt : pour le bring-up,
-                     * considérer l'ancien hook comme NULL.
-                     */
-                    cpu->gpr[2] =
-                        0;
-
-                    cpu->pc =
-                        cpu->gpr[31];
-
-                    cpu->gpr[0] =
-                        0;
-
-                    g_bios_debug_addr =
-                        0x000000B0u;
-
-                    g_bios_debug_fn =
-                        0x18u;
-
-                    /*
-                     * 2 = HLE temporaire réalisé par main.c.
-                     */
-                    g_bios_debug_result =
-                        2;
-
-                    static_miss =
-                        0;
-
-                    continue;
-                }
 
 
                 /*
@@ -20672,7 +20941,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.55\nvideo_mode=%08lX\n"
+                            "video_probe=B136.56\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -20740,7 +21009,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.55\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.56\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"

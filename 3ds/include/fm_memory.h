@@ -161,3 +161,12 @@ void fm_memory_dma4_write_diag(uint32_t out[6]);
 
 void fm_memory_mdec_set_callback(uint32_t callback, uint32_t gp);
 int fm_memory_mdec_take_callback(uint32_t *callback, uint32_t *gp);
+
+/* Functional DMA state omitted by the legacy quick-state. */
+typedef struct FMMemoryAsyncState {
+    uint32_t mdec_dma[2][3], mdec_remaining[2];
+    uint32_t callback, callback_gp, irq_pending, dma4_pending;
+} FMMemoryAsyncState;
+void fm_memory_async_save(FMMemoryAsyncState *out);
+int fm_memory_async_valid(const FMMemoryAsyncState *in);
+void fm_memory_async_load(const FMMemoryAsyncState *in);

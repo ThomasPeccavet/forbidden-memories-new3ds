@@ -51,3 +51,30 @@ int fm_audio_push(const int16_t *pcm, unsigned frames, unsigned rate)
     w->data_vaddr = dst; w->nsamples = frames; ndspChnWaveBufAdd(0, w);
     next_slot = (next_slot + 1u) % AUDIO_BUFFERS; ++queued; return 1;
 }
+
+void fm_audio_snapshot_save(FMAudioSnapshot *out)
+{
+    memset(out,0,sizeof(*out));
+    if (!samples) return;
+    out->rate=current_rate;
+    for (unsigned i=0;i<AUDIO_BUFFERS;++i) {
+        unsigned slot=(next_slot+i)%AUDIO_BUFFERS;
+        if (waves[slot].status == NDSP_WBUF_QUEUED || waves[slot].status == NDSP_WBUF_PLAYING) {
+            unsigned n=out->count++;
+            out->frames[n]=waves[slot].nsamples;
+            memcpy(out->pcm[n],samples+slot*FM_XA_MAX_FRAMES*2u,out->frames[n]*4u);
+        }
+    }
+}
+int fm_audio_snapshot_valid(const FMAudioSnapshot *in)
+{
+    if (!in || in->count > AUDIO_BUFFERS || (in->count && in->rate != 18900u && in->rate != 37800u)) return 0;
+    for (unsigned i=0;i<in->count;++i)
+        if (!in->frames[i] || in->frames[i] > FM_XA_MAX_FRAMES) return 0;
+    return 1;
+}
+void fm_audio_snapshot_load(const FMAudioSnapshot *in)
+{
+    fm_audio_reset();
+    for (unsigned i=0;i<in->count;++i) fm_audio_push(in->pcm[i],in->frames[i],in->rate);
+}

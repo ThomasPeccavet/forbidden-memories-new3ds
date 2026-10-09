@@ -22,9 +22,11 @@ class MediaIrqHostTests(unittest.TestCase):
 #include <assert.h>
 #include <stdint.h>
 #include <string.h>
-typedef struct { uint32_t gpr[32], pc, hi, lo; } CPUState;
+typedef struct { uint32_t gpr[32], pc, hi, lo, cop0[32], gte[64], pipeline[10]; } CPUState;
+static int fm_irq_cpu_enabled(const CPUState *c) { return c && (c->cop0[12] & 0x401u)==0x401u; }
 static int g_b33_cb_active, g_cd_tick_active, g_b34_ready_active, g_b35_finalizer_active;
 static unsigned pending, taken;
+static uint16_t fm_memory_i_mask(void) { return 8u; }
 static int fm_memory_mdec_take_callback(uint32_t *callback, uint32_t *gp) {
     if (!pending) return 0;
     --pending; ++taken; *callback = 0x8006A704; *gp = 0x8009C298; return 1;
@@ -36,7 +38,9 @@ int main(void) {
     CPUState cpu = {0};
     for (unsigned i = 0; i < 32; ++i) cpu.gpr[i] = i * 123;
     cpu.pc = 0x8006A560; cpu.hi = 0x12345678; cpu.lo = 0x9ABCDEF0;
+    cpu.cop0[12]=0x401; cpu.gte[12]=123; cpu.pipeline[3]=456;
     CPUState saved = cpu; pending = 2;
+    cpu.cop0[12]=0; assert(!fm_media_irq_dispatch(&cpu) && pending==2); cpu=saved;
     g_b33_cb_active = 1; assert(!fm_media_irq_dispatch(&cpu) && pending == 2);
     g_b33_cb_active = 0; g_b34_ready_active = 1;
     assert(!fm_media_irq_dispatch(&cpu) && pending == 2);
@@ -46,6 +50,7 @@ int main(void) {
     assert(cpu.gpr[31] == g_media_irq_sentinel && g_media_irq_active);
     assert(!fm_media_irq_dispatch(&cpu) && pending == 1); /* No recursive delivery. */
     memset(cpu.gpr, 0xAA, sizeof(cpu.gpr)); cpu.hi = cpu.lo = 0;
+    cpu.cop0[12]=0; cpu.gte[12]=0; cpu.pipeline[3]=0;
     cpu.pc = g_media_irq_sentinel;
     assert(fm_media_irq_dispatch(&cpu) && !g_media_irq_active);
     saved.gpr[0] = 0; assert(!memcmp(&cpu, &saved, sizeof(cpu)));

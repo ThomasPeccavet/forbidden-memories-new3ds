@@ -11,11 +11,7 @@
 uint64_t fm_mdec_host_cycles, fm_mdec_host_frame;
 #define STR_CHUNKS 20u
 #define STR_PAYLOAD 2016u
-static struct {
-    uint8_t headers[STR_CHUNKS][32], data[STR_CHUNKS][STR_PAYLOAD];
-    uint32_t number, count, seen, last_published;
-    int complete;
-} str;
+static FMStrSnapshot str;
 static FMXaDecoder xa;
 static int active;
 static uint8_t mode, filter_file, filter_channel, index_reg;
@@ -181,4 +177,28 @@ void fm_media_dump(FILE *f)
         (unsigned long)m.decode_blocks, (unsigned long)m.decode_macroblocks,
         (unsigned long)m.dma_in_words, (unsigned long)m.dma_out_words,
         (unsigned long)m.dma_read_underflows, (unsigned long)m.decode_stop_reason);
+}
+
+void fm_media_snapshot_save(FMMediaSnapshot *out)
+{
+    memset(out,0,sizeof(*out)); out->str=str; out->xa=xa; out->active=active;
+    out->mode=mode; out->filter_file=filter_file; out->filter_channel=filter_channel;
+    out->index_reg=index_reg; memcpy(out->pending_volume,pending_volume,4);
+    memcpy(out->volume,volume,4); out->next_lba=next_lba;
+}
+int fm_media_snapshot_valid(const FMMediaSnapshot *in)
+{
+    if (!in || in->active < 0 || in->active > 1 || in->index_reg > 3
+        || in->next_lba > 449850u || in->str.count > STR_CHUNKS
+        || in->str.complete < 0 || in->str.complete > 1 || in->xa.valid > 1) return 0;
+    uint32_t mask=(1u << in->str.count)-1u;
+    if ((in->str.seen & ~mask) || (in->str.complete && (!mask || in->str.seen != mask))) return 0;
+    return 1;
+}
+void fm_media_snapshot_load(const FMMediaSnapshot *in)
+{
+    str=in->str; xa=in->xa; active=in->active; mode=in->mode;
+    filter_file=in->filter_file; filter_channel=in->filter_channel; index_reg=in->index_reg;
+    memcpy(pending_volume,in->pending_volume,4); memcpy(volume,in->volume,4);
+    next_lba=in->next_lba;
 }

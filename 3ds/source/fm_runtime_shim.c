@@ -1,3 +1,4 @@
+#include "fm_irq.h"
 #include "fm_frame_wait.h"
 #include "fm_native_batch.h"
 #include "fm_sort_swap.h"
@@ -1267,7 +1268,7 @@ static void fm_runtime_service_vblank_hle(
     CPUState *cpu
 )
 {
-    if (!cpu)
+    if (!fm_irq_cpu_enabled(cpu))
     {
         return;
     }
@@ -2794,7 +2795,9 @@ int fm_bios_try_hle(
                     &&
                     g_bios_events[index].spec == 0x00000020u
                     &&
-                    fm_memory_dma4_take_completion() != 0u
+                    fm_irq_cpu_enabled(cpu)
+                    && (fm_memory_i_mask() & 8u)
+                    && fm_memory_dma4_take_completion() != 0u
                 )
                 {
                     g_bios_events[index].ready = 1u;

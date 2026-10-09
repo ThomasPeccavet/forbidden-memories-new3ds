@@ -7,6 +7,7 @@ static inline uint64_t osGetTime(void) { return 0; }
 typedef struct { void *data_vaddr; uint32_t nsamples; volatile unsigned status; } ndspWaveBuf;
 #define NDSP_WBUF_FREE 0u
 #define NDSP_WBUF_QUEUED 1u
+#define NDSP_WBUF_PLAYING 2u
 #define NDSP_WBUF_DONE 3u
 #define NDSP_OUTPUT_STEREO 1
 #define NDSP_FORMAT_STEREO_PCM16 6

@@ -28,6 +28,7 @@ class TimerDeliveryTests(unittest.TestCase):
 #include <stdint.h>
 #include <string.h>
 typedef struct { uint32_t gpr[32], pc, hi, lo, cop0[32]; } CPUState;
+static int fm_irq_cpu_enabled(const CPUState *c) { return c && (c->cop0[12] & 0x401u)==0x401u; }
 typedef struct { unsigned reason; } FMInterpResult;
 #define FM_INTERP_BLOCK_DONE 1
 #define FM_INTERP_BUDGET 2
@@ -58,11 +59,13 @@ static FMInterpResult fm_interp_run_block(CPUState *cpu, unsigned budget) {
 int main(void) {
     CPUState cpu = {0};
     for (unsigned i = 0; i < 32; ++i) cpu.gpr[i] = i * 123;
-    cpu.pc = 0x80081AEC; cpu.hi = 12; cpu.lo = 34; cpu.cop0[12] = 56;
+    cpu.pc = 0x80081AEC; cpu.hi = 12; cpu.lo = 34; cpu.cop0[12] = 0x401;
     CPUState saved = cpu;
     pending = 1;
     assert(!fm_execute_guest_timer_callback(&cpu) && pending == 1);
     enabled = 1;
+    cpu.cop0[12]=0x400; assert(!fm_execute_guest_timer_callback(&cpu) && pending==1);
+    cpu.cop0[12]=1; assert(!fm_execute_guest_timer_callback(&cpu) && pending==1); cpu=saved;
     assert(!fm_execute_guest_timer_callback(0) && pending == 1);
     g_cd_tick_active = 1;
     assert(!fm_execute_guest_timer_callback(&cpu) && pending == 1);

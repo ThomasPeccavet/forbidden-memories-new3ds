@@ -30,10 +30,11 @@ class CdCallbackHostTests(unittest.TestCase):
 #include <stdint.h>
 #include <string.h>
 typedef struct {
-    uint32_t gpr[32], pc, hi, lo;
+    uint32_t gpr[32], pc, hi, lo, cop0[32];
     void (*write_byte)(uint32_t, uint8_t);
     uint8_t (*read_byte)(uint32_t);
 } CPUState;
+static int fm_irq_cpu_enabled(const CPUState *c) { return c && (c->cop0[12]&0x401u)==0x401u; }
 static uint64_t test_now;
 static uint64_t osGetTime(void) { return test_now; }
 static void fm_media_command(uint32_t cmd, uint32_t params, int mode, uint32_t lba) {
@@ -46,7 +47,7 @@ static uint8_t load(uint32_t a) { return ram[a & 0x1fffff]; }
         harness += "\n".join(declarations) + "\n" + code
         harness += r'''
 int main(void) {
-    CPUState cpu = {0}; cpu.write_byte = store; cpu.read_byte = load;
+    CPUState cpu = {0}; cpu.cop0[12]=0x401; cpu.write_byte = store; cpu.read_byte = load;
     cpu.pc = 0x8007a1d4; cpu.gpr[31] = 0x8007c6d8;
     cpu.gpr[28] = 0x8009c298;
     assert(fm_b33_schedule_cd_callback(&cpu, 9, 0x8007ca78,
@@ -59,6 +60,8 @@ int main(void) {
     cpu.pc = 0x800746b8; cpu.gpr[31] = 0x80012d48;
     cpu.gpr[2] = 0x1234; cpu.hi = 0x5678; cpu.lo = 0x9abc;
     cpu.gpr[28] = 0x80123400; /* Different delivery context. */
+    cpu.cop0[12]=0x400; assert(!fm_b33_deliver_cd_callback(&cpu,11) && g_b33_pending);
+    cpu.cop0[12]=0x401;
     assert(fm_b33_deliver_cd_callback(&cpu, 11));
     assert(cpu.pc == 0x8007ca78 && cpu.gpr[4] == 2);
     assert(load(0x80094bec) == 2);

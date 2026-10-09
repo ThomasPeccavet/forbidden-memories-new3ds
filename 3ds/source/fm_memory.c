@@ -5614,3 +5614,25 @@ void fm_memory_dma4_write_diag(uint32_t out[6])
     out[4] = g_dma4_last_bcr_write;
     out[5] = g_dma4_last_chcr_write;
 }
+
+void fm_memory_async_save(FMMemoryAsyncState *out)
+{
+    memset(out, 0, sizeof(*out));
+    memcpy(out->mdec_dma, g_mdec_dma, sizeof(g_mdec_dma));
+    memcpy(out->mdec_remaining, g_mdec_dma_remaining, sizeof(g_mdec_dma_remaining));
+    out->callback=g_mdec_callback; out->callback_gp=g_mdec_callback_gp;
+    out->irq_pending=g_mdec_irq_pending; out->dma4_pending=g_dma4_completion_pending;
+}
+int fm_memory_async_valid(const FMMemoryAsyncState *in)
+{
+    return in && (!in->callback || (in->callback >= 0x80010000u && in->callback < 0x80200000u))
+        && in->mdec_remaining[0] <= 0x1000000u && in->mdec_remaining[1] <= 0x1000000u;
+}
+void fm_memory_async_load(const FMMemoryAsyncState *in)
+{
+    memcpy(g_mdec_dma,in->mdec_dma,sizeof(g_mdec_dma));
+    memcpy(g_mdec_dma_remaining,in->mdec_remaining,sizeof(g_mdec_dma_remaining));
+    g_mdec_callback=in->callback; g_mdec_callback_gp=in->callback_gp;
+    g_mdec_irq_pending=in->irq_pending; g_dma4_completion_pending=in->dma4_pending;
+    g_mdec_dma_servicing=0;
+}

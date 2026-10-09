@@ -121,6 +121,7 @@ OBJECTS := \
 	$(BUILD)/fm_audio.o \
 	$(BUILD)/fm_xa.o \
 	$(BUILD)/fm_media.o \
+	$(BUILD)/fm_snapshot.o \
 	$(BUILD)/fm_vlc.o \
 	$(BUILD)/fm_mdec.o \
 	$(BUILD)/fm_cpu.o \
