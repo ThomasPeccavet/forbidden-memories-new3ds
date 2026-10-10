@@ -1,4 +1,11 @@
 #include "fm_gpu.h"
+#include "fm_modulate_lut.h"
+#ifndef FM_GPU_UNAI
+#define FM_GPU_UNAI 0
+#endif
+#if FM_GPU_UNAI
+#include "fm_unai.h"
+#endif
 
 #include "gpu_sw_renderer.h"
 #include "gpu_vram_dirty.h"
@@ -92,6 +99,13 @@ static uint64_t g_b122_upload_words = 0u;
  * turning the profiler itself into the bottleneck.
  */
 static uint32_t g_b13530_sample_phase = 0u;
+static uint64_t g_window_opcode_ticks[256], g_window_opcode_max[256];
+static uint32_t g_window_opcode_samples[256];
+
+static uint32_t g_window_neutral_triangles;
+static uint32_t g_window_fast_tex_triangles;
+static uint64_t g_window_neutral_pixels;
+static uint64_t g_window_fast_tex_pixels;
 
 /*
  * B124 - native 3DS fast path for variable-size textured rectangles
@@ -233,6 +247,9 @@ static void b122_record_opcode(
     }
 
     g_b122_exec_ticks += ticks;
+    g_window_opcode_ticks[opcode] += ticks;
+    ++g_window_opcode_samples[opcode];
+    if (ticks > g_window_opcode_max[opcode]) g_window_opcode_max[opcode] = ticks;
 }
 
 /* B28: diagnostic/preservation des clears framebuffer. */
@@ -888,6 +905,34 @@ static inline uint16_t b124_fetch_texel(
 }
 
 
+/* B136.39: opaque sprites, constant depth and constant modulation rows.
+ * Texture and CLUT reads stay live, including destination/source aliasing. */
+static inline __attribute__((always_inline)) void b13639_sprite_span(
+    uint16_t *dst, unsigned width, int tu, int tv, const B13512TexCtx *ctx,
+    unsigned depth, const unsigned char *r, const unsigned char *g,
+    const unsigned char *b, int identity)
+{
+    for (unsigned px=0; px<width; ++px, ++dst, tu=(tu+1)&255) {
+        uint16_t texel;
+        if (depth < 2u) {
+            unsigned shift=depth==0u ? 2u : 1u;
+            unsigned bits=depth==0u ? 4u : 8u;
+            uint16_t packed=b124_vram_get(ctx->tpx+(tu>>shift),ctx->tpy+tv);
+            unsigned index=(packed >> (((unsigned)tu & ((1u<<shift)-1u))*bits))
+                & ((1u<<bits)-1u);
+            texel=b124_vram_get(ctx->clx+(int)index,ctx->cly);
+        } else texel=b124_vram_get(ctx->tpx+tu,ctx->tpy+tv);
+        ++g_b124_rect_texels;
+        if (!texel) continue;
+        uint16_t out=identity ? texel & 0x7fffu :
+            (uint16_t)(r[texel&31u] | g[(texel>>5)&31u]<<5 | b[(texel>>10)&31u]<<10);
+        *dst=out;
+#if FM_PERF_PROFILE
+        ++g_b13543_rect_nonzero_texels; ++g_b13543_rect_writes;
+#endif
+    }
+}
+
 static int b124_try_textured_rect(
     uint8_t opcode,
     int x,
@@ -1006,6 +1051,23 @@ static int b124_try_textured_rect(
             cly,
             texpage
         );
+
+    if (!semi && !g_mask_check && !g_mask_set
+        && !(texctx.mask_x | texctx.mask_y)) {
+        const unsigned char *r=b13637_modulate+mod_r*32;
+        const unsigned char *g=b13637_modulate+mod_g*32;
+        const unsigned char *b=b13637_modulate+mod_b*32;
+        int identity=raw_texture || (mod_r==16 && mod_g==16 && mod_b==16);
+        for (int py=y0; py<y1; ++py) {
+            uint16_t *dst=g_vram+(size_t)py*1024u+(size_t)x0;
+            int tu=(u+x0-x)&255, tv=(v+py-y)&255;
+            unsigned width=(unsigned)(x1-x0);
+            if (texctx.depth==0u) b13639_sprite_span(dst,width,tu,tv,&texctx,0u,r,g,b,identity);
+            else if (texctx.depth==1u) b13639_sprite_span(dst,width,tu,tv,&texctx,1u,r,g,b,identity);
+            else b13639_sprite_span(dst,width,tu,tv,&texctx,2u,r,g,b,identity);
+        }
+        return 1;
+    }
 
     for (int py = y0; py < y1; ++py)
     {
@@ -1564,6 +1626,36 @@ static void b125_textured_triangle(
 }
 
 
+/* B136.35: exact 16.16 division with a VFP estimate, integer correction,
+ * and the original integer divide fallback for steep/exceptional slopes.
+ * The estimate alone is never accepted as a rounding result. */
+#ifndef FM_GPU_EXACT_GRADIENTS
+#define FM_GPU_EXACT_GRADIENTS 1
+#endif
+static inline int32_t b13635_gradient(
+    int32_t numerator, int64_t denominator, float inverse_abs_fp16
+)
+{
+    if (!denominator) return 0;
+    int64_t scaled = (int64_t)numerator * 65536;
+    uint64_t n = numerator < 0 ? (uint64_t)-scaled : (uint64_t)scaled;
+    uint64_t d = denominator < 0 ? (uint64_t)-denominator : (uint64_t)denominator;
+    uint32_t magnitude = numerator < 0 ? 0u-(uint32_t)numerator : (uint32_t)numerator;
+    float estimate = (float)magnitude * inverse_abs_fp16;
+    if (FM_GPU_EXACT_GRADIENTS && d <= 0x7fffffffu
+        && estimate >= 0.0f && estimate < 4194304.0f) {
+        uint32_t q = (uint32_t)estimate;
+        uint64_t product = (uint64_t)q * d;
+        if (product > n && q) { --q; product -= d; }
+        if (product <= n && n-product >= d) { ++q; product += d; }
+        /* This proves truncation of |numerator*65536|/|denominator|.
+         * If rounding ever needs more correction, use exact division. */
+        if (product <= n && n-product < d)
+            return ((numerator < 0) != (denominator < 0)) ? -(int32_t)q : (int32_t)q;
+    }
+    return (int32_t)(scaled / denominator);
+}
+
 static void b125_gouraud_triangle(
     int x0, int y0, uint16_t c0,
     int x1, int y1, uint16_t c1,
@@ -1625,41 +1717,25 @@ static void b125_gouraud_triangle(
     int g2 = (c2 >> 5) & 31;
     int b2 = (c2 >> 10) & 31;
 
-#define B128_GRAD_X(a0,a1,a2) \
-    ((int32_t)(((((int64_t)((a1)-(a0)) * (y2-y0)) - \
-                  ((int64_t)((a2)-(a0)) * (y1-y0))) << 16) / det))
-
-#define B128_GRAD_Y(a0,a1,a2) \
-    ((int32_t)(((((int64_t)(x1-x0) * ((a2)-(a0))) - \
-                  ((int64_t)(x2-x0) * ((a1)-(a0)))) << 16) / det))
-
-    int32_t dr_dx = B128_GRAD_X(r0,r1,r2);
-    int32_t dr_dy = B128_GRAD_Y(r0,r1,r2);
-    int32_t dg_dx = B128_GRAD_X(g0,g1,g2);
-    int32_t dg_dy = B128_GRAD_Y(g0,g1,g2);
-    int32_t db_dx = B128_GRAD_X(b0,b1,b2);
-    int32_t db_dy = B128_GRAD_Y(b0,b1,b2);
-
-#undef B128_GRAD_X
-#undef B128_GRAD_Y
-
-    int32_t dx_long =
-        b128_div_fp16(
-            (int64_t)(x2 - x0),
-            dy02
-        );
-
-    int32_t dx_upper =
-        b128_div_fp16(
-            (int64_t)(x1 - x0),
-            y1 - y0
-        );
-
-    int32_t dx_lower =
-        b128_div_fp16(
-            (int64_t)(x2 - x1),
-            y2 - y1
-        );
+    float inv_det = 65536.0f / (float)(det < 0 ? -det : det);
+#define B13635_GX(a0,a1,a2) \
+    b13635_gradient(((a1)-(a0))*(y2-y0)-((a2)-(a0))*(y1-y0), det, inv_det)
+#define B13635_GY(a0,a1,a2) \
+    b13635_gradient((x1-x0)*((a2)-(a0))-(x2-x0)*((a1)-(a0)), det, inv_det)
+    int32_t dr_dx = B13635_GX(r0,r1,r2);
+    int32_t dr_dy = B13635_GY(r0,r1,r2);
+    int32_t dg_dx = B13635_GX(g0,g1,g2);
+    int32_t dg_dy = B13635_GY(g0,g1,g2);
+    int32_t db_dx = B13635_GX(b0,b1,b2);
+    int32_t db_dy = B13635_GY(b0,b1,b2);
+#undef B13635_GX
+#undef B13635_GY
+    int32_t dx_long = b13635_gradient(x2-x0, dy02, 65536.0f/(float)dy02);
+    int32_t dx_upper = b13635_gradient(x1-x0, y1-y0,
+        y1 != y0 ? 65536.0f/(float)(y1-y0) : 0.0f);
+    int32_t dx_lower = b13635_gradient(x2-x1, y2-y1,
+        y2 != y1 ? 65536.0f/(float)(y2-y1) : 0.0f);
+    uint32_t pixels = 0u;
 
     int ys = y0;
     int ye = y2;
@@ -1750,8 +1826,7 @@ static void b125_gouraud_triangle(
             +
             (size_t)sx;
 
-        g_b125_pixels +=
-            (uint64_t)(ex - sx);
+        pixels += (uint32_t)(ex - sx);
 
         for (int x = sx; x < ex; ++x, ++dst)
         {
@@ -1784,6 +1859,8 @@ static void b125_gouraud_triangle(
             b_fp += db_dx;
         }
     }
+
+    g_b125_pixels += pixels;
 
 #undef B128_SWAP_INT2
 #undef B128_SWAP_U16
@@ -1838,6 +1915,96 @@ static inline int32_t b13513_edge_fp16(
         );
 }
 
+
+/* B136.36: the old modulation is exactly identity when all vertex
+ * RGB555 components are 16. Keep the original transparency/cache behavior,
+ * but eliminate RGB interpolation, clamping and multiplication per pixel.
+ * Constant depth call sites let the compiler remove format branches too. */
+static inline __attribute__((always_inline)) void b13636_neutral_span(
+    uint16_t *dst, unsigned width, int32_t u_fp, int32_t v_fp,
+    int32_t du_dx, int32_t dv_dx, const B13512TexCtx *ctx,
+    const uint16_t *palette, unsigned depth
+)
+{
+    int last_key = -1;
+    uint16_t packed = 0u;
+    uint32_t u = (uint32_t)u_fp, v = (uint32_t)v_fp;
+    for (unsigned x=0; x<width; ++x, ++dst) {
+        int tu = ((int32_t)u >> 16) & 255;
+        int tv = ((int32_t)v >> 16) & 255;
+        uint16_t texel;
+        if (depth < 2u) {
+            unsigned shift = depth == 0u ? 2u : 1u;
+            int key = (tv << (8u-shift)) | (tu >> shift);
+            if (key != last_key) {
+                packed = g_vram[(size_t)(ctx->tpy+tv)*1024u
+                    + (size_t)((ctx->tpx+(tu >> shift)) & 1023)];
+                last_key = key;
+            }
+            unsigned bits = depth == 0u ? 4u : 8u;
+            unsigned lane = (unsigned)tu & ((1u << shift)-1u);
+            texel = palette[(packed >> (lane*bits)) & ((1u << bits)-1u)];
+        } else {
+            texel = g_vram[(size_t)(ctx->tpy+tv)*1024u
+                + (size_t)((ctx->tpx+tu) & 1023)];
+        }
+        /* 8000h is opaque black, not transparent: test before masking. */
+        if (texel != 0u) *dst = texel & 0x7fffu;
+        u += (uint32_t)du_dx; v += (uint32_t)dv_dx;
+    }
+}
+
+/* B136.37: format-specialized spans for non-neutral Gouraud texturing.
+ * Each constant-depth call removes texture-format branches from the hot loop.
+ * A 1 KiB table exactly replaces component multiply/shift/saturation.
+ * Color interpolation, transparent texels and palette snapshots are unchanged. */
+static inline __attribute__((always_inline)) void b13637_shaded_span(
+    uint16_t *dst, unsigned width, int32_t u_fp, int32_t v_fp,
+    int32_t du_dx, int32_t dv_dx,
+    int32_t r_fp, int32_t g_fp, int32_t b_fp,
+    int32_t dr_dx, int32_t dg_dx, int32_t db_dx,
+    const B13512TexCtx *ctx,
+    const uint16_t *palette, unsigned depth
+)
+{
+    int last_key = -1;
+    uint16_t packed = 0u;
+    uint32_t u = (uint32_t)u_fp, v = (uint32_t)v_fp;
+    for (unsigned x=0; x<width; ++x, ++dst) {
+        int tu = ((int32_t)u >> 16) & 255;
+        int tv = ((int32_t)v >> 16) & 255;
+        uint16_t texel;
+        if (depth < 2u) {
+            unsigned shift = depth == 0u ? 2u : 1u;
+            int key = (tv << (8u-shift)) | (tu >> shift);
+            if (key != last_key) {
+                packed = g_vram[(size_t)(ctx->tpy+tv)*1024u
+                    + (size_t)((ctx->tpx+(tu >> shift)) & 1023)];
+                last_key = key;
+            }
+            unsigned bits = depth == 0u ? 4u : 8u;
+            unsigned lane = (unsigned)tu & ((1u << shift)-1u);
+            texel = palette[(packed >> (lane*bits)) & ((1u << bits)-1u)];
+        } else {
+            texel = g_vram[(size_t)(ctx->tpy+tv)*1024u
+                + (size_t)((ctx->tpx+tu) & 1023)];
+        }
+        if (texel != 0u) {
+            int mr=r_fp >> 16, mg=g_fp >> 16, mb=b_fp >> 16;
+            if ((unsigned)mr > 31u) mr=mr < 0 ? 0 : 31;
+            if ((unsigned)mg > 31u) mg=mg < 0 ? 0 : 31;
+            if ((unsigned)mb > 31u) mb=mb < 0 ? 0 : 31;
+            int rr=b13637_modulate[((unsigned)mr << 5) | (texel & 31u)];
+            int gg=b13637_modulate[((unsigned)mg << 5) | ((texel >> 5) & 31u)];
+            int bb=b13637_modulate[((unsigned)mb << 5) | ((texel >> 10) & 31u)];
+            *dst=(uint16_t)(rr | gg << 5 | bb << 10);
+        }
+        u += (uint32_t)du_dx; v += (uint32_t)dv_dx;
+        r_fp=(int32_t)((uint32_t)r_fp+(uint32_t)dr_dx);
+        g_fp=(int32_t)((uint32_t)g_fp+(uint32_t)dg_dx);
+        b_fp=(int32_t)((uint32_t)b_fp+(uint32_t)db_dx);
+    }
+}
 
 static void b13511_shaded_textured_triangle(
     int x0, int y0, int u0, int v0, uint32_t c0,
@@ -1927,12 +2094,16 @@ static void b13511_shaded_textured_triangle(
     int32_t dv_dx = b13513_grad_fp16(B13513_NUM_X(v0,v1,v2), inv_det_fp16);
     int32_t dv_dy = b13513_grad_fp16(B13513_NUM_Y(v0,v1,v2), inv_det_fp16);
 
-    int32_t dr_dx = b13513_grad_fp16(B13513_NUM_X(r0,r1,r2), inv_det_fp16);
-    int32_t dr_dy = b13513_grad_fp16(B13513_NUM_Y(r0,r1,r2), inv_det_fp16);
-    int32_t dg_dx = b13513_grad_fp16(B13513_NUM_X(g0,g1,g2), inv_det_fp16);
-    int32_t dg_dy = b13513_grad_fp16(B13513_NUM_Y(g0,g1,g2), inv_det_fp16);
-    int32_t db_dx = b13513_grad_fp16(B13513_NUM_X(b0,b1,b2), inv_det_fp16);
-    int32_t db_dy = b13513_grad_fp16(B13513_NUM_Y(b0,b1,b2), inv_det_fp16);
+    int b13636_neutral =
+        (c0 & 0x00f8f8f8u) == 0x00808080u &&
+        (c1 & 0x00f8f8f8u) == 0x00808080u &&
+        (c2 & 0x00f8f8f8u) == 0x00808080u;
+    int32_t dr_dx = b13636_neutral ? 0 : b13513_grad_fp16(B13513_NUM_X(r0,r1,r2), inv_det_fp16);
+    int32_t dr_dy = b13636_neutral ? 0 : b13513_grad_fp16(B13513_NUM_Y(r0,r1,r2), inv_det_fp16);
+    int32_t dg_dx = b13636_neutral ? 0 : b13513_grad_fp16(B13513_NUM_X(g0,g1,g2), inv_det_fp16);
+    int32_t dg_dy = b13636_neutral ? 0 : b13513_grad_fp16(B13513_NUM_Y(g0,g1,g2), inv_det_fp16);
+    int32_t db_dx = b13636_neutral ? 0 : b13513_grad_fp16(B13513_NUM_X(b0,b1,b2), inv_det_fp16);
+    int32_t db_dy = b13636_neutral ? 0 : b13513_grad_fp16(B13513_NUM_Y(b0,b1,b2), inv_det_fp16);
 
 #undef B13513_NUM_X
 #undef B13513_NUM_Y
@@ -1967,6 +2138,11 @@ static void b13511_shaded_textured_triangle(
         &&
         (texctx.mask_x | texctx.mask_y) == 0u;
 
+    b13636_neutral = b13636_neutral && b13533_fast;
+#if FM_PERF_PROFILE
+    if (b13533_fast) ++g_window_fast_tex_triangles;
+    if (b13636_neutral) ++g_window_neutral_triangles;
+#endif
     uint16_t b13533_clut[256];
 
     if (b13533_fast && texctx.depth == 0u)
@@ -2087,114 +2263,31 @@ static void b13511_shaded_textured_triangle(
             b13537_fast_pixels +=
                 b13537_span;
 
-            int last_key = -1;
-            uint16_t packed = 0u;
-
-            for (int x = sx; x < ex; ++x, ++dst)
-            {
-                int tu = (u_fp >> 16) & 0xFF;
-                int tv = (v_fp >> 16) & 0xFF;
-                uint16_t texel;
-
+            if (b13636_neutral) {
                 if (texctx.depth == 0u)
-                {
-                    int key =
-                        (tv << 6)
-                        |
-                        (tu >> 2);
-
-                    if (key != last_key)
-                    {
-                        packed =
-                            g_vram[
-                                (size_t)(texctx.tpy + tv) * 1024u
-                                +
-                                (size_t)((texctx.tpx + (tu >> 2)) & 1023)
-                            ];
-
-                        last_key =
-                            key;
-                    }
-
-                    texel =
-                        b13533_clut[
-                            (packed >> ((tu & 3) * 4)) & 0x0F
-                        ];
-                }
+                    b13636_neutral_span(dst, b13537_span, u_fp, v_fp,
+                        du_dx, dv_dx, &texctx, b13533_clut, 0u);
                 else if (texctx.depth == 1u)
-                {
-                    int key =
-                        (tv << 7)
-                        |
-                        (tu >> 1);
-
-                    if (key != last_key)
-                    {
-                        packed =
-                            g_vram[
-                                (size_t)(texctx.tpy + tv) * 1024u
-                                +
-                                (size_t)((texctx.tpx + (tu >> 1)) & 1023)
-                            ];
-
-                        last_key =
-                            key;
-                    }
-
-                    texel =
-                        b13533_clut[
-                            (packed >> ((tu & 1) * 8)) & 0xFF
-                        ];
-                }
+                    b13636_neutral_span(dst, b13537_span, u_fp, v_fp,
+                        du_dx, dv_dx, &texctx, b13533_clut, 1u);
                 else
-                {
-                    texel =
-                        g_vram[
-                            (size_t)(texctx.tpy + tv) * 1024u
-                            +
-                            (size_t)((texctx.tpx + tu) & 1023)
-                        ];
-                }
-
-                if (texel != 0u)
-                {
-                    int mr = r_fp >> 16;
-                    int mg = g_fp >> 16;
-                    int mb = b_fp >> 16;
-
-                    if ((unsigned)mr > 31u) mr = mr < 0 ? 0 : 31;
-                    if ((unsigned)mg > 31u) mg = mg < 0 ? 0 : 31;
-                    if ((unsigned)mb > 31u) mb = mb < 0 ? 0 : 31;
-
-                    int rr =
-                        (((int)(texel & 31u)) * mr) >> 4;
-
-                    int gg =
-                        (((int)((texel >> 5) & 31u)) * mg) >> 4;
-
-                    int bb =
-                        (((int)((texel >> 10) & 31u)) * mb) >> 4;
-
-                    if (rr > 31) rr = 31;
-                    if (gg > 31) gg = 31;
-                    if (bb > 31) bb = 31;
-
-                    *dst =
-                        (uint16_t)(
-                            rr
-                            |
-                            (gg << 5)
-                            |
-                            (bb << 10)
-                        );
-                }
-
-                u_fp += du_dx;
-                v_fp += dv_dx;
-                r_fp += dr_dx;
-                g_fp += dg_dx;
-                b_fp += db_dx;
+                    b13636_neutral_span(dst, b13537_span, u_fp, v_fp,
+                        du_dx, dv_dx, &texctx, b13533_clut, 2u);
+                continue;
             }
+
+            if (texctx.depth == 0u)
+                b13637_shaded_span(dst, b13537_span, u_fp, v_fp, du_dx, dv_dx,
+                    r_fp, g_fp, b_fp, dr_dx, dg_dx, db_dx,
+                    &texctx, b13533_clut, 0u);
+            else if (texctx.depth == 1u)
+                b13637_shaded_span(dst, b13537_span, u_fp, v_fp, du_dx, dv_dx,
+                    r_fp, g_fp, b_fp, dr_dx, dg_dx, db_dx,
+                    &texctx, b13533_clut, 1u);
+            else
+                b13637_shaded_span(dst, b13537_span, u_fp, v_fp, du_dx, dv_dx,
+                    r_fp, g_fp, b_fp, dr_dx, dg_dx, db_dx,
+                    &texctx, b13533_clut, 2u);
         }
         else
         {
@@ -2235,6 +2328,10 @@ static void b13511_shaded_textured_triangle(
         }
     }
 
+#if FM_PERF_PROFILE
+    g_window_fast_tex_pixels += b13537_fast_pixels;
+    if (b13636_neutral) g_window_neutral_pixels += b13537_fast_pixels;
+#endif
     g_b125_pixels +=
         (uint64_t)b13537_pixels;
 
@@ -3446,6 +3543,22 @@ static void execute_command(void)
         ++g_packet_other;
     }
 
+
+    /* B136.44: independent rendering backend; parser and environment remain
+     * owned here. Unsupported packets fall through without side effects. */
+#if FM_GPU_UNAI
+    if (sw_renderer_scale()==1 && sw_wide_width()==0 && sw_texture_filter()==0
+        && fm_unai_draw(g_vram,g_cmd,g_cmd_have,g_texpage,g_texture_window,
+            g_mask_set,g_mask_check,g_draw_x1,g_draw_y1,g_draw_x2,g_draw_y2,
+            g_offset_x,g_offset_y)) {
+        if ((opcode&0xfcu)==0x34u || (opcode&0xfcu)==0x3cu)
+            g_texpage=packet_texpage(g_cmd[5]);
+        gpu_vram_dirty_mark_rect(g_draw_x1,g_draw_y1,
+            g_draw_x2-g_draw_x1+1,g_draw_y2-g_draw_y1+1);
+        g_has_frame=1;
+        return;
+    }
+#endif
 
     /*
      * --------------------------------------------------------
@@ -5075,6 +5188,7 @@ void fm_gpu_init(
 
     g_b13530_sample_phase =
         0u;
+    fm_gpu_perf_window_reset();
 
     g_b124_rect_hits =
         0u;
@@ -5315,6 +5429,41 @@ void fm_gpu_init(
  * ============================================================
  */
 
+/* B136.16: preserve the GP0 stream, but copy upload payloads by VRAM row.
+ * The renderer owns dirty rows / any supersampled mirror; its bulk transfer
+ * keeps those coherent without two writes and a dirty call per pixel. */
+void fm_gpu_gp0_words(const uint32_t *words, uint32_t count)
+{
+    while (count) {
+        if (g_state != FM_GPU_VRAM_WRITE || !g_upload_pixels) {
+            uint32_t value;
+            memcpy(&value, words++, sizeof(value));
+            fm_gpu_gp0_write(value); --count;
+            continue;
+        }
+        uint32_t pixels = g_upload_pixels - g_upload_index;
+        uint32_t nwords = (pixels + 1u) / 2u;
+        if (nwords > count) nwords = count;
+        if (pixels > nwords * 2u) pixels = nwords * 2u;
+        const uint16_t *src = (const uint16_t *)words;
+        uint32_t copied = 0;
+        while (copied < pixels) {
+            unsigned col = g_upload_index % g_upload_w;
+            unsigned row = g_upload_index / g_upload_w;
+            unsigned n = g_upload_w - col;
+            if (n > pixels - copied) n = pixels - copied;
+            sw_vram_transfer_in((g_upload_x + col) & 1023u,
+                (g_upload_y + row) & 511u, n, 1, src + copied);
+            g_upload_index += n; copied += n;
+        }
+        g_gp0_count += nwords; g_upload_data_words += nwords;
+        words += nwords; count -= nwords;
+        if (g_upload_index >= g_upload_pixels) {
+            g_state = FM_GPU_IDLE; g_has_frame = 1;
+        }
+    }
+}
+
 void fm_gpu_gp0_write(
     uint32_t value
 )
@@ -5519,7 +5668,7 @@ void fm_gpu_gp0_write(
     {
 #if FM_PERF_PROFILE
         /*
-         * B135.30/34/35: sampled opcode/raster timing is PROFILE-only.
+         * B136.38: complete opcode timing is PROFILE-only.
          * CLEAN executes the exact same GP0 command path without clocks.
          */
         uint8_t completed_opcode =
@@ -5527,7 +5676,7 @@ void fm_gpu_gp0_write(
 
         ++g_b13530_sample_phase;
 
-        if ((g_b13530_sample_phase & 15u) == 0u)
+        /* B136.38 measurement build: time every completed command. */
         {
             uint64_t sample_start =
                 svcGetSystemTick();
@@ -5545,13 +5694,7 @@ void fm_gpu_gp0_write(
                 svcGetSystemTick() - sample_start
             );
         }
-        else
-        {
-            g_b13534_sample_active =
-                0;
 
-            execute_command();
-        }
 #else
         execute_command();
 #endif
@@ -5943,6 +6086,45 @@ void fm_gpu_b122_rank(
     }
 }
 
+
+/* B136.35 window statistics survive per-DMA diagnostic resets. */
+void fm_gpu_perf_window_reset(void)
+{
+    memset(g_window_opcode_ticks, 0, sizeof(g_window_opcode_ticks));
+    memset(g_window_opcode_max, 0, sizeof(g_window_opcode_max));
+    memset(g_window_opcode_samples, 0, sizeof(g_window_opcode_samples));
+    g_window_neutral_triangles = g_window_fast_tex_triangles = 0u;
+    g_window_neutral_pixels = g_window_fast_tex_pixels = 0u;
+}
+void fm_gpu_perf_texture_window(uint64_t *neutral_pixels, uint64_t *fast_pixels,
+    uint32_t *neutral_triangles, uint32_t *fast_triangles)
+{
+    if (neutral_pixels) *neutral_pixels=g_window_neutral_pixels;
+    if (fast_pixels) *fast_pixels=g_window_fast_tex_pixels;
+    if (neutral_triangles) *neutral_triangles=g_window_neutral_triangles;
+    if (fast_triangles) *fast_triangles=g_window_fast_tex_triangles;
+}
+void fm_gpu_perf_window_rank(unsigned rank, FMGpuOpcodePerf *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    uint8_t selected[256] = {0};
+    for (unsigned pick=0; pick<=rank; ++pick) {
+        int best=-1;
+        for (unsigned op=0; op<256; ++op)
+            if (!selected[op] && g_window_opcode_samples[op]
+                && (best<0 || g_window_opcode_ticks[op]>g_window_opcode_ticks[best]))
+                best=(int)op;
+        if (best<0) return;
+        selected[best]=1;
+        if (pick==rank) {
+            out->opcode=(uint8_t)best;
+            out->calls=g_window_opcode_samples[best];
+            out->total_us=b122_ticks_to_us(g_window_opcode_ticks[best]);
+            out->max_us=(uint32_t)b122_ticks_to_us(g_window_opcode_max[best]);
+        }
+    }
+}
 
 void fm_gpu_b13532_profile_reset(void)
 {
@@ -6411,6 +6593,19 @@ void fm_gpu_b127_perf_snapshot(
      * snapshot and may have filled cheap fields such as gp0_words.
      * Only copy counters needed by B124..B127.
      */
+    /* B136.8: real cheap packet counters. Previously callers zeroed the
+     * struct and this getter left fill/draw/copy/upload misleadingly at 0. */
+    out->packets_total = g_packet_total;
+    out->packets_nop = g_packet_nop;
+    out->packets_fill = g_packet_fill;
+    out->packets_draw = g_packet_draw;
+    out->packets_copy = g_packet_copy;
+    out->packets_upload = g_packet_upload;
+    out->packets_readback = g_packet_readback;
+    out->packets_env = g_packet_env;
+    out->packets_other = g_packet_other;
+    out->upload_data_words = g_upload_data_words;
+
     out->b124_rect_hits =
         g_b124_rect_hits;
 

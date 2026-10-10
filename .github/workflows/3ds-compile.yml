@@ -37,10 +37,49 @@ jobs:
             build-profile/main.o \
             build-profile/platform.o \
             build-profile/disc.o \
+            build-profile/fm_audio.o \
+            build-profile/fm_xa.o \
+            build-profile/fm_media.o \
+            build-profile/fm_snapshot.o \
+            build-profile/fm_vlc.o \
+            build-profile/fm_mdec.o \
             build-profile/fm_cpu.o \
             build-profile/fm_memory.o \
+            build-profile/fm_spu.o \
             build-profile/fm_runtime_shim.o \
+            build-profile/fm_sort_swap.o \
             build-profile/fm_interp.o \
             build-profile/fm_gpu.o \
             build-profile/gpu_sw_renderer.o \
             build-profile/gpu_vram_dirty.o
+      - name: Compile experimental Unai frontend and ARMv6 renderer
+        run: |
+          export PATH="$DEVKITARM/bin:$PATH"
+          make -C 3ds PROFILE=1 UNAI=1 -j2 \
+            build-profile-unai/main.o \
+            build-profile-unai/fm_gpu.o \
+            build-profile-unai/fm_unai.o \
+            build-profile-unai/gpu_unai_arm.o
+          "$DEVKITARM/bin/arm-none-eabi-g++" -r \
+            3ds/build-profile-unai/fm_unai.o 3ds/build-profile-unai/gpu_unai_arm.o \
+            -o /tmp/unai-linked.o
+          if "$DEVKITARM/bin/arm-none-eabi-nm" -u /tmp/unai-linked.o | grep -E 'sprite_driver_|poly_.*_asm|tile_driver_'; then
+            echo "Missing Unai assembly implementation"; exit 1
+          fi
+
+      - name: Compile transformed native RAM and COP2 accesses on ARM
+        run: |
+          export PATH="$DEVKITARM/bin:$PATH"
+          mkdir -p /tmp/fm-native-original
+          cp tests/host/native_memory_generated.c /tmp/fm-native-original/SLES_039.48_full_00.c
+          python3 tools/inline_native_memory.py /tmp/fm-native-original /tmp/fm-native-transformed
+          for cycles in "" "-DPSX_ENABLE_BLOCK_CYCLES"; do
+            "$DEVKITARM/bin/arm-none-eabi-gcc" -std=gnu11 -O3 \
+              -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft \
+              -Werror=implicit-function-declaration $cycles \
+              -Iwork/upstream-psxrecomp/runtime/include -I3ds/include \
+              -c /tmp/fm-native-transformed/SLES_039.48_full_00.c -o /tmp/fm-native.o
+            if "$DEVKITARM/bin/arm-none-eabi-nm" -u /tmp/fm-native.o | grep -E 'gte_(read|write)_(data|ctrl)'; then
+              echo "Constant native COP2 transfers were not specialized"; exit 1
+            fi
+          done

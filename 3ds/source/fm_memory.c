@@ -1,5 +1,10 @@
 #include "fm_memory.h"
+#include "fm_ram_access.h"
+#include "fm_native_memory.h"
 #include "fm_gpu.h"
+#include "mdec.h"
+#include "fm_media.h"
+#include "fm_spu.h"
 
 #include <3ds.h>
 #include <stddef.h>
@@ -61,6 +66,9 @@
 #define PSX_TIMER2_TARGET   0x1F801128u
 
 #define PSX_TIMER_COUNT     3u
+/* main.c advances timers once per 60 Hz 3DS VBlank. */
+#define PSX_CPU_CLOCK_HZ    33868800u
+#define FM_HOST_VBLANK_HZ   60u
 
 
 /*
@@ -95,14 +103,18 @@
 #define PSX_DMA_DICR        0x1F8010F4u
 
 /*
- * Minimal SPU MMIO needed by Psy-Q transfer setup.
+ * SPU MMIO and transfer-status compatibility needed by Psy-Q transfer setup.
  * Base 1F801C00; only a few control/status registers are modeled.
  */
 #define PSX_SPU_BASE        0x1F801C00u
+#define PSX_SPU_REVERB_MASK (PSX_SPU_BASE + 0x198u)
 #define PSX_SPU_XFER_ADDR   (PSX_SPU_BASE + 0x1A6u)
 #define PSX_SPU_XFER_DATA   (PSX_SPU_BASE + 0x1A8u)
 #define PSX_SPU_CTRL        (PSX_SPU_BASE + 0x1AAu)
 #define PSX_SPU_STAT        (PSX_SPU_BASE + 0x1AEu)
+
+static uint16_t fm_spu_read_half(uint32_t phys);
+static void fm_spu_write_half(uint32_t phys, uint16_t value);
 
 
 /*
@@ -121,10 +133,13 @@
  * ============================================================
  */
 
+FMNativeRam g_fm_native_ram = {NULL, 0};
 static uint8_t *g_ram = NULL;
 static size_t g_ram_size = 0;
 
 static uint8_t g_scratch[PSX_SCRATCH_SIZE];
+uint8_t *const g_fm_native_scratch = g_scratch;
+
 
 /*
  * B136.0 - exact guest RAM write watch.
@@ -152,32 +167,14 @@ static FMMemoryWatchEvent g_memory_watch[FM_MEMORY_WATCH_CAP];
 static uint32_t g_memory_watch_seq = 0u;
 static uint32_t g_memory_watch_count = 0u;
 
+/* Only two watched ranges: avoid testing ten addresses on every store. */
 static int fm_memory_watch_overlap(uint32_t phys, uint32_t size)
 {
-    static const uint32_t watched[] = {
-        /* B136.3: quiet watch focused on the stalled CD request. */
-        0x0009C460u, /* global CD flags */
-        0x0009C484u, /* global CD pending state */
-        0x000EB1C8u, /* req + 0x10 remaining */
-        0x000EB1D0u, /* req + 0x18 data/buffer */
-        0x000EB1D4u, /* req + 0x1C total/initial */
-        0x000EB1D8u, /* req + 0x20 callback */
-        0x000EB1DCu, /* req + 0x24 LBA */
-        0x000EB1E4u, /* req + 0x2C flags/cmd */
-        0x000EB1ECu, /* req + 0x34 user/context */
-        0x000EB1F8u  /* req + 0x40 state */
-    };
-
     uint32_t end = phys + size;
-    for (unsigned i = 0u; i < sizeof(watched) / sizeof(watched[0]); ++i)
-    {
-        if (watched[i] >= phys && watched[i] < end)
-        {
-            return 1;
-        }
-    }
-    return 0;
+    return (phys <= 0x0009C4B8u && end > 0x0009C4B8u)
+        || (phys < 0x000EB251u && end > 0x000EB248u);
 }
+
 
 static void fm_memory_watch_store(uint32_t phys, uint32_t size, uint32_t value)
 {
@@ -301,6 +298,10 @@ static FMRootCounter g_timers[
  * ============================================================
  */
 
+static uint32_t g_mdec_dma[2][3];
+static uint32_t g_mdec_dma_remaining[2];
+static uint32_t g_mdec_callback, g_mdec_callback_gp, g_mdec_irq_pending;
+static int g_mdec_dma_servicing;
 static uint32_t g_dma2_madr = 0;
 static uint32_t g_dma2_bcr = 0;
 static uint32_t g_dma2_chcr = 0;
@@ -328,6 +329,7 @@ static uint32_t g_dma_dicr = 0;
 static uint16_t g_spu_xfer_addr = 0;
 static uint16_t g_spu_xfer_data = 0;
 static uint16_t g_spu_ctrl = 0;
+static uint32_t g_spu_reverb_mask;
 static uint16_t g_spu_stat = 0;
 
 /*
@@ -371,6 +373,7 @@ static uint32_t g_dma2_max_empty_ot_nodes = 0u;
 static uint32_t g_dma2_linked_last_ms = 0u;
 static uint32_t g_dma2_linked_max_ms = 0u;
 static uint64_t g_dma2_linked_total_ms = 0u;
+static uint64_t g_dma2_payload_ticks = 0u;
 static uint32_t g_dma2_linked_over20 = 0u;
 static uint32_t g_dma2_linked_over33 = 0u;
 
@@ -533,8 +536,8 @@ static uint8_t *fm_scratch_ptr(
  *   12     reached FFFF
  *
  * The emulation is intentionally deterministic rather than
- * cycle-perfect. Timers move on every host VBlank and also make
- * a small amount of progress when COUNT is polled repeatedly.
+ * cycle-perfect. Timers move on every host VBlank; COUNT reads are stable.
+ * Timer2 uses the PS1 system clock; timer0/1 retain bring-up approximations.
  */
 
 static uint16_t fm_timer_irq_bit(
@@ -807,7 +810,8 @@ static void fm_timer_advance(
     else
     {
         if (
-            target > old_count
+            delta >= 0x10000u
+            || target > old_count
             ||
             target <= new_count
         )
@@ -848,9 +852,7 @@ static uint32_t fm_timer_vblank_delta(
         &g_timers[index];
 
 
-    /*
-     * PAL-oriented approximations for bring-up.
-     */
+    /* Timer0/1 retain their existing bring-up approximations. */
     if (index == 1u)
     {
         uint32_t source =
@@ -879,14 +881,19 @@ static uint32_t fm_timer_vblank_delta(
 
     if (index == 2u)
     {
+        /* B136.30: the sequencer selects system clock / 8, target E000.
+         * 4096 ticks per host VBlank made the music clock 17.2x too slow.
+         * Accumulate one 60 Hz host interval, regardless of PAL display mode.
+         * IRQs still coalesce in I_STAT; no synthetic callback backlog. */
+        uint32_t cycles = PSX_CPU_CLOCK_HZ / FM_HOST_VBLANK_HZ;
         return
             (
                 timer->mode
                 &
                 0x0200u
             )
-                ? 4096u
-                : 32768u;
+                ? cycles / 8u
+                : cycles;
     }
 
 
@@ -1504,6 +1511,101 @@ static void fm_dma_update_irq(void)
 }
 
 
+/* B136.15: MDEC input/output DMA use the same RAM and completion semantics
+ * as GPU DMA. Output waits for decoded data instead of inventing pixels. */
+static void fm_mdec_dma_service(void)
+{
+    if (g_mdec_dma_servicing) return;
+    g_mdec_dma_servicing = 1;
+    for (unsigned ch = 0; ch < 2u; ++ch) {
+        uint32_t *reg = g_mdec_dma[ch];
+        if (!(reg[2] & 0x01000000u)) continue;
+        uint32_t left = g_mdec_dma_remaining[ch];
+        while (left && (ch == 0u ? mdec_dma_write_ready() : mdec_dma_read_ready())) {
+            uint32_t moved = 0;
+            uint32_t offset = reg[0] & 0x001FFFFCu;
+            if (!(reg[2] & 2u) && g_ram && offset < g_ram_size) {
+                uint32_t span = (PSX_RAM_SIZE - offset) / 4u;
+                if (span > (g_ram_size - offset) / 4u) span = (g_ram_size - offset) / 4u;
+                if (span > left) span = left;
+                if (span) moved = ch
+                    ? mdec_dma_read_words((uint32_t *)(g_ram + offset), span)
+                    : mdec_dma_write_words((const uint32_t *)(g_ram + offset), span);
+            }
+            if (!moved) {
+                if (!ch) mdec_dma_write_word(fm_dma_ram_read_word(reg[0]));
+                else fm_dma_ram_write_word(reg[0], mdec_dma_read_word());
+                moved = 1;
+            }
+            reg[0] = (offset + ((reg[2] & 2u) ? -4u * moved : 4u * moved)) & 0x001FFFFCu;
+            left -= moved;
+        }
+        g_mdec_dma_remaining[ch] = left;
+        if (!left) {
+            reg[2] &= ~0x11000000u;
+            g_dma_dicr |= 1u << (24u + ch); fm_dma_update_irq();
+            if (ch == 1u) ++g_mdec_irq_pending;
+        }
+    }
+    g_mdec_dma_servicing = 0;
+}
+int fm_memory_copy_to_ram(uint32_t address, const void *data, size_t size)
+{
+    uint32_t phys = address & 0x1FFFFFFFu, offset = phys & 0x001FFFFFu;
+    if (!data || !g_ram || phys >= PSX_RAM_MIRROR_END
+        || offset > g_ram_size || size > g_ram_size - offset
+        || size > PSX_RAM_SIZE - offset) return 0;
+    memcpy(g_ram + offset, data, size);
+    return 1;
+}
+const uint8_t *fm_memory_ram_span(uint32_t address, size_t size)
+{
+    uint32_t phys = address & 0x1FFFFFFFu, offset = phys & 0x001FFFFFu;
+    if (!g_ram || phys >= PSX_RAM_MIRROR_END || offset > g_ram_size
+        || size > g_ram_size - offset || size > PSX_RAM_SIZE - offset) return NULL;
+    return g_ram + offset;
+}
+int fm_memory_gpu_send_words(uint32_t address, uint32_t words)
+{
+    uint32_t phys = address & 0x1FFFFFFFu, offset = phys & 0x001FFFFFu;
+    if ((address & 3u) || !g_ram || phys >= PSX_RAM_MIRROR_END
+        || offset > g_ram_size || words > (g_ram_size - offset) / 4u
+        || words > (PSX_RAM_SIZE - offset) / 4u) return 0;
+    fm_gpu_gp0_words((const uint32_t *)(g_ram + offset), words);
+    return 1;
+}
+
+static int fm_mdec_dma_register(uint32_t address)
+{ return address >= 0x1F801080u && address < 0x1F8010A0u && (address & 15u) < 12u; }
+static uint32_t fm_mdec_dma_read(uint32_t address)
+{ return g_mdec_dma[(address >> 4) & 1u][(address & 15u) / 4u]; }
+static void fm_mdec_dma_write(uint32_t address, uint32_t value)
+{
+    unsigned ch = (address >> 4) & 1u, r = (address & 15u) / 4u;
+    g_mdec_dma[ch][r] = r == 0u ? value & 0x00FFFFFFu : value;
+    if (r == 2u) {
+        if (value & 0x01000000u) {
+            uint32_t bcr = g_mdec_dma[ch][1];
+            uint32_t size = (bcr & 0xFFFFu) ? (bcr & 0xFFFFu) : 65536u;
+            uint32_t blocks = ((value >> 9) & 3u) == 1u ? bcr >> 16 : 1u;
+            if (!blocks) blocks = 65536u;
+            uint64_t total = (uint64_t)size * blocks;
+            /* Invalid giant DMA must not walk beyond a RAM image per command. */
+            g_mdec_dma_remaining[ch] = total > PSX_RAM_SIZE / 4u ? PSX_RAM_SIZE / 4u : (uint32_t)total;
+        } else g_mdec_dma_remaining[ch] = 0;
+        fm_mdec_dma_service();
+    }
+}
+void fm_memory_mdec_set_callback(uint32_t callback, uint32_t gp)
+{ g_mdec_callback = callback; g_mdec_callback_gp = gp; }
+int fm_memory_mdec_take_callback(uint32_t *callback, uint32_t *gp)
+{
+    if (!g_mdec_irq_pending) return 0;
+    --g_mdec_irq_pending;
+    if (g_mdec_callback < 0x80010000u || g_mdec_callback >= 0x80200000u) return 0;
+    *callback = g_mdec_callback; *gp = g_mdec_callback_gp; return 1;
+}
+
 /*
  * ============================================================
  * DMA2 completion
@@ -1957,6 +2059,9 @@ static int fm_dma2_linked_list(void)
             &
             0x001FFFFCu;
 
+#if FM_PERF_PROFILE
+        uint64_t payload_start = count ? svcGetSystemTick() : 0u;
+#endif
         for (
             uint32_t i = 0;
             i < count;
@@ -1985,6 +2090,10 @@ static int fm_dma2_linked_list(void)
                 &
                 0x001FFFFCu;
         }
+
+#if FM_PERF_PROFILE
+        if (count) g_dma2_payload_ticks += svcGetSystemTick() - payload_start;
+#endif
 
         /*
          * Linked-list terminator.
@@ -2181,7 +2290,10 @@ static int fm_dma2_block(void)
         &
         0x001FFFFCu;
 
-    for (
+    if (!step_backward && fm_memory_gpu_send_words(addr, words)) {
+        g_dma2_word_count += words;
+        addr = (addr + words * 4u) & 0x001FFFFCu;
+    } else for (
         uint32_t i = 0;
         i < words;
         ++i
@@ -2300,13 +2412,11 @@ static void fm_dma2_try_start(void)
 
 /*
  * ============================================================
- * DMA4 SPU - minimal completion bridge
+ * DMA4 SPU - synchronous sample transfer and completion
  * ============================================================
  *
- * SPU sample RAM/audio are not emulated yet.  For bring-up, retain the
- * hardware-visible DMA semantics the game waits on: START clears, DICR
- * channel-4 completion is latched, and one completion token is exposed
- * to the BIOS event bridge.
+ * Data reaches SPU RAM before START/DICR and the BIOS completion token
+ * are published. The established IRQ timing remains synchronous.
  */
 static void fm_dma4_complete(void)
 {
@@ -2334,10 +2444,27 @@ static void fm_dma4_try_start(void)
         return;
     }
 
-    /*
-     * Transfer payload is intentionally not rendered into SPU RAM yet.
-     * The current game path only requires completion/liveness.
-     */
+    fm_spu_sync_now();
+    /* DMA4 copies actual sample data before exposing completion.  Keep MADR
+     * at its programmed value, as the existing synchronous bus contract does. */
+    uint64_t words=g_dma4_bcr&0xffffu;
+    unsigned sync=(g_dma4_chcr>>9)&3u;
+    if (!words) words=0x10000u;
+    if (sync==1u) words*=((g_dma4_bcr>>16) ? (g_dma4_bcr>>16) : 0x10000u);
+    /* Invalid oversized requests must not hang the host. */
+    if (words>PSX_RAM_SIZE/4u) words=PSX_RAM_SIZE/4u;
+    uint32_t address=g_dma4_madr&0x1ffffcu;
+    for (uint32_t n=0;n<(uint32_t)words && g_ram_size>=PSX_RAM_SIZE;++n) {
+        if (g_dma4_chcr&1u) {
+            fm_spu_transfer_write((uint16_t)(g_ram[address]|((uint16_t)g_ram[address+1u]<<8)));
+            fm_spu_transfer_write((uint16_t)(g_ram[address+2u]|((uint16_t)g_ram[address+3u]<<8)));
+        } else {
+            uint16_t lo=fm_spu_transfer_read(),hi=fm_spu_transfer_read();
+            g_ram[address]=(uint8_t)lo;g_ram[address+1u]=(uint8_t)(lo>>8);
+            g_ram[address+2u]=(uint8_t)hi;g_ram[address+3u]=(uint8_t)(hi>>8);
+        }
+        address=(address+((g_dma4_chcr&2u)?-4u:4u))&0x1ffffcu;
+    }
     fm_dma4_complete();
 }
 
@@ -2523,6 +2650,7 @@ static int fm_dma_is_register(
     uint32_t phys
 )
 {
+    if (fm_mdec_dma_register(phys)) return 1;
     return
         (
             phys >= PSX_DMA2_MADR
@@ -2596,6 +2724,7 @@ static uint32_t fm_dma_register_read32(
     uint32_t base
 )
 {
+    if (fm_mdec_dma_register(base)) return fm_mdec_dma_read(base);
     switch (base)
     {
         case PSX_DMA2_MADR:
@@ -2641,6 +2770,7 @@ static uint32_t fm_dma_register_base(
     uint32_t phys
 )
 {
+    if (fm_mdec_dma_register(phys)) return phys & ~3u;
     if (
         phys >= PSX_DMA2_MADR
         &&
@@ -2802,8 +2932,24 @@ static void fm_dma_register_write32_masked(
     uint32_t write_mask
 )
 {
+    if (fm_mdec_dma_register(base)) {
+        fm_mdec_dma_write(base, (fm_mdec_dma_read(base) & ~write_mask) | (value & write_mask));
+        return;
+    }
     switch (base)
     {
+        case PSX_DMA4_MADR:
+        case PSX_DMA4_BCR:
+        case PSX_DMA4_CHCR:
+            /* Share masking, diagnostics and START handling with SW.
+             * SB/SH must preserve the untouched register lanes. */
+            fm_memory_write_word(
+                base,
+                (fm_dma_register_read32(base) & ~write_mask)
+                    | (value & write_mask)
+            );
+            return;
+
         case PSX_DMA2_MADR:
         {
             uint32_t merged =
@@ -3110,11 +3256,18 @@ void fm_memory_init(
     size_t ram_size
 )
 {
+    mdec_init(); memset(g_mdec_dma, 0, sizeof(g_mdec_dma));
+    memset(g_mdec_dma_remaining, 0, sizeof(g_mdec_dma_remaining));
+    g_mdec_callback = g_mdec_callback_gp = g_mdec_irq_pending = 0;
+    g_mdec_dma_servicing = 0;
     g_ram =
         ram;
 
     g_ram_size =
         ram_size;
+
+    g_fm_native_ram.base = ram;
+    g_fm_native_ram.size = ram_size;
 
     memset(
         g_scratch,
@@ -3168,6 +3321,25 @@ void fm_memory_init(
 
     g_dma2_chcr =
         0;
+
+    g_dma4_madr = 0u;
+    g_dma4_bcr = 0u;
+    g_dma4_chcr = 0u;
+    g_dma4_transfer_count = 0u;
+    g_dma4_completion_pending = 0u;
+    g_dma4_madr_writes = 0u;
+    g_dma4_bcr_writes = 0u;
+    g_dma4_chcr_writes = 0u;
+    g_dma4_last_madr_write = 0u;
+    g_dma4_last_bcr_write = 0u;
+    g_dma4_last_chcr_write = 0u;
+
+    fm_spu_reset();
+    g_spu_xfer_addr = 0u;
+    g_spu_xfer_data = 0u;
+    g_spu_ctrl = 0u;
+    g_spu_stat = 0u;
+    g_spu_reverb_mask = 0u;
 
     g_dma6_madr =
         0;
@@ -3244,6 +3416,7 @@ void fm_memory_init(
     g_dma2_linked_max_ms =
         0u;
 
+    g_dma2_payload_ticks = 0u;
     g_dma2_linked_total_ms =
         0u;
 
@@ -3334,6 +3507,19 @@ uint8_t fm_memory_read_byte(
             return g_ram[offset];
         }
     }
+
+    /* B136.49: scratchpad is plain memory, before MMIO decoding. */
+    if (phys - PSX_SCRATCH_BASE <= PSX_SCRATCH_SIZE - 1u)
+    {
+        return g_scratch[phys - PSX_SCRATCH_BASE];
+    }
+
+    if (phys >= PSX_SPU_BASE && phys < PSX_SPU_BASE+0x280u)
+        return (uint8_t)(fm_spu_read_half(phys&~1u)>>((phys&1u)*8u));
+    if (phys >= PSX_SPU_REVERB_MASK && phys < PSX_SPU_REVERB_MASK + 4u)
+        return (uint8_t)(g_spu_reverb_mask >> ((phys - PSX_SPU_REVERB_MASK) * 8u));
+    if (phys >= 0x1F801800u && phys < 0x1F801804u) return fm_media_cd_read(phys);
+
 
     /*
      * --------------------------------------------------------
@@ -3513,6 +3699,30 @@ void fm_memory_write_byte(
         }
     }
 
+    /* B136.49: scratchpad is plain memory, before MMIO decoding. */
+    if (phys - PSX_SCRATCH_BASE <= PSX_SCRATCH_SIZE - 1u)
+    {
+        g_scratch[phys - PSX_SCRATCH_BASE] = value;
+        return;
+    }
+
+    if (phys >= PSX_SPU_REVERB_MASK && phys < PSX_SPU_REVERB_MASK + 4u) {
+        unsigned shift = (phys - PSX_SPU_REVERB_MASK) * 8u;
+        g_spu_reverb_mask = ((g_spu_reverb_mask & ~(0xFFu << shift))
+            | ((uint32_t)value << shift)) & 0x00FFFFFFu;
+        fm_spu_reg_write(PSX_SPU_REVERB_MASK,(uint16_t)g_spu_reverb_mask);
+        fm_spu_reg_write(PSX_SPU_REVERB_MASK+2u,(uint16_t)(g_spu_reverb_mask>>16));
+        return;
+    }
+    if(phys>=PSX_SPU_BASE && phys<PSX_SPU_BASE+0x280u) {
+        unsigned shift=(phys&1u)*8u;
+        uint16_t old=fm_spu_read_half(phys&~1u);
+        fm_spu_write_half(phys&~1u,(uint16_t)((old&~(0xffu<<shift))|((uint16_t)value<<shift)));
+        return;
+    }
+    if (phys >= 0x1F801800u && phys < 0x1F801804u) { fm_media_cd_write(phys, value); return; }
+
+
     /*
      * --------------------------------------------------------
      * RAM
@@ -3628,19 +3838,6 @@ uint16_t fm_memory_read_half(
             addr
         );
 
-    if (
-        phys == PSX_SPU_XFER_ADDR
-        ||
-        phys == PSX_SPU_XFER_DATA
-        ||
-        phys == PSX_SPU_CTRL
-        ||
-        phys == PSX_SPU_STAT
-    )
-    {
-        return fm_spu_read_half(phys);
-    }
-
     /* B92 - hot RAM fast path before timer/DMA decoding. */
     if (
         g_ram
@@ -3655,12 +3852,22 @@ uint16_t fm_memory_read_half(
 
         if (offset <= g_ram_size - 2u)
         {
-            return
-                (uint16_t)g_ram[offset + 0u]
-                |
-                ((uint16_t)g_ram[offset + 1u] << 8);
+            return fm_ram_load16(g_ram + offset);
         }
     }
+
+    /* B136.49: scratchpad is plain memory, before MMIO decoding. */
+    if (phys - PSX_SCRATCH_BASE <= PSX_SCRATCH_SIZE - 2u)
+    {
+        return fm_ram_load16(g_scratch + phys - PSX_SCRATCH_BASE);
+    }
+
+    if (phys >= PSX_SPU_BASE && phys < PSX_SPU_BASE + 0x280u)
+    {
+        return fm_spu_read_half(phys);
+    }
+
+
 
     /*
      * --------------------------------------------------------
@@ -3889,11 +4096,26 @@ void fm_memory_write_half(
 
         if (offset <= g_ram_size - 2u)
         {
-            g_ram[offset + 0u] = (uint8_t)value;
-            g_ram[offset + 1u] = (uint8_t)(value >> 8);
+            fm_ram_store16(g_ram + offset, value);
             return;
         }
     }
+
+    /* B136.49: scratchpad is plain memory, before MMIO decoding. */
+    if (phys - PSX_SCRATCH_BASE <= PSX_SCRATCH_SIZE - 2u)
+    {
+        fm_ram_store16(g_scratch + phys - PSX_SCRATCH_BASE, value);
+        return;
+    }
+
+    /* Psy-Q programs these 16-bit registers with SH, not only SW. */
+    if (phys >= PSX_SPU_BASE && phys < PSX_SPU_BASE + 0x280u)
+    {
+        fm_spu_write_half(phys, value);
+        return;
+    }
+
+
 
     /*
      * --------------------------------------------------------
@@ -4078,7 +4300,7 @@ void fm_memory_write_half(
 
 /*
  * ============================================================
- * Minimal SPU MMIO
+ * SPU MMIO and transfer-status compatibility
  * ============================================================
  *
  * Psy-Q SPU transfer code used by Forbidden Memories polls:
@@ -4086,27 +4308,31 @@ void fm_memory_write_half(
  *   1F801DAA control bits 0x30
  *   1F801DAE status bit 0x400 / low 11 bits
  *
- * We do not render audio here.  We mirror the control transfer mode into
- * status sufficiently for the library's bounded wait loops to observe the
- * hardware as ready.
+ * Voice registers and sample RAM live in fm_spu.c. Preserve the established
+ * immediate transfer-status mirror used by the library bounded waits.
  */
 static uint16_t fm_spu_read_half(uint32_t phys)
 {
-    switch (phys)
-    {
-        case PSX_SPU_XFER_ADDR: return g_spu_xfer_addr;
-        case PSX_SPU_XFER_DATA: return g_spu_xfer_data;
-        case PSX_SPU_CTRL:      return g_spu_ctrl;
-        case PSX_SPU_STAT:      return g_spu_stat;
-        default:                return 0u;
-    }
+    if (phys==PSX_SPU_XFER_DATA) return g_spu_xfer_data;
+    if (phys==PSX_SPU_STAT) return g_spu_stat;
+    return fm_spu_reg_read(phys);
 }
 
 
 static void fm_spu_write_half(uint32_t phys, uint16_t value)
 {
+    fm_spu_reg_write(phys,value);
     switch (phys)
     {
+        /* B136.29: SpuSetReverbVoice polls this 24-bit read/write mask.
+         * Dropping SH stores made the native sound IRQ loop forever. */
+        case PSX_SPU_REVERB_MASK:
+            g_spu_reverb_mask = (g_spu_reverb_mask & 0x00FF0000u) | value;
+            return;
+        case PSX_SPU_REVERB_MASK + 2u:
+            g_spu_reverb_mask = (g_spu_reverb_mask & 0x0000FFFFu)
+                | ((uint32_t)(value & 0xFFu) << 16);
+            return;
         case PSX_SPU_XFER_ADDR:
             g_spu_xfer_addr = value;
             return;
@@ -4171,16 +4397,21 @@ uint32_t fm_memory_read_word(
 
         if (offset <= g_ram_size - 4u)
         {
-            return
-                (uint32_t)g_ram[offset + 0u]
-                |
-                ((uint32_t)g_ram[offset + 1u] << 8)
-                |
-                ((uint32_t)g_ram[offset + 2u] << 16)
-                |
-                ((uint32_t)g_ram[offset + 3u] << 24);
+            return fm_ram_load32(g_ram + offset);
         }
     }
+
+    /* B136.49: scratchpad is plain memory, before MMIO decoding. */
+    if (phys - PSX_SCRATCH_BASE <= PSX_SCRATCH_SIZE - 4u)
+    {
+        return fm_ram_load32(g_scratch + phys - PSX_SCRATCH_BASE);
+    }
+
+    if (phys == 0x1F801820u || phys == 0x1F801824u) {
+        uint32_t result = mdec_read(phys); fm_mdec_dma_service(); return result;
+    }
+    if (fm_mdec_dma_register(phys) && !(phys & 3u)) return fm_mdec_dma_read(phys);
+
 
     /*
      * --------------------------------------------------------
@@ -4219,27 +4450,8 @@ uint32_t fm_memory_read_word(
     }
 
 
-    /*
-     * SPU packed word reads (two adjacent 16-bit registers).
-     */
-    if (phys == 0x1F801DA4u)
-    {
-        return
-            (uint32_t)fm_spu_read_half(PSX_SPU_XFER_ADDR) << 16;
-    }
-
-    if (phys == 0x1F801DA8u)
-    {
-        return
-            (uint32_t)fm_spu_read_half(PSX_SPU_XFER_DATA)
-            |
-            ((uint32_t)fm_spu_read_half(PSX_SPU_CTRL) << 16);
-    }
-
-    if (phys == 0x1F801DACu)
-    {
-        return
-            (uint32_t)fm_spu_read_half(PSX_SPU_STAT) << 16;
+    if (phys >= PSX_SPU_BASE && phys < PSX_SPU_BASE + 0x280u) {
+        return fm_spu_read_half(phys) | ((uint32_t)fm_spu_read_half(phys+2u)<<16);
     }
 
     /*
@@ -4475,13 +4687,24 @@ void fm_memory_write_word(
 
         if (offset <= g_ram_size - 4u)
         {
-            g_ram[offset + 0u] = (uint8_t)value;
-            g_ram[offset + 1u] = (uint8_t)(value >> 8);
-            g_ram[offset + 2u] = (uint8_t)(value >> 16);
-            g_ram[offset + 3u] = (uint8_t)(value >> 24);
+            fm_ram_store32(g_ram + offset, value);
             return;
         }
     }
+
+    /* B136.49: scratchpad is plain memory, before MMIO decoding. */
+    if (phys - PSX_SCRATCH_BASE <= PSX_SCRATCH_SIZE - 4u)
+    {
+        fm_ram_store32(g_scratch + phys - PSX_SCRATCH_BASE, value);
+        return;
+    }
+
+    if (phys == 0x1F801820u || phys == 0x1F801824u) {
+        mdec_write(phys, value); fm_mdec_dma_service(); return;
+    }
+    if (fm_mdec_dma_register(phys) && !(phys & 3u)) { fm_mdec_dma_write(phys, value); return; }
+
+
 
     /*
      * --------------------------------------------------------
@@ -4530,25 +4753,9 @@ void fm_memory_write_word(
     }
 
 
-    /*
-     * SPU packed word writes (two adjacent 16-bit registers).
-     */
-    if (phys == 0x1F801DA4u)
-    {
-        fm_spu_write_half(PSX_SPU_XFER_ADDR, (uint16_t)(value >> 16));
-        return;
-    }
-
-    if (phys == 0x1F801DA8u)
-    {
-        fm_spu_write_half(PSX_SPU_XFER_DATA, (uint16_t)value);
-        fm_spu_write_half(PSX_SPU_CTRL, (uint16_t)(value >> 16));
-        return;
-    }
-
-    if (phys == 0x1F801DACu)
-    {
-        return;
+    if (phys >= PSX_SPU_BASE && phys < PSX_SPU_BASE + 0x280u) {
+        fm_spu_write_half(phys,(uint16_t)value);
+        fm_spu_write_half(phys+2u,(uint16_t)(value>>16));return;
     }
 
     /*
@@ -4884,6 +5091,34 @@ void fm_memory_vblank_tick(void)
     }
 }
 
+/* B136.55: keep VBlank/Timer0/1 cadence, but let the host acknowledge
+ * each Timer2 target crossing before advancing the remainder of this tick.
+ * I_STAT still coalesces events when the BIOS event is disabled or masked. */
+uint32_t fm_memory_vblank_begin_timer2(void)
+{
+    g_i_stat |= PSX_IRQ_VBLANK;
+    for (unsigned i=0; i<2u; ++i)
+        fm_timer_advance(i, fm_timer_vblank_delta(i));
+    return fm_timer_vblank_delta(2u);
+}
+
+uint32_t fm_memory_timer2_slice(uint32_t remaining, int split)
+{
+    FMRootCounter *timer=&g_timers[2];
+    uint32_t step=remaining;
+    if (split && remaining) {
+        uint32_t period=(timer->mode & 8u) ? (uint32_t)timer->target+1u : 65536u;
+        uint32_t count=(uint32_t)timer->count % period;
+        uint32_t edge=period-count;
+        if (!(timer->mode & 8u) && timer->target > count &&
+            (uint32_t)timer->target-count < edge)
+            edge=(uint32_t)timer->target-count;
+        if (step>edge) step=edge;
+    }
+    fm_timer_advance(2u,step);
+    return remaining-step;
+}
+
 
 uint16_t fm_memory_i_stat(void)
 {
@@ -5121,6 +5356,8 @@ void fm_memory_dma_debug(
     out->dma2_linked_max_ms =
         g_dma2_linked_max_ms;
 
+    out->dma2_payload_us = g_dma2_payload_ticks * 1000000ull / 268123480ull;
+
     out->dma2_linked_total_ms =
         g_dma2_linked_total_ms;
 
@@ -5262,6 +5499,7 @@ void fm_memory_quick_save(
     out->spu_xfer_data = g_spu_xfer_data;
     out->spu_ctrl = g_spu_ctrl;
     out->spu_stat = g_spu_stat;
+    out->spu_reverb_mask = g_spu_reverb_mask;
 }
 
 
@@ -5311,6 +5549,11 @@ void fm_memory_quick_load(
     g_spu_xfer_data = in->spu_xfer_data;
     g_spu_ctrl = in->spu_ctrl;
     g_spu_stat = in->spu_stat;
+    g_spu_reverb_mask = in->spu_reverb_mask & 0x00FFFFFFu;
+    fm_spu_reg_write(PSX_SPU_REVERB_MASK,(uint16_t)g_spu_reverb_mask);
+    fm_spu_reg_write(PSX_SPU_REVERB_MASK+2u,(uint16_t)(g_spu_reverb_mask>>16));
+    fm_spu_reg_write(PSX_SPU_XFER_ADDR,g_spu_xfer_addr);
+    fm_spu_reg_write(PSX_SPU_CTRL,g_spu_ctrl);
 
     /*
      * La table de detection de boucle DMA est purement host/debug.
@@ -5336,4 +5579,26 @@ void fm_memory_dma4_write_diag(uint32_t out[6])
     out[3] = g_dma4_last_madr_write;
     out[4] = g_dma4_last_bcr_write;
     out[5] = g_dma4_last_chcr_write;
+}
+
+void fm_memory_async_save(FMMemoryAsyncState *out)
+{
+    memset(out, 0, sizeof(*out));
+    memcpy(out->mdec_dma, g_mdec_dma, sizeof(g_mdec_dma));
+    memcpy(out->mdec_remaining, g_mdec_dma_remaining, sizeof(g_mdec_dma_remaining));
+    out->callback=g_mdec_callback; out->callback_gp=g_mdec_callback_gp;
+    out->irq_pending=g_mdec_irq_pending; out->dma4_pending=g_dma4_completion_pending;
+}
+int fm_memory_async_valid(const FMMemoryAsyncState *in)
+{
+    return in && (!in->callback || (in->callback >= 0x80010000u && in->callback < 0x80200000u))
+        && in->mdec_remaining[0] <= 0x1000000u && in->mdec_remaining[1] <= 0x1000000u;
+}
+void fm_memory_async_load(const FMMemoryAsyncState *in)
+{
+    memcpy(g_mdec_dma,in->mdec_dma,sizeof(g_mdec_dma));
+    memcpy(g_mdec_dma_remaining,in->mdec_remaining,sizeof(g_mdec_dma_remaining));
+    g_mdec_callback=in->callback; g_mdec_callback_gp=in->callback_gp;
+    g_mdec_irq_pending=in->irq_pending; g_dma4_completion_pending=in->dma4_pending;
+    g_mdec_dma_servicing=0;
 }

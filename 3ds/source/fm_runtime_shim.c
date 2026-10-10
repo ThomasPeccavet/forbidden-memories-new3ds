@@ -1,6 +1,13 @@
+#include "fm_irq.h"
+#include "fm_frame_wait.h"
+#include "fm_native_batch.h"
+#include "fm_sort_swap.h"
+#include <3ds.h>
 #include "fm_runtime_shim.h"
 #include "fm_memory.h"
 #include "fm_gpu.h"
+#include "fm_media.h"
+#include "fm_vlc.h"
 
 #include <setjmp.h>
 #include <stddef.h>
@@ -129,6 +136,26 @@ void fm_runtime_text_trace_outer(CPUState *cpu, uint32_t phys)
 {
 #if FM_PERF_PROFILE
     b13586_text_entry(cpu, phys, 1);
+    /* B136.22: interpreted resident routines return through the outer
+     * dispatcher and do not execute generated entry checkpoints. Include
+     * those entries in the existing category-2 path counters. These are
+     * entry counts (both paths), not unique frame counts. */
+    if (phys == 0x00040B48u)
+    {
+        ++g_dialogue_layer_trace.category2_calls;
+        if (cpu)
+        {
+            int32_t head = (int16_t)cpu->read_half(0x800F11C4u);
+            g_dialogue_layer_trace.last_head = (uint32_t)head;
+            g_dialogue_layer_trace.last_ra = cpu->gpr[31];
+            if (head >= 0 && head < 0x60)
+                ++g_dialogue_layer_trace.category2_with_head;
+        }
+    }
+    else if (phys == 0x000418C0u)
+        ++g_dialogue_layer_trace.object_render_calls;
+    else if (phys == 0x000424B8u)
+        ++g_dialogue_layer_trace.primitive_calls;
 #else
     (void)cpu; (void)phys;
 #endif
@@ -473,6 +500,28 @@ static FM_BiosEvent g_bios_events[
     FM_BIOS_EVENT_COUNT
 ];
 
+/* B136.24: deliver enabled root-counter events at a dispatcher boundary.
+ * The native sound sequencer uses F2000002/spec 2 in callback mode.
+ * Leave disabled/unregistered IRQs pending, and acknowledge only the
+ * selected timer. CPU context is saved by the shared guest IRQ bridge. */
+int fm_runtime_take_timer_callback(uint32_t *callback)
+{
+    uint16_t pending = fm_memory_i_stat() & fm_memory_i_mask();
+    for (unsigned timer = 0; timer < 3; ++timer) {
+        uint16_t bit = (uint16_t)(1u << (timer + 4u));
+        if (!(pending & bit)) continue;
+        for (unsigned i = 0; i < FM_BIOS_EVENT_COUNT; ++i) {
+            FM_BiosEvent *ev = &g_bios_events[i];
+            if (!ev->used || !ev->enabled || ev->class_id != 0xF2000000u + timer
+                || ev->spec != 2u || ev->mode != 0x1000u || !ev->func) continue;
+            fm_memory_write_half(0x1F801070u, (uint16_t)~bit);
+            *callback = ev->func;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* B136.5 - BIOS event diagnostics for the CD readiness gate. */
 static uint32_t g_b136_bios_deliver_hits = 0u;
 static uint32_t g_b136_bios_deliver_class = 0u;
@@ -785,8 +834,10 @@ FMRuntimeProbeResult fm_runtime_probe(
  * recompiled function return. The Pharaoh map renderer lives in one known
  * resident region and bounces between many tiny compiled helpers there.
  *
+ * B136.43 also admits the resident object/packet helper ranges defined
+ * by fm_native_object_batch(), excluding the 85D98 HLE boundary.
  * Keep one probe armed and immediately re-dispatch while the next PC stays
- * in that safe region. As soon as code exits the range, becomes unknown,
+ * in an admitted region. As soon as code exits the range, becomes unknown,
  * hits the watchdog, GTE stop, syscall, etc., return to main unchanged.
  */
 FMRuntimeProbeResult fm_runtime_probe_chain(
@@ -849,6 +900,7 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
 
     if (jumped == 0)
     {
+        uint64_t batch_start_ms=osGetTime();
         uint32_t current = addr;
         uint32_t dispatched_count = 0u;
         int last_dispatch = -1;
@@ -881,6 +933,8 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
                 phys < phys4_end;
 
             if (
+                !fm_native_batchable(current)
+                &&
                 !in_primary
                 &&
                 !in_secondary
@@ -892,6 +946,11 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
             {
                 break;
             }
+
+            /* Bound new batches by elapsed time as well as block count.
+             * Existing single compiled calls remain indivisible. */
+            if (dispatched_count && (dispatched_count & 3u)==0u
+                && osGetTime()-batch_start_ms>=2u) break;
 
             last_dispatch =
                 psx_dispatch_game_compiled(
@@ -956,6 +1015,9 @@ const char *fm_runtime_stop_name(
     {
         case FM_STOP_RETURNED:
             return "RETURN";
+
+        case FM_STOP_FRAME_WAIT:
+            return "FRAME WAIT";
 
         case FM_STOP_BUDGET:
             return "WATCHDOG";
@@ -1206,7 +1268,7 @@ static void fm_runtime_service_vblank_hle(
     CPUState *cpu
 )
 {
-    if (!cpu)
+    if (!fm_irq_cpu_enabled(cpu))
     {
         return;
     }
@@ -1298,6 +1360,12 @@ static void fm_runtime_service_vblank_hle(
  * ============================================================
  */
 
+static CPUState *g_frame_wait_cpu;
+void fm_runtime_frame_wait_scope(CPUState *cpu)
+{
+    g_frame_wait_cpu = cpu;
+}
+
 void psx_check_interrupts_at(
     CPUState *cpu,
     uint32_t resume_pc
@@ -1338,6 +1406,15 @@ void psx_check_interrupts_at(
     }
 
 
+    /* B136.52: handle both nested calls and restored loop checkpoints.
+     * Keep the qsort/comparator and the normal VBlank service above. */
+    uint32_t swap_phys=resume_pc & 0x1fffffffu;
+    if ((swap_phys==0x8f6c8u || swap_phys==0x8f6d8u)
+        && fm_sort_swap_try(cpu,swap_phys)) {
+        fm_probe_stop(FM_STOP_BUDGET,cpu->pc);
+        return;
+    }
+
     ++g_probe_checks;
 
 
@@ -1347,6 +1424,11 @@ void psx_check_interrupts_at(
             resume_pc;
     }
 
+
+    /* VBlank was serviced above. Suspend only the designated main probe. */
+    if (cpu && cpu == g_frame_wait_cpu && cpu == g_probe_cpu
+        && fm_frame_wait_pending(cpu, resume_pc))
+        fm_probe_stop(FM_STOP_FRAME_WAIT, resume_pc);
 
     if (
         g_probe_budget != 0
@@ -1369,6 +1451,14 @@ void psx_check_interrupts_dispatch_entry(
 {
     uint32_t phys =
         resume_pc & 0x1FFFFFFFu;
+
+    /* Escape before the native prologue for a direct generated VLC call.
+     * Failed translations are transactional and continue through native code. */
+    if (g_probe_armed && phys == 0x000914A8u && fm_vlc_try(cpu)) {
+        fm_probe_stop(FM_STOP_BUDGET, cpu->pc);
+        return;
+    }
+    fm_media_guest_entry(cpu, phys);
 
 #if FM_PERF_PROFILE
     b13586_text_entry(cpu, phys, 0);
@@ -2705,7 +2795,9 @@ int fm_bios_try_hle(
                     &&
                     g_bios_events[index].spec == 0x00000020u
                     &&
-                    fm_memory_dma4_take_completion() != 0u
+                    fm_irq_cpu_enabled(cpu)
+                    && (fm_memory_i_mask() & 8u)
+                    && fm_memory_dma4_take_completion() != 0u
                 )
                 {
                     g_bios_events[index].ready = 1u;
@@ -3543,75 +3635,7 @@ int psx_vsync_query_hle_try(
  * Cette logique reprend la semantique O(1) du PSXRecomp epingle par le projet,
  * sans les caches PGXP qui ne sont pas utilises sur 3DS.
  */
-static uint32_t fm_b136_gte_sign_extend_16(uint32_t value)
-{
-    return (uint32_t)(int32_t)(int16_t)(value & 0xFFFFu);
-}
-
-
-static uint32_t fm_b136_gte_lzcr(uint32_t value)
-{
-    uint32_t bits =
-        (value & 0x80000000u)
-            ? ~value
-            : value;
-
-    if (bits == 0u)
-    {
-        return 32u;
-    }
-
-    uint32_t count = 0u;
-
-    while ((bits & 0x80000000u) == 0u)
-    {
-        bits <<= 1;
-        ++count;
-    }
-
-    return count;
-}
-
-
-static uint32_t fm_b136_gte_irgb_component(uint32_t value)
-{
-    int32_t ir =
-        (int32_t)(int16_t)(value & 0xFFFFu);
-
-    if (ir <= 0)
-    {
-        return 0u;
-    }
-
-    uint32_t scaled =
-        (uint32_t)ir >> 7;
-
-    return
-        scaled > 0x1Fu
-            ? 0x1Fu
-            : scaled;
-}
-
-
-static uint32_t fm_b136_gte_pack_irgb(const CPUState *cpu)
-{
-    uint32_t r =
-        fm_b136_gte_irgb_component(cpu->gte_data[9]);
-
-    uint32_t g =
-        fm_b136_gte_irgb_component(cpu->gte_data[10]);
-
-    uint32_t b =
-        fm_b136_gte_irgb_component(cpu->gte_data[11]);
-
-    return
-        (b << 10)
-        |
-        (g << 5)
-        |
-        r;
-}
-
+#include "fm_native_gte.h"
 
 static void fm_b136_gte_canonicalize_backing(CPUState *cpu)
 {
@@ -3700,226 +3724,10 @@ static void fm_b136_gte_canonicalize_backing(CPUState *cpu)
 }
 
 
-uint32_t gte_read_data(
-    CPUState *cpu,
-    uint8_t reg
-)
-{
-    reg &= 31u;
-
-    switch (reg)
-    {
-        case 1u:
-        case 3u:
-        case 5u:
-        case 7u:
-        case 16u:
-        case 17u:
-        case 18u:
-        case 19u:
-            return cpu->gte_data[reg] & 0xFFFFu;
-
-        case 8u:
-        case 9u:
-        case 10u:
-        case 11u:
-            return
-                fm_b136_gte_sign_extend_16(
-                    cpu->gte_data[reg]
-                );
-
-        case 15u:
-            return cpu->gte_data[14];
-
-        case 23u:
-            return 0u;
-
-        case 28u:
-        case 29u:
-            return fm_b136_gte_pack_irgb(cpu);
-
-        case 31u:
-            return fm_b136_gte_lzcr(cpu->gte_data[30]);
-
-        default:
-            return cpu->gte_data[reg];
-    }
-}
-
-
-uint32_t gte_read_ctrl(
-    CPUState *cpu,
-    uint8_t reg
-)
-{
-    reg &= 31u;
-
-    switch (reg)
-    {
-        case 4u:
-        case 12u:
-        case 20u:
-        case 26u:
-            return cpu->gte_ctrl[reg] & 0xFFFFu;
-
-        case 27u:
-        case 29u:
-        case 30u:
-            return
-                fm_b136_gte_sign_extend_16(
-                    cpu->gte_ctrl[reg]
-                );
-
-        default:
-            return cpu->gte_ctrl[reg];
-    }
-}
-
-
-void gte_write_data(
-    CPUState *cpu,
-    uint8_t reg,
-    uint32_t value
-)
-{
-    reg &= 31u;
-
-    switch (reg)
-    {
-        case 1u:
-        case 3u:
-        case 5u:
-        case 7u:
-        case 16u:
-        case 17u:
-        case 18u:
-        case 19u:
-            cpu->gte_data[reg] =
-                value & 0xFFFFu;
-            return;
-
-        case 8u:
-        case 9u:
-        case 10u:
-        case 11u:
-            cpu->gte_data[reg] =
-                fm_b136_gte_sign_extend_16(value);
-
-            if (reg >= 9u)
-            {
-                uint32_t packed =
-                    fm_b136_gte_pack_irgb(cpu);
-
-                cpu->gte_data[28] = packed;
-                cpu->gte_data[29] = packed;
-            }
-            return;
-
-        case 12u:
-        case 13u:
-            cpu->gte_data[reg] = value;
-            return;
-
-        case 14u:
-            cpu->gte_data[14] = value;
-            cpu->gte_data[15] = value;
-            return;
-
-        case 15u:
-            cpu->gte_data[12] = cpu->gte_data[13];
-            cpu->gte_data[13] = cpu->gte_data[14];
-            cpu->gte_data[14] = value;
-            cpu->gte_data[15] = value;
-            return;
-
-        case 23u:
-            cpu->gte_data[23] = 0u;
-            return;
-
-        case 28u:
-        {
-            cpu->gte_data[9] =
-                (value & 0x1Fu) << 7;
-
-            cpu->gte_data[10] =
-                ((value >> 5) & 0x1Fu) << 7;
-
-            cpu->gte_data[11] =
-                ((value >> 10) & 0x1Fu) << 7;
-
-            uint32_t packed =
-                value & 0x7FFFu;
-
-            cpu->gte_data[28] = packed;
-            cpu->gte_data[29] = packed;
-            return;
-        }
-
-        case 29u:
-        {
-            uint32_t packed =
-                fm_b136_gte_pack_irgb(cpu);
-
-            cpu->gte_data[28] = packed;
-            cpu->gte_data[29] = packed;
-            return;
-        }
-
-        case 30u:
-            cpu->gte_data[30] = value;
-            cpu->gte_data[31] =
-                fm_b136_gte_lzcr(value);
-            return;
-
-        case 31u:
-            cpu->gte_data[31] =
-                fm_b136_gte_lzcr(
-                    cpu->gte_data[30]
-                );
-            return;
-
-        default:
-            cpu->gte_data[reg] = value;
-            return;
-    }
-}
-
-
-void gte_write_ctrl(
-    CPUState *cpu,
-    uint8_t reg,
-    uint32_t value
-)
-{
-    reg &= 31u;
-
-    switch (reg)
-    {
-        case 4u:
-        case 12u:
-        case 20u:
-        case 26u:
-            cpu->gte_ctrl[reg] =
-                value & 0xFFFFu;
-            return;
-
-        case 27u:
-        case 29u:
-        case 30u:
-            cpu->gte_ctrl[reg] =
-                fm_b136_gte_sign_extend_16(value);
-            return;
-
-        case 31u:
-            cpu->gte_ctrl[31] =
-                value & 0x7FFFF000u;
-            return;
-
-        default:
-            cpu->gte_ctrl[reg] = value;
-            return;
-    }
-}
+uint32_t gte_read_data(CPUState *cpu, uint8_t reg) { return fm_native_gte_read_data(cpu, reg); }
+uint32_t gte_read_ctrl(CPUState *cpu, uint8_t reg) { return fm_native_gte_read_ctrl(cpu, reg); }
+void gte_write_data(CPUState *cpu, uint8_t reg, uint32_t value) { fm_native_gte_write_data(cpu, reg, value); }
+void gte_write_ctrl(CPUState *cpu, uint8_t reg, uint32_t value) { fm_native_gte_write_ctrl(cpu, reg, value); }
 
 
 /*

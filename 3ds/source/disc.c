@@ -111,12 +111,11 @@ int fm_disc_open(
 }
 
 
-int fm_disc_read_sector(
+int fm_disc_read_raw_sector(
     uint32_t lba,
-    uint8_t out[2048]
+    uint8_t sector[2352]
 )
 {
-    uint8_t sector[2352];
 
     static const uint8_t sync[12] =
     {
@@ -129,6 +128,7 @@ int fm_disc_read_sector(
 
     if (
         !disc
+        || !sector
         ||
         lba >= 233175u
     )
@@ -147,11 +147,11 @@ int fm_disc_read_sector(
         fread(
             sector,
             1,
-            sizeof(sector),
+            2352u,
             disc
         )
         !=
-        sizeof(sector)
+        2352u
     )
     {
         return -2;
@@ -193,14 +193,16 @@ int fm_disc_read_sector(
     }
 
 
-    memcpy(
-        out,
-        sector + 24,
-        2048
-    );
-
-
     return 0;
+}
+
+int fm_disc_read_sector(uint32_t lba, uint8_t out[2048])
+{
+    uint8_t raw[2352];
+    if (!out) return -1;
+    int rc = fm_disc_read_raw_sector(lba, raw);
+    if (rc == 0) memcpy(out, raw + 24, 2048u);
+    return rc;
 }
 
 

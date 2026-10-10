@@ -18,15 +18,13 @@ class B13575InterpFastpathTests(unittest.TestCase):
         )
         self.assertEqual(32 * 2048, 65536)
 
-    def test_ram_half_and_word_paths_use_fixed_size_copy(self) -> None:
-        self.assertIn(
-            "memcpy(&value, g_interp_ram + o, sizeof(value));",
-            INTERP,
-        )
-        self.assertIn(
-            "memcpy(g_interp_ram + o, &value, sizeof(value));",
-            INTERP,
-        )
+    def test_ram_half_and_word_paths_use_shared_aligned_copy(self) -> None:
+        for width in (16, 32):
+            self.assertIn(f"fm_ram_load{width}(g_interp_ram + o)", INTERP)
+            self.assertIn(f"fm_ram_store{width}(g_interp_ram + o, value)", INTERP)
+        access = (ROOT / "3ds/include/fm_ram_access.h").read_text()
+        self.assertIn("__builtin_assume_aligned", access)
+        self.assertIn("memcpy", access)
 
     def test_set_reg_no_longer_duplicates_zero_write(self) -> None:
         m = re.search(

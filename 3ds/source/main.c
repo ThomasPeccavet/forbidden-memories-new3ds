@@ -1,3 +1,8 @@
+#include "fm_snapshot.h"
+#include "fm_irq.h"
+#include "fm_native_batch.h"
+#include "fm_host_clock.h"
+#include "fm_perf_capture.h"
 #include <3ds.h>
 
 #include <stdbool.h>
@@ -10,14 +15,38 @@
 #define FM_PERF_PROFILE 0
 #endif
 
+/* B136.33: expensive legacy hand/OT inspections are diagnostic only.
+ * Opt in with -DFM_OT_DIAGNOSTICS=1 when investigating packet lifetime. */
+#ifndef FM_OT_DIAGNOSTICS
+#define FM_OT_DIAGNOSTICS 0
+#endif
+
+/* B136.34: opt in to the large legacy SD dumps when diagnosing startup.
+ * The compact performance report remains enabled in PROFILE builds. */
+#ifndef FM_LEGACY_FILE_DIAGNOSTICS
+#define FM_LEGACY_FILE_DIAGNOSTICS 0
+#endif
+
 #include "fm_platform.h"
 #include "fm_cpu.h"
 #include "fm_memory.h"
 #include "fm_runtime_shim.h"
 #include "fm_interp.h"
 #include "fm_gpu.h"
+#include "fm_unai.h"
+#include "fm_media.h"
+#include "fm_vlc.h"
+#include "fm_audio.h"
+#include "fm_spu.h"
+#include "fm_mdec_clock.h"
+#include "mdec.h"
 
 #include "gpu_sw_renderer.h"
+
+/* B136.20: keep the lower screen blank, including PROFILE builds.
+ * Compile away console formatting and argument evaluation. fprintf and
+ * snprintf remain enabled for the SD diagnostic files. */
+#define printf(...) ((void)0)
 
 /* B28 helpers exported by source/fm_gpu.c. */
 extern uint64_t fm_gpu_fill_suppressed_count(void);
@@ -157,6 +186,11 @@ static uint32_t g_cd_sector_count = 0;
 
 static int g_cd_reading = 0;
 static int g_cd_error = 0;
+/* ReadS/XA transport only; PCM ADPCM decoding remains unimplemented. */
+static int g_cd_streaming = 0;
+static uint8_t g_cd_mode = 0u;
+static uint64_t g_cd_stream_last_ms = 0u;
+static uint32_t g_cd_stream_fraction = 0u;
 
 
 /*
@@ -211,6 +245,13 @@ static uint32_t g_game_log_count = 0;
  *
  * On la synchronise directement sur les VBlank de la boucle 3DS.
  */
+/* B136.45: a host-only wait marker, never serialized into guest state. */
+static int g_frame_wait_active;
+static uint32_t g_frame_wait_stops, g_frame_wait_resumes;
+#if FM_PERF_PROFILE
+static uint32_t g_frame_wait_probe_calls;
+static uint64_t g_frame_wait_probe_us;
+#endif
 static int g_vsync_wait_active = 0;
 static uint32_t g_vsync_wait_until_frame = 0;
 static int32_t g_vsync_wait_mode = 0;
@@ -580,20 +621,13 @@ static int b110_get_rank(
 
 /*
  * ============================================================
- * STR intro skip - bring-up temporaire
+ * STR intro skip - legacy explicit request
  * ============================================================
  *
- * Le runtime PC validé montre que le boot reste longtemps dans
- * FUN_8006A4D8 en attendant des secteurs STR, puis que l'appui
- * Start permet d'atteindre le titre/menu.
- *
- * Sur 3DS, notre chaîne CD streaming STR n'alimente pas encore
- * FUN_80078B58. Pour débloquer le jalon graphique sans afficher
- * d'image artificielle, on force UNE SEULE FOIS la fin du premier
- * flux vidéo. Les écrans suivants restent entièrement produits
- * par le code du jeu.
+ * B136.18: automatic skip is disabled. Raw STR sectors now feed the native
+ * ring/Huffman/MDEC player. Fresh boots and resets start with no skip request.
  */
-static int g_str_intro_skip_pending = 1;
+static int g_str_intro_skip_pending = 0;
 static uint32_t g_str_intro_skip_count = 0;
 
 static uint32_t g_str_intro_last_base = 0;
@@ -736,6 +770,28 @@ static uint32_t g_b57_next_lba = 0u;
 static uint32_t g_b57_last_remaining = 0u;
 static uint32_t g_b57_resets = 0u;
 static uint32_t g_b57_read_index = 0u;
+
+/* B136.47: the drive consumes every DataReady sector, even when the
+ * guest's 0x200000 skip flag suppresses CdGetSector. Thumbnail callback
+ * 800246A8 uses that flag to select sparse card IDs from a contiguous file. */
+static uint32_t fm_cd_begin_dataready_sector(
+    uint32_t req, uint32_t base_lba, uint32_t remaining)
+{
+    if (g_b57_req != req || g_b57_base_lba != base_lba
+        || remaining >= g_b57_last_remaining)
+    {
+        g_b57_req = req;
+        g_b57_base_lba = base_lba;
+        g_b57_next_lba = base_lba;
+        g_b57_read_index = 0u;
+        ++g_b57_resets;
+    }
+    uint32_t lba = g_b57_next_lba++;
+    g_b57_last_remaining = remaining;
+    ++g_b57_read_index;
+    g_cd_lba = g_b57_next_lba;
+    return lba;
+}
 
 /* B136.2 - generation trace for DAT_800EB1B8. */
 static uint32_t g_b136_reqgen_count = 0u;
@@ -1078,7 +1134,19 @@ static uint32_t g_b32_43e_return_frame = 0;
  * au RA du caller de la fonction d'enqueue.
  */
 static const uint32_t g_b33_cb_sentinel = 0x8000FFC0u;
-static const uint32_t g_b33_result_scratch = 0x8009C4B4u;
+/* B136.9: canonical eight-byte LibCD sync result. 8009C4B4 is only
+ * the game's CdlLOC: clearing 16 bytes there corrupts the render gate
+ * at +4 and its colors. Keep the adjacent ready result at F7138 intact. */
+static const uint32_t g_b33_result_scratch = 0x800F7130u;
+static uint32_t g_b33_pending = 0u;
+static uint32_t g_b33_pending_cmd, g_b33_pending_callback;
+static uint32_t g_b33_pending_gp, g_b33_pending_frame;
+static uint32_t g_b33_saved_hi, g_b33_saved_lo;
+static CPUState g_b33_saved_cpu;
+static CPUState g_cd_tick_saved_cpu;
+static CPUState g_b34_saved_cpu;
+static CPUState g_b35_saved_cpu;
+
 static uint32_t g_b33_cb_active = 0;
 static uint32_t g_b33_cb_resume = 0;
 static uint32_t g_b33_cb_addr = 0;
@@ -1170,6 +1238,7 @@ static uint32_t g_b34_ready_started = 0;
 static uint32_t g_b34_ready_done = 0;
 static uint32_t g_b34_ready_arm_frame = 0;
 static uint32_t g_b34_ready_req = 0;
+static uint32_t g_b34_ready_lba = 0;
 static uint32_t g_b34_ready_before = 0;
 static uint32_t g_b34_ready_after = 0;
 
@@ -1275,9 +1344,7 @@ static uint32_t g_b72_last_40b48_ra = 0u;
  * de l'etat 8 apres l'impulsion START, afin que le vrai chargeur
  * CD et le vrai overlay prennent ensuite la main.
  */
-static uint32_t g_b73_menu_force_request = 0u;
 static uint32_t g_b73_menu_force_count = 0u;
-static uint32_t g_b73_menu_force_frame = 0u;
 
 static uint32_t g_b73_state60a_before = 0u;
 static uint32_t g_b73_state60a_after = 0u;
@@ -1314,40 +1381,8 @@ static uint32_t g_b74_last_menu_draw_ra = 0u;
 static uint32_t g_b74_last_12f70_ra = 0u;
 
 
-/*
- * ============================================================
- * B75 - completion de l'animation d'entree du menu SU
- * ============================================================
- *
- * B74 prouve que le menu est reellement charge ET dessine :
- *
- *   C898 = 80180B4C
- *   callback draw appele des centaines de fois
- *   objets menu valides en RAM
- *
- * Mais les objets restent figes dans l'etat initial :
- *
- *   OBJ0 x=-160  from=-160  to=160  timer=16  flags=0x0088
- *   OBJ5 x= 480  from= 480  to=160  timer=16
- *
- * Le pseudo-C de 80180390 montre que l'animation normale doit :
- *   - decrementer +0x60 de 16 vers 0 ;
- *   - amener +0x30 vers +0x38 ;
- *   - poser le bit 0x40 sur le groupe visible ;
- *   - remettre DAT_801847C5 a 0 a la fin.
- *
- * Cette branche ne progresse pas dans notre runtime actuel.
- * B75 ne dessine rien artificiellement : il finalise uniquement
- * l'animation d'entree. La completion reproduit aussi l'effet exact
- * de FUN_80040734 pour chaque objet (variant +0x69, clear flag 0x10)
- * avant de rendre la main au VRAI callback menu.
- */
-static uint32_t g_b75_menu_entrance_bridge = 0u;
-static uint32_t g_b75_menu_entrance_frame = 0u;
-static uint32_t g_b75_last_c0 = 0u;
-static uint32_t g_b75_last_c5_before = 0u;
-static uint32_t g_b75_last_c5_after = 0u;
-static uint32_t g_b75_objects_settled = 0u;
+/* B136.11: removed B75. Hidden menu entries are intentional while
+ * the SU prompt is visible; 80180390 owns their visibility and animation. */
 
 
 /*
@@ -2268,6 +2303,20 @@ static uint32_t g_b105_slice_budget_ms = 12u;
 static uint32_t g_b106_pre_gfx_ms = 0u;
 static uint32_t g_b106_gfx_ms = 0u;
 static uint32_t g_b106_wait_ms = 0u;
+/* PROFILE wait attribution: budget, guest VSync, other, skipped-late. */
+static unsigned g_perf_wait_reason = 3u;
+static FMHostClock g_ps1_host_clock;
+static aptHookCookie g_clock_apt_hook;
+static volatile unsigned g_clock_resume_reset;
+static void fm_clock_apt_hook(APT_HookType hook, void *param)
+{
+    (void)param;
+    if (hook==APTHOOK_ONSUSPEND || hook==APTHOOK_ONRESTORE
+        || hook==APTHOOK_ONSLEEP || hook==APTHOOK_ONWAKEUP)
+        g_clock_resume_reset=1u;
+}
+static uint32_t g_clock_ticks, g_budget_wait_skips;
+static uint32_t g_native_probe_calls;
 
 
 /*
@@ -2843,6 +2892,7 @@ static uint32_t g_vram_view_nonzero = 0;
  * l'enregistrement afin de pouvoir reproduire, de facon minimale,
  * le premier effet certain du callback.
  */
+static uint32_t g_vblank_deferred;
 static uint32_t g_vblank_registered_cb = 0;
 static uint32_t g_vblank_registered_gp = 0;
 
@@ -3042,6 +3092,12 @@ static int b13556_chain_contains_hand(
         *steps_out = 0u;
     }
 
+    /* Outputs above stay deterministic when the optional scan is off. */
+    if (!FM_OT_DIAGNOSTICS)
+    {
+        return 0;
+    }
+
     if (!cpu || start_tag == 0u)
     {
         return 0;
@@ -3111,7 +3167,7 @@ static uint32_t g_b13557_last_src_steps = 0u;
 static uint32_t g_b13557_last_dst_steps = 0u;
 static uint32_t g_b13557_last_draw_steps = 0u;
 
-static int b13557_chain_has_hand_shape(
+static int fm_chain_has_hand_shape(
     CPUState *cpu,
     uint32_t start_tag,
     uint32_t *steps_out,
@@ -3175,6 +3231,19 @@ static int b13557_chain_has_hand_shape(
     return 0;
 }
 
+/* The B135.64 recovery bridge needs a real shape check. Only diagnostic
+ * callers use this optional wrapper; never bypass the recovery predicate. */
+static int b13557_chain_has_hand_shape(
+    CPUState *cpu, uint32_t start_tag,
+    uint32_t *steps_out, uint32_t *packet_out
+)
+{
+    if (steps_out) *steps_out = 0u;
+    if (packet_out) *packet_out = 0u;
+    if (!FM_OT_DIAGNOSTICS) return 0;
+    return fm_chain_has_hand_shape(cpu, start_tag, steps_out, packet_out);
+}
+
 /*
  * B135.58 - packet lifetime and exact OT reachability.
  *
@@ -3232,6 +3301,12 @@ static int b13558_chain_reaches(
     if (steps_out) *steps_out = 0u;
     if (stop_out) *stop_out = 0u;
     if (header_out) *header_out = 0u;
+
+    /* Outputs above stay deterministic when the optional scan is off. */
+    if (!FM_OT_DIAGNOSTICS)
+    {
+        return 0;
+    }
 
     if (!cpu || start_tag == 0u || target == 0u)
     {
@@ -6769,6 +6844,60 @@ static uint32_t fm_bcd_to_u32(uint8_t value)
         (value & 0x0Fu);
 }
 
+/* B136.14: ReadS runs independently of data DMA/GetSector. Keep a
+ * clocked silent XA position so native GetlocL waits can complete. */
+static void fm_cd_stream_tick(uint64_t now_ms, int running)
+{
+    uint64_t elapsed = now_ms >= g_cd_stream_last_ms
+        ? now_ms - g_cd_stream_last_ms : 0u;
+    g_cd_stream_last_ms = now_ms;
+    if (!g_cd_streaming || !running) return;
+    uint32_t rate = (g_cd_mode & 0x80u) ? 150u : 75u;
+    /* Bound to the representable 99:59:74 MSF range. */
+    if (elapsed > 6000000u) elapsed = 6000000u;
+    uint64_t units = elapsed * rate + g_cd_stream_fraction;
+    uint64_t next = (uint64_t)g_cd_lba + units / 1000u;
+    g_cd_stream_fraction = (uint32_t)(units % 1000u);
+    g_cd_lba = next > 449849u ? 449849u : (uint32_t)next;
+}
+
+static void fm_cd_apply_command(CPUState *cpu, uint32_t command,
+    uint32_t params, int raw_mode, uint64_t now_ms)
+{
+    fm_cd_stream_tick(now_ms, 1);
+    /* 7BA00 wraps Pause/SetMode/Setloc/command; params are its CdlLOC,
+     * rather than the hardware ReadS parameter (which has no arguments). */
+    if (raw_mode >= 0) g_cd_mode = (uint8_t)raw_mode;
+    if ((command == 0x02u || raw_mode >= 0) && params != 0u)
+    {
+        uint32_t m = fm_bcd_to_u32(cpu->read_byte(params));
+        uint32_t sec = fm_bcd_to_u32(cpu->read_byte(params + 1u));
+        uint32_t f = fm_bcd_to_u32(cpu->read_byte(params + 2u));
+        uint32_t absolute = (m * 60u + sec) * 75u + f;
+        g_cd_lba = absolute >= 150u ? absolute - 150u : 0u;
+        g_cd_pos = 2048u;
+    }
+    if (command == 0x0Eu && raw_mode < 0 && params != 0u)
+        g_cd_mode = cpu->read_byte(params);
+    if (command == 0x1Bu || command == 0x06u)
+    {
+        g_cd_streaming = command == 0x1Bu;
+        g_cd_reading = command == 0x06u;
+        g_cd_stream_last_ms = now_ms;
+        g_cd_stream_fraction = 0u;
+        g_cd_pos = 2048u;
+        g_cd_error = 0;
+    }
+    else if (command == 0x08u || command == 0x09u || command == 0x0Au)
+    {
+        g_cd_streaming = 0;
+        g_cd_reading = 0;
+        g_cd_stream_fraction = 0u;
+        if (command == 0x0Au) g_cd_mode = 0u;
+    }
+    fm_media_command(command, params, raw_mode, g_cd_lba);
+}
+
 static void fm_b33_fill_cd_result(CPUState *cpu, uint32_t command)
 {
     if (!cpu)
@@ -6776,7 +6905,7 @@ static void fm_b33_fill_cd_result(CPUState *cpu, uint32_t command)
         return;
     }
 
-    for (unsigned i = 0; i < 16u; ++i)
+    for (unsigned i = 0; i < 8u; ++i)
     {
         cpu->write_byte(g_b33_result_scratch + i, 0u);
     }
@@ -6812,116 +6941,392 @@ static void fm_b33_fill_cd_result(CPUState *cpu, uint32_t command)
     }
 }
 
+/* B136.13: CD completion is an interrupt, not a nested guest call.
+ * Return to the issuer before it sets busy; deliver after a host frame.
+ * Pending metadata is separate from the active interrupted context. */
 static int fm_b33_schedule_cd_callback(
-    CPUState *cpu,
-    uint32_t command,
-    uint32_t callback,
-    uint32_t resume_pc,
-    uint32_t params,
-    uint32_t context,
-    uint32_t return_value
+    CPUState *cpu, uint32_t command, uint32_t callback,
+    uint32_t resume_pc, uint32_t params, uint32_t context,
+    uint32_t return_value, uint32_t frame, int raw_mode
 )
 {
-    if (!cpu)
-    {
-        return 0;
-    }
-
-    g_b33_cb_cmd = command & 0xFFu;
-    g_b33_cb_addr = callback;
-    g_b33_cb_resume = resume_pc;
+    if (!cpu) return 0;
     g_b33_last_params = params;
     g_b33_last_ctx = context;
-    g_b33_cb_return_value = return_value;
+    if (g_b33_pending)
+    {
+        /* Refuse a second outstanding command without losing the first.
+         * 7A1D4 returns -1 on failure; 7BA00 returns zero. */
+        ++g_b33_cb_skipped;
+        cpu->gpr[2] = return_value == 0u ? 0xFFFFFFFFu : 0u;
+        cpu->pc = resume_pc;
+        cpu->gpr[0] = 0u;
+        return 1;
+    }
+    fm_cd_apply_command(cpu, command, params, raw_mode, osGetTime());
+    g_b33_pending = 1u;
+    g_b33_pending_cmd = command & 0xFFu;
+    g_b33_pending_callback = callback;
+    g_b33_pending_gp = cpu->gpr[28];
+    g_b33_pending_frame = frame + 1u;
+    cpu->write_byte(0x80094BECu, 0u); /* No completion before delivery. */
+    cpu->write_byte(0x8009492Du, (uint8_t)command);
+    cpu->gpr[2] = return_value;
+    cpu->pc = resume_pc;
+    cpu->gpr[0] = 0u;
+    return 1;
+}
 
+static int fm_b33_deliver_cd_callback(CPUState *cpu, uint32_t frame)
+{
+    if (!fm_irq_cpu_enabled(cpu)) return 0;
+    if (!cpu || !g_b33_pending || g_b33_cb_active
+        || (int32_t)(frame - g_b33_pending_frame) < 0)
+        return 0;
+    uint32_t command = g_b33_pending_cmd;
+    uint32_t callback = g_b33_pending_callback;
+    uint32_t callback_gp = g_b33_pending_gp;
+    g_b33_pending = 0u;
+    fm_cd_stream_tick(osGetTime(), 1);
     fm_b33_fill_cd_result(cpu, command);
-
-    /*
-     * B66 - reproduire la partie INTERNE de LibCD que notre HLE B33
-     * court-circuitait.
-     *
-     * FUN_80079728 fait ceci lors d'un interrupt type 2 :
-     *   DAT_80094BEC = 2;
-     *   copie des 8 octets de resultat vers DAT_800F7130.
-     *
-     * Le callback utilisateur est appele seulement APRES cet update.
-     */
-    g_b66_last_cmd = command & 0xFFu;
-    g_b66_last_sync_before =
-        cpu->read_byte(0x80094BECu);
-
-    cpu->write_byte(
-        0x80094BECu,
-        2u
-    );
-
-    cpu->write_byte(
-        0x8009492Du,
-        (uint8_t)(command & 0xFFu)
-    );
-
-    for (unsigned i = 0; i < 8u; ++i)
-    {
-        cpu->write_byte(
-            0x800F7130u + i,
-            cpu->read_byte(
-                g_b33_result_scratch + i
-            )
-        );
-    }
-
-    g_b66_last_sync_after =
-        cpu->read_byte(0x80094BECu);
-
+    g_b66_last_cmd = command;
+    g_b66_last_sync_before = cpu->read_byte(0x80094BECu);
+    cpu->write_byte(0x80094BECu, 2u);
+    cpu->write_byte(0x8009492Du, (uint8_t)command);
+    g_b66_last_sync_after = cpu->read_byte(0x80094BECu);
     ++g_b66_complete_publish;
-
-    /* Pas de callback : la commande est simplement acceptee. */
-    if (
-        callback < 0x80010000u
-        || callback >= 0x801E0000u
-    )
+    if (callback < 0x80010000u || callback >= 0x801E0000u)
     {
         ++g_b33_cb_skipped;
-        cpu->gpr[2] = g_b33_cb_return_value;
-        cpu->pc = resume_pc;
-        cpu->gpr[31] = resume_pc;
-        cpu->gpr[0] = 0u;
-        return 1;
+        return 0;
     }
-
-    /* Une seule profondeur suffit pour le chemin succes (event 2). */
-    if (g_b33_cb_active)
-    {
-        ++g_b33_cb_skipped;
-        cpu->gpr[2] = g_b33_cb_return_value;
-        cpu->pc = resume_pc;
-        cpu->gpr[31] = resume_pc;
-        cpu->gpr[0] = 0u;
-        return 1;
-    }
-
-    for (unsigned i = 0; i < 32u; ++i)
-    {
+    /* Preserve the context at delivery, not the obsolete issuing call. */
+    for (unsigned i = 0u; i < 32u; ++i)
         g_b33_saved_gpr[i] = cpu->gpr[i];
-    }
+    g_b33_saved_cpu = *cpu;
+    g_b33_saved_hi = cpu->hi;
+    g_b33_saved_lo = cpu->lo;
+    g_b33_cb_resume = cpu->pc;
+    g_b33_cb_return_value = cpu->gpr[2];
+    g_b33_cb_cmd = command;
+    g_b33_cb_addr = callback;
     ++g_b33_ctx_saved;
-
     g_b33_cb_active = 1u;
     ++g_b33_cb_started;
-
-    /*
-     * Les callbacks du moteur testent a0 == 2 pour CdlComplete
-     * et a0 == 5 pour l'erreur/retry. a1 pointe sur le resultat.
-     */
+    cpu->gpr[28] = callback_gp;
     cpu->gpr[4] = 2u;
     cpu->gpr[5] = g_b33_result_scratch;
     cpu->pc = callback;
     cpu->gpr[31] = g_b33_cb_sentinel;
     cpu->gpr[0] = 0u;
-
     return 1;
 }
 
+
+static int g_media_irq_active;
+static CPUState g_media_irq_cpu;
+static const uint32_t g_media_irq_sentinel = 0x8000FFD0u;
+static int fm_media_irq_dispatch(CPUState *cpu)
+{
+    if (g_media_irq_active) {
+        if (cpu->pc != g_media_irq_sentinel) return 0;
+        *cpu = g_media_irq_cpu;
+        cpu->gpr[0] = 0; g_media_irq_active = 0;
+        return 1;
+    }
+    if (g_b33_cb_active || g_cd_tick_active || g_b34_ready_active || g_b35_finalizer_active) return 0;
+    if (!fm_irq_cpu_enabled(cpu) || !(fm_memory_i_mask() & 8u)) return 0;
+    uint32_t callback, gp;
+    if (!fm_memory_mdec_take_callback(&callback, &gp)) return 0;
+    g_media_irq_cpu = *cpu;
+    cpu->cop0[12] &= ~1u;
+    cpu->pc = callback; cpu->gpr[28] = gp;
+    cpu->gpr[31] = g_media_irq_sentinel; cpu->gpr[0] = 0;
+    g_media_irq_active = 1; return 1;
+}
+
+static uint32_t g_seq_irq_calls, g_seq_irq_done, g_seq_irq_blocks;
+static uint32_t g_seq_irq_serviced, g_seq_irq_skipped, g_seq_irq_max_ms;
+static uint64_t g_seq_irq_total_ms;
+/* B136.31: service a timer IRQ independently of the next rendered update.
+ * I_STAT still coalesces elapsed targets, and BIOS registration/I_MASK still
+ * decide delivery. Run the entire native ISR on a separate CPU/stack so it
+ * cannot consume successive main-thread slices or starve the restored PC. */
+static int fm_execute_guest_timer_callback(CPUState *cpu)
+{
+    if (!fm_irq_cpu_enabled(cpu) || g_media_irq_active || g_b33_cb_active || g_cd_tick_active
+        || g_b34_ready_active || g_b35_finalizer_active) return 0;
+    uint32_t callback;
+    if (!fm_runtime_take_timer_callback(&callback)) return 0;
+    CPUState irq_cpu = *cpu;
+    irq_cpu.cop0[12] &= ~1u; /* No nested external IRQ until this isolated ISR returns. */
+    irq_cpu.pc = callback;
+    irq_cpu.gpr[29] = 0x801FF800u;
+    irq_cpu.gpr[31] = g_media_irq_sentinel;
+    irq_cpu.gpr[0] = 0;
+    ++g_seq_irq_calls;
+    uint64_t start_ms = osGetTime();
+    for (unsigned handoff = 0; handoff < 100000u; ++handoff) {
+        if (irq_cpu.pc == g_media_irq_sentinel) {
+            ++g_seq_irq_done;
+            if (irq_cpu.gpr[2] == 0u) ++g_seq_irq_serviced;
+            else ++g_seq_irq_skipped;
+            uint32_t elapsed = (uint32_t)(osGetTime() - start_ms);
+            g_seq_irq_total_ms += elapsed;
+            if (elapsed > g_seq_irq_max_ms) g_seq_irq_max_ms = elapsed;
+            return 1;
+        }
+        uint32_t phys = irq_cpu.pc & 0x1FFFFFFFu;
+        if ((phys == 0xA0u || phys == 0xB0u || phys == 0xC0u
+            || phys == 0x884u || phys == 0x894u)
+            && fm_bios_try_hle(&irq_cpu, irq_cpu.pc)) continue;
+        FMInterpResult result = fm_interp_run_block(&irq_cpu, 512u);
+        ++g_seq_irq_blocks;
+        if (result.reason != FM_INTERP_BLOCK_DONE
+            && result.reason != FM_INTERP_BUDGET) return -1;
+    }
+    return -1;
+}
+
+#if FM_PERF_PROFILE
+static FMPerfCapture g_perf_capture;
+static unsigned g_perf_capture_reset;
+/* B136.32: wall-time windows, completed image latches rather than host swaps.
+ * Nested SEQ time belongs to pre-render or IRQ work; never add it twice. */
+static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUState *cpu)
+{
+    static uint64_t start, pre, render, vb, gfx, wait, loops, seq_before;
+    static uint32_t samples, max_loop, image_before, frame_before, irq_before;
+    static uint32_t report_ms;
+    static uint64_t dma_before, payload_before;
+    static uint32_t clock_before, skips_before;
+    static uint32_t probes_before, chains_before;
+    static uint64_t blocks_before, frame_probe_before;
+    static uint32_t frame_stops_before, frame_resumes_before, frame_calls_before;
+    static uint64_t wait_reason_ms[4];
+    static uint32_t wait_reason_calls[4];
+    static uint32_t mode0_before, modeN_before, immediate_before, completions_before, budget_before;
+    static uint32_t dma_calls_before;
+    static uint32_t overlay_entries_before,overlay_blocks_before;
+    static uint64_t overlay_instructions_before;
+#if FM_GPU_UNAI
+    static uint32_t previous_s,previous_p,previous_f;
+#endif
+    FMDmaDebugStats dma = {0};
+    fm_memory_dma_debug(&dma);
+    if (g_perf_capture_reset) {
+        g_perf_capture_reset=0;start=0;pre=render=vb=gfx=wait=loops=0;
+        samples=max_loop=report_ms=0;
+        memset(wait_reason_ms,0,sizeof(wait_reason_ms));
+        memset(wait_reason_calls,0,sizeof(wait_reason_calls));
+        memset(g_b110_prof,0,sizeof(g_b110_prof));
+    }
+    if (!start) {
+        overlay_entries_before=g_b91_fast_entries;overlay_blocks_before=g_b91_fast_blocks;
+        overlay_instructions_before=g_b91_fast_instructions;
+        start = now; frame_before = frame; image_before = g_b84_latch_count;
+        irq_before = g_seq_irq_done; seq_before = g_seq_irq_total_ms;
+        dma_before = dma.dma2_linked_total_ms; payload_before = dma.dma2_payload_us;
+        dma_calls_before = dma.dma2_linked_transfer_count;
+        probes_before=g_native_probe_calls; chains_before=g_b13514_chain_entries; blocks_before=g_b13514_chain_dispatches;
+        clock_before=g_clock_ticks; skips_before=g_budget_wait_skips;
+        mode0_before=g_b108_vsync_mode0; modeN_before=g_b108_vsync_modeN;
+        immediate_before=g_b108_vsync_immediate;
+        completions_before=g_b1358_vsync_completions; budget_before=g_b84_budget_yields;
+        frame_probe_before=g_frame_wait_probe_us; frame_calls_before=g_frame_wait_probe_calls;
+        frame_stops_before=g_frame_wait_stops; frame_resumes_before=g_frame_wait_resumes;
+#if FM_GPU_UNAI
+        fm_unai_counts(&previous_s,&previous_p,&previous_f);
+#endif
+        fm_gpu_perf_window_reset();
+        return;
+    }
+    pre += pre_ms; render += g_b105_render_ms; vb += g_b105_vblank_ms;
+    gfx += g_b106_gfx_ms; wait += g_b106_wait_ms; loops += g_b105_loop_ms;
+    unsigned reason = g_perf_wait_reason < 4u ? g_perf_wait_reason : 2u;
+    wait_reason_ms[reason] += g_b106_wait_ms;
+    ++wait_reason_calls[reason];
+    ++samples;
+    if (g_b105_loop_ms > max_loop) max_loop = g_b105_loop_ms;
+    uint64_t elapsed = now - start;
+    if (elapsed < (g_perf_capture.active ? FM_CAPTURE_DURATION_MS : 2000u)) return;
+    uint64_t report_start = osGetTime();
+    FILE *fp = fopen(g_perf_capture.active
+        ? "sdmc:/3ds/fm-new3ds/perf-capture-summary.txt"
+        : "sdmc:/3ds/fm-new3ds/perf-latest.txt", "wb");
+    if (fp) {
+        /* A single stdio buffer avoids small writes per formatted line. */
+        char report_buffer[8192];
+        setvbuf(fp, report_buffer, _IOFBF, sizeof(report_buffer));
+        if(g_perf_capture.active)fprintf(fp,"capture_start_ms=%llu requested_ms=10000 rows=%u dropped=%u completed=1\n",
+            (unsigned long long)g_perf_capture.start_ms,g_perf_capture.count,g_perf_capture.dropped);
+        fprintf(fp, "probe=B136.62 window_ms=%llu pc=%08lX script=%04lX\n",
+            (unsigned long long)elapsed, (unsigned long)(cpu ? cpu->pc : 0u),
+            (unsigned long)fm_memory_read_half(0x8009C610u));
+        fprintf(fp, "host_fps_x100=%llu new_images_fps_x100=%llu samples=%lu\n",
+            (unsigned long long)((uint64_t)(frame-frame_before)*100000u/elapsed),
+            (unsigned long long)((uint64_t)(g_b84_latch_count-image_before)*100000u/elapsed),
+            (unsigned long)samples);
+        fprintf(fp, "sum_ms pre_guest_input=%llu presentation=%llu vblank=%llu gfx=%llu wait=%llu loop=%llu max_loop=%lu\n",
+            (unsigned long long)pre, (unsigned long long)render, (unsigned long long)vb,
+            (unsigned long long)gfx, (unsigned long long)wait, (unsigned long long)loops,
+            (unsigned long)max_loop);
+        fprintf(fp, "wait_reasons budget_ms=%llu budget_loops=%lu vsync_ms=%llu vsync_loops=%lu other_ms=%llu other_loops=%lu no_wait_loops=%lu\n",
+            (unsigned long long)wait_reason_ms[0], (unsigned long)wait_reason_calls[0],
+            (unsigned long long)wait_reason_ms[1], (unsigned long)wait_reason_calls[1],
+            (unsigned long long)wait_reason_ms[2], (unsigned long)wait_reason_calls[2],
+            (unsigned long)wait_reason_calls[3]);
+        fprintf(fp, "scheduler budget_ms=%lu budget_yields=%lu vsync_mode0=%lu vsync_modeN=%lu vsync_immediate=%lu vsync_completed=%lu\n",
+            (unsigned long)g_b105_slice_budget_ms,
+            (unsigned long)(g_b84_budget_yields-budget_before),
+            (unsigned long)(g_b108_vsync_mode0-mode0_before),
+            (unsigned long)(g_b108_vsync_modeN-modeN_before),
+            (unsigned long)(g_b108_vsync_immediate-immediate_before),
+            (unsigned long)(g_b1358_vsync_completions-completions_before));
+        fprintf(fp, "frame_wait stops=%lu resumes=%lu active=%u target_probes=%lu target_probe_us=%llu\n",
+            (unsigned long)(g_frame_wait_stops-frame_stops_before),
+            (unsigned long)(g_frame_wait_resumes-frame_resumes_before),
+            (unsigned)g_frame_wait_active,
+            (unsigned long)(g_frame_wait_probe_calls-frame_calls_before),
+            (unsigned long long)(g_frame_wait_probe_us-frame_probe_before));
+        fprintf(fp, "ps1_clock=wall_60hz ticks=%lu budget_wait_skips=%lu\n",
+            (unsigned long)(g_clock_ticks-clock_before),
+            (unsigned long)(g_budget_wait_skips-skips_before));
+        fprintf(fp, "clock_debt pending=%llu batch_limit=%u\n",
+            (unsigned long long)g_ps1_host_clock.pending, FM_HOST_CLOCK_BATCH);
+        fprintf(fp, "native_batch probes=%lu chains=%lu blocks=%llu object_limit=64 time_budget_ms=2\n",
+            (unsigned long)(g_native_probe_calls-probes_before),
+            (unsigned long)(g_b13514_chain_entries-chains_before),
+            (unsigned long long)(g_b13514_chain_dispatches-blocks_before));
+        uint64_t classified = pre + render + vb + gfx + wait;
+        fprintf(fp, "unclassified_ms=%llu\n",
+            (unsigned long long)(loops > classified ? loops-classified : 0u));
+        fprintf(fp, "seq_nested_ms=%llu irq_done=%lu irq_max_ms=%lu previous_report_ms=%lu\n",
+            (unsigned long long)(g_seq_irq_total_ms-seq_before),
+            (unsigned long)(g_seq_irq_done-irq_before),
+            (unsigned long)g_seq_irq_max_ms, (unsigned long)report_ms);
+        fprintf(fp, "dma2_nested_ms=%llu transfers=%lu last_ms=%lu max_ms=%lu legacy_file_dumps=%u\n",
+            (unsigned long long)(dma.dma2_linked_total_ms-dma_before),
+            (unsigned long)(dma.dma2_linked_transfer_count-dma_calls_before),
+            (unsigned long)dma.dma2_linked_last_ms,
+            (unsigned long)dma.dma2_linked_max_ms,
+            (unsigned)FM_LEGACY_FILE_DIAGNOSTICS);
+        uint64_t payload_us = dma.dma2_payload_us-payload_before;
+        uint64_t dma_us = (dma.dma2_linked_total_ms-dma_before)*1000u;
+        fprintf(fp, "dma2_split payload_parser_raster_us=%llu traversal_other_us=%llu coarse_total_us=%llu\n",
+            (unsigned long long)payload_us,
+            (unsigned long long)(dma_us > payload_us ? dma_us-payload_us : 0u),
+            (unsigned long long)dma_us);
+        fprintf(fp, "ot_last_window_ms repair=%llu submit_raster=%llu merge=%llu calls=%lu\n",
+            (unsigned long long)g_b115_last_repair_ms,
+            (unsigned long long)g_b115_last_submit_ms,
+            (unsigned long long)g_b115_last_merge_ms, (unsigned long)g_b115_last_calls);
+        fprintf(fp,"overlay_window entries=%lu chunks=%lu instructions=%llu\n",
+            (unsigned long)(g_b91_fast_entries-overlay_entries_before),
+            (unsigned long)(g_b91_fast_blocks-overlay_blocks_before),
+            (unsigned long long)(g_b91_fast_instructions-overlay_instructions_before));
+        fprintf(fp, "overlay_totals entries=%lu blocks=%lu instructions=%llu slow_handoff_pc=%08lX slow_handoff_ms=%lu\n",
+            (unsigned long)g_b91_fast_entries, (unsigned long)g_b91_fast_blocks,
+            (unsigned long long)g_b91_fast_instructions,
+            (unsigned long)g_b91_slow_handoff_pc, (unsigned long)g_b91_slow_handoff_ms);
+        fprintf(fp, "diagnostic_ot_scans=%u\n", (unsigned)FM_OT_DIAGNOSTICS);
+        uint64_t neutral_pixels=0, fast_pixels=0;
+        uint32_t neutral_triangles=0, fast_triangles=0;
+        fm_gpu_perf_texture_window(&neutral_pixels, &fast_pixels,
+            &neutral_triangles, &fast_triangles);
+        fprintf(fp, "texture_fast format_specialization=1 color_lookup=1 neutral_triangles=%lu fast_triangles=%lu neutral_pixels=%llu fast_pixels=%llu\n",
+            (unsigned long)neutral_triangles, (unsigned long)fast_triangles,
+            (unsigned long long)neutral_pixels, (unsigned long long)fast_pixels);
+#if FM_GPU_UNAI
+        uint32_t unai_s=0,unai_p=0,unai_f=0;
+        fm_unai_counts(&unai_s,&unai_p,&unai_f);
+        fprintf(fp,"renderer=unai-experiment sprites=%lu polygons=%lu fallback=%lu\n",
+            (unsigned long)(unai_s-previous_s),(unsigned long)(unai_p-previous_p),
+            (unsigned long)(unai_f-previous_f));
+        previous_s=unai_s; previous_p=unai_p; previous_f=unai_f;
+#else
+        fprintf(fp,"renderer=native-reference\n");
+#endif
+        fprintf(fp, "gpu_timing=all_completed_commands profiling_overhead_included\n");
+        for (unsigned rank=0; rank<(g_perf_capture.active?256u:6u); ++rank) {
+            FMGpuOpcodePerf hot = {0}; fm_gpu_perf_window_rank(rank, &hot);
+            if (!hot.calls) break;
+            fprintf(fp, "gpu%u opcode=%02X calls=%lu us=%llu max_us=%lu\n",
+                rank, (unsigned)hot.opcode, (unsigned long)hot.calls,
+                (unsigned long long)hot.total_us, (unsigned long)hot.max_us);
+        }
+        fprintf(fp, "native_sampling=random_1/64 totals_are_sampled_not_estimated\n");
+        for (unsigned rank=0; rank<B110_PROF_SLOTS; ++rank) {
+            B110ProbeStat hot = {0}; b110_get_rank(rank, &hot);
+            if (!hot.hits) continue;
+            fprintf(fp, "native%u pc=%08lX end=%08lX samples=%lu us=%llu max_us=%lu\n",
+                rank, (unsigned long)hot.start_pc, (unsigned long)hot.end_pc,
+                (unsigned long)hot.hits, (unsigned long long)hot.total_us,
+                (unsigned long)hot.max_us);
+        }
+        fclose(fp);
+    }
+    report_ms = (uint32_t)(osGetTime()-report_start);
+    overlay_entries_before=g_b91_fast_entries;overlay_blocks_before=g_b91_fast_blocks;
+    overlay_instructions_before=g_b91_fast_instructions;
+    start=now; pre=render=vb=gfx=wait=loops=0; samples=max_loop=0;
+    frame_before=frame; image_before=g_b84_latch_count;
+    seq_before=g_seq_irq_total_ms; irq_before=g_seq_irq_done;
+    fm_gpu_perf_window_reset();
+    dma_before=dma.dma2_linked_total_ms; payload_before=dma.dma2_payload_us;
+    dma_calls_before=dma.dma2_linked_transfer_count;
+    memset(wait_reason_ms,0,sizeof(wait_reason_ms));
+    memset(wait_reason_calls,0,sizeof(wait_reason_calls));
+    probes_before=g_native_probe_calls; chains_before=g_b13514_chain_entries; blocks_before=g_b13514_chain_dispatches;
+    clock_before=g_clock_ticks; skips_before=g_budget_wait_skips;
+    mode0_before=g_b108_vsync_mode0; modeN_before=g_b108_vsync_modeN;
+    immediate_before=g_b108_vsync_immediate;
+    completions_before=g_b1358_vsync_completions; budget_before=g_b84_budget_yields;
+    frame_probe_before=g_frame_wait_probe_us; frame_calls_before=g_frame_wait_probe_calls;
+    frame_stops_before=g_frame_wait_stops; frame_resumes_before=g_frame_wait_resumes;
+    memset(g_b110_prof, 0, sizeof(g_b110_prof));
+}
+static void fm_perf_capture_finish(void)
+{
+    FILE *f=fopen("sdmc:/3ds/fm-new3ds/perf-capture.csv","wb");
+    if(f) {
+        char buffer[16384];setvbuf(f,buffer,_IOFBF,sizeof(buffer));
+        fprintf(f,"# probe=B136.62 capture_start_ms=%llu duration_ms=%u rows=%u dropped=%u completed=1\n",
+            (unsigned long long)g_perf_capture.start_ms,g_perf_capture.elapsed_ms,
+            g_perf_capture.count,g_perf_capture.dropped);
+        fprintf(f,"elapsed_ms,start_pc,end_pc,ps1_frame,images_total,running,pre_guest_ms,presentation_ms,vblank_ms,gfx_ms,wait_ms,loop_ms,wait_reason,dma_calls,irq_calls,vsync_completed,native_probes,cd_sectors,dma_us_nested,seq_ms_nested,overlay_instructions,clock_debt\n");
+        for(unsigned i=0;i<g_perf_capture.count;++i) {
+            const FMPerfCaptureRow *r=&g_perf_capture.rows[i];
+            fprintf(f,"%lu,%08lX,%08lX,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%llu,%llu,%llu,%llu\n",
+                (unsigned long)r->elapsed_ms,(unsigned long)r->start_pc,(unsigned long)r->end_pc,
+                (unsigned long)r->frame,(unsigned long)r->images,(unsigned long)r->running,
+                (unsigned long)r->pre_ms,(unsigned long)r->render_ms,(unsigned long)r->vblank_ms,
+                (unsigned long)r->gfx_ms,(unsigned long)r->wait_ms,(unsigned long)r->loop_ms,
+                (unsigned long)r->wait_reason,(unsigned long)r->dma_calls,(unsigned long)r->irq_calls,
+                (unsigned long)r->vsyncs,(unsigned long)r->native_probes,(unsigned long)r->cd_sectors,
+                (unsigned long long)r->dma_us,(unsigned long long)r->seq_ms,
+                (unsigned long long)r->overlay_instructions,(unsigned long long)r->clock_debt);
+        }
+        fclose(f);
+    }
+    f=fopen("sdmc:/3ds/fm-new3ds/perf-capture-summary.txt","ab");
+    if(f) {
+        char buffer[8192];setvbuf(f,buffer,_IOFBF,sizeof(buffer));
+        fprintf(f,"interpreted_chunks=all_main_during_capture hot_slots=%u overflow_calls=%u\n",
+            FM_CAPTURE_HOT_SLOTS,g_perf_capture.hot_dropped);
+        for(unsigned i=0;i<FM_CAPTURE_HOT_SLOTS;++i) {
+            const FMPerfCaptureHot *h=&g_perf_capture.hot[i];
+            if(h->calls)fprintf(f,"interp pc=%08lX calls=%lu instructions=%llu us=%llu max_us=%lu\n",
+                (unsigned long)h->pc,(unsigned long)h->calls,
+                (unsigned long long)h->instructions,(unsigned long long)h->total_us,
+                (unsigned long)h->max_us);
+        }
+        fclose(f);
+    }
+    g_perf_capture.active=0;
+}
+
+#endif
 
 static int fm_execute_guest_vblank_callback(
     CPUState *cpu,
@@ -6937,6 +7342,14 @@ static int fm_execute_guest_vblank_callback(
     {
         return 0;
     }
+
+    if (!fm_irq_cpu_enabled(cpu) || !(fm_memory_i_mask() & 1u)
+        || g_media_irq_active || g_b33_cb_active || g_cd_tick_active
+        || g_b34_ready_active || g_b35_finalizer_active) {
+        g_vblank_deferred = 1u;
+        return 0;
+    }
+    g_vblank_deferred = 0u;
 
     g_vblank_sig_words[0] = cpu->read_word(0x80012BD8u);
     g_vblank_sig_words[1] = cpu->read_word(0x80012BDCu);
@@ -6971,6 +7384,7 @@ static int fm_execute_guest_vblank_callback(
 
     CPUState irq_cpu = *cpu;
 
+    irq_cpu.cop0[12] &= ~1u;
     irq_cpu.pc = g_vblank_registered_cb;
     irq_cpu.gpr[28] = g_vblank_registered_gp;
 
@@ -7193,6 +7607,9 @@ static int fm_execute_guest_vblank_callback(
             }
             ++g_b33_ctx_restored;
 
+            irq_cpu = g_b33_saved_cpu;
+            irq_cpu.hi = g_b33_saved_hi;
+            irq_cpu.lo = g_b33_saved_lo;
             irq_cpu.gpr[2] = g_b33_cb_return_value;
             irq_cpu.pc = resume_pc;
             irq_cpu.gpr[0] = 0u;
@@ -7231,27 +7648,6 @@ static int fm_execute_guest_vblank_callback(
             g_b13594_low_queue_before = irq_cpu.read_word(0x800F7270u);
             g_cd_last_cmd = command;
 
-            if (command == 0x02u && params != 0u)
-            {
-                uint32_t minute = fm_bcd_to_u32(irq_cpu.read_byte(params + 0u));
-                uint32_t second = fm_bcd_to_u32(irq_cpu.read_byte(params + 1u));
-                uint32_t frame_cd = fm_bcd_to_u32(irq_cpu.read_byte(params + 2u));
-                uint32_t absolute_sector = ((minute * 60u + second) * 75u) + frame_cd;
-                g_cd_lba = absolute_sector >= 150u ? absolute_sector - 150u : 0u;
-                g_cd_pos = 2048u;
-            }
-
-            if (command == 0x06u)
-            {
-                g_cd_reading = 1;
-                g_cd_pos = 2048u;
-                g_cd_error = 0;
-            }
-            else if (command == 0x09u)
-            {
-                g_cd_reading = 0;
-            }
-
             fm_b33_schedule_cd_callback(
                 &irq_cpu,
                 command,
@@ -7259,7 +7655,8 @@ static int fm_execute_guest_vblank_callback(
                 resume_pc,
                 params,
                 0u,
-                0u
+                0u,
+                frame, -1
             );
 
             continue;
@@ -7279,33 +7676,6 @@ static int fm_execute_guest_vblank_callback(
             g_b34_last_command = command;
             g_cd_last_cmd = command;
 
-            if (command == 0x02u && params != 0u)
-            {
-                uint32_t minute = fm_bcd_to_u32(irq_cpu.read_byte(params + 0u));
-                uint32_t second = fm_bcd_to_u32(irq_cpu.read_byte(params + 1u));
-                uint32_t frame_cd = fm_bcd_to_u32(irq_cpu.read_byte(params + 2u));
-                uint32_t absolute_sector =
-                    ((minute * 60u + second) * 75u) + frame_cd;
-
-                g_cd_lba =
-                    absolute_sector >= 150u
-                        ? absolute_sector - 150u
-                        : 0u;
-
-                g_cd_pos = 2048u;
-            }
-
-            if (command == 0x06u)
-            {
-                g_cd_reading = 1;
-                g_cd_pos = 2048u;
-                g_cd_error = 0;
-            }
-            else if (command == 0x09u)
-            {
-                g_cd_reading = 0;
-            }
-
             fm_b33_schedule_cd_callback(
                 &irq_cpu,
                 command,
@@ -7313,7 +7683,8 @@ static int fm_execute_guest_vblank_callback(
                 resume_pc,
                 params,
                 context,
-                1u
+                1u,
+                frame, mode
             );
 
             continue;
@@ -8222,29 +8593,9 @@ ot_done:
 }
 
 
-/*
- * ============================================================
- * Fade / transition bridge
- * ============================================================
- *
- * Le boot est actuellement bloqué avant FUN_8002DF60 :
- *
- *   FUN_80044084
- *     -> FUN_800158F4
- *       -> FUN_8001569C
- *         EB24D = FF
- *         EB24E = 80
- *       -> FUN_800158B4
- *          attend tant que (EB24E & 80) != 0
- *
- * Sur PS1, FUN_80015400 -> FUN_8001522C fait progresser EB24C
- * vers EB24D à chaque service de frame, puis efface bit7.
- *
- * Notre bring-up 3DS ne livre pas encore toute la chaîne
- * d'événements/IRQ de façon identique. On reproduit uniquement
- * cette machine de transition en RAM, sans fabriquer d'image.
- */
-
+/* B136.10: observe the fade only. The real 80015400 -> 8001522C
+ * service runs again after the CD scratch fix. A second host step could
+ * clear bit7 before the guest applies its completion/cleanup semantics. */
 static uint8_t g_fade_current = 0;
 static uint8_t g_fade_target = 0;
 static uint8_t g_fade_flags = 0;
@@ -8255,7 +8606,7 @@ static uint32_t g_fade_bridge_ticks = 0;
 static uint32_t g_fade_bridge_completions = 0;
 
 
-static void fm_service_fade_bridge(void)
+static void fm_observe_fade(void)
 {
     uint8_t current =
         fm_memory_read_byte(
@@ -8299,206 +8650,7 @@ static void fm_service_fade_bridge(void)
         scale;
 
 
-    /*
-     * Rien à faire si aucune transition n'est active.
-     */
-    if (
-        (
-            flags
-            &
-            0x80u
-        )
-        ==
-        0
-    )
-    {
-        return;
-    }
 
-
-    /*
-     * Le bit0 sélectionne un autre chemin (FUN_800150F4).
-     * Ne pas l'émuler ici : le bridge cible uniquement la
-     * transition linéaire qui bloque le boot.
-     */
-    if (
-        flags
-        &
-        0x01u
-    )
-    {
-        return;
-    }
-
-
-    uint32_t delta =
-        (uint32_t)step
-        *
-        scale;
-
-
-    /*
-     * Si le multiplicateur vaut zéro, ne pas inventer de vitesse.
-     * Le diagnostic l'affichera directement.
-     */
-    if (delta == 0u)
-    {
-        return;
-    }
-
-
-    ++g_fade_bridge_ticks;
-
-
-    if (current != target)
-    {
-        uint32_t next;
-
-
-        if (current < target)
-        {
-            next =
-                (uint32_t)current
-                +
-                delta;
-
-
-            if (next > target)
-            {
-                next =
-                    target;
-            }
-        }
-        else
-        {
-            if (delta >= current)
-            {
-                next =
-                    0;
-            }
-            else
-            {
-                next =
-                    (uint32_t)current
-                    -
-                    delta;
-            }
-
-
-            if (next < target)
-            {
-                next =
-                    target;
-            }
-        }
-
-
-        fm_memory_write_byte(
-            0x800EB24Cu,
-            (uint8_t)next
-        );
-
-
-        g_fade_current =
-            (uint8_t)next;
-
-
-        return;
-    }
-
-
-    /*
-     * Reproduire le cas de fin de transition observé dans
-     * FUN_8001522C.
-     */
-    uint8_t result_flags =
-        flags
-        &
-        0x7Fu;
-
-
-    /*
-     * La fonction originale nettoie d'abord 0x86.
-     */
-    uint8_t cleaned_flags =
-        flags
-        &
-        0x79u;
-
-
-    fm_memory_write_byte(
-        0x800EB24Eu,
-        cleaned_flags
-    );
-
-
-    if (current == 0xFFu)
-    {
-        /*
-         * FUN_80015C18()
-         */
-        fm_memory_write_byte(
-            0x8009C4B8u,
-            1u
-        );
-
-
-        fm_memory_write_byte(
-            0x8009C4C4u,
-            0u
-        );
-
-        fm_memory_write_byte(
-            0x8009C4C5u,
-            0u
-        );
-
-
-        /*
-         * Couleurs/états cibles -> courants.
-         */
-        fm_memory_write_byte(
-            0x8009C4BBu,
-            fm_memory_read_byte(
-                0x8009C4BEu
-            )
-        );
-
-        fm_memory_write_byte(
-            0x8009C4BAu,
-            fm_memory_read_byte(
-                0x8009C4BDu
-            )
-        );
-
-        fm_memory_write_byte(
-            0x8009C4B9u,
-            fm_memory_read_byte(
-                0x8009C4BCu
-            )
-        );
-
-
-        result_flags =
-            cleaned_flags;
-    }
-
-
-    /*
-     * Cas courant du boot :
-     * 80 -> 00 lorsque C atteint D=FF.
-     */
-    fm_memory_write_byte(
-        0x800EB24Eu,
-        result_flags
-    );
-
-
-    g_fade_flags =
-        result_flags;
-
-
-    ++g_fade_bridge_completions;
 }
 
 
@@ -8773,6 +8925,10 @@ static void fm_capture_guest_string(
 
 static void fm_cd_hle_reset(void)
 {
+    fm_media_reset();
+    g_media_irq_active = 0;
+    g_b33_pending = 0u;
+    g_b33_cb_active = 0u;
     memset(
         g_cd_sector,
         0,
@@ -8785,6 +8941,10 @@ static void fm_cd_hle_reset(void)
     g_cd_sector_count = 0;
     g_cd_reading = 0;
     g_cd_error = 0;
+    g_cd_streaming = 0;
+    g_cd_mode = 0u;
+    g_cd_stream_last_ms = 0u;
+    g_cd_stream_fraction = 0u;
 
     g_cd_search_path[0] = '\0';
     g_cd_search_lba = 0;
@@ -8821,7 +8981,7 @@ static void fm_cd_hle_reset(void)
     g_b108_vsync_waited = 0u;
     g_b108_vsync_last_target = 0u;
 
-    g_str_intro_skip_pending = 1;
+    g_str_intro_skip_pending = 0;
     g_str_intro_skip_count = 0;
 
     g_str_intro_last_base = 0;
@@ -10291,6 +10451,7 @@ static int fm_hle_gpu_load_image(CPUState *cpu)
     fm_gpu_gp0_write((y << 16) | x);
     fm_gpu_gp0_write((h << 16) | w);
 
+    if (!fm_memory_gpu_send_words(srcp, (pixels + 1u) / 2u))
     for (uint32_t i = 0u; i < pixels; i += 2u)
     {
         uint32_t lo = cpu->read_half(srcp + i * 2u);
@@ -10823,77 +10984,6 @@ static void fm_bg_change(
 
     fm_bg_load(cpu, pixels);
 }
-
-/*
- * Resout les deux indices speciaux 0x10/0x11 exactement comme la
- * routine PAL 0x8002E11C. Le choix depend de DAT_8009C44B.
- */
-static uint32_t fm_bg_resolve_runtime_index(
-    CPUState *cpu,
-    uint32_t raw_index
-)
-{
-    uint32_t idx = raw_index & 0xFFFFu;
-
-    if (!cpu)
-    {
-        return idx;
-    }
-
-    if (idx == 0x10u || idx == 0x11u)
-    {
-        uint8_t variant = cpu->read_byte(0x8009C44Bu);
-
-        if (variant >= 1u && variant <= 4u)
-        {
-            uint32_t base =
-                idx == 0x10u
-                    ? 0x42u
-                    : 0x43u;
-
-            idx = base + (uint32_t)(variant - 1u) * 2u;
-        }
-    }
-
-    return idx;
-}
-
-
-static int fm_bg_load_game_index(
-    CPUState *cpu,
-    uint16_t *pixels,
-    uint32_t game_index
-)
-{
-    uint32_t group = (game_index >> 8) & 0xFFu;
-    uint32_t low = game_index & 0xFFu;
-    uint32_t tens = (low >> 4) & 0x0Fu;
-    uint32_t ones = low & 0x0Fu;
-
-    if (group > 2u || tens > 9u || ones > 9u)
-    {
-        return 0;
-    }
-
-    uint32_t ordinal = tens * 10u + ones;
-
-    /* Eviter de relire 0x21..0x71 secteurs si le jeu redemande
-       exactement le background deja affiche. */
-    if (
-        g_bg.loaded
-        && g_bg.group == group
-        && g_bg.ordinal == ordinal
-    )
-    {
-        return 1;
-    }
-
-    g_bg.group = group;
-    g_bg.ordinal = ordinal;
-
-    return fm_bg_load(cpu, pixels);
-}
-
 
 /*
  * ============================================================
@@ -11790,7 +11880,7 @@ static int fm_b93_hle_800917f8(
  * Le snapshot ne serialise jamais les pointeurs de fonctions CPU.
  */
 #define FM_B135_QS_MAGIC       0x35333142u /* "B135" little-endian */
-#define FM_B135_QS_VERSION     2u
+#define FM_B135_QS_VERSION     4u
 #define FM_B135_QS_RAM_SIZE    (2u * 1024u * 1024u)
 #define FM_B135_QS_VRAM_WORDS  (1024u * 512u)
 #define FM_B135_QS_PATH        "sdmc:/3ds/fm-new3ds/quickstate-b135.bin"
@@ -11839,6 +11929,308 @@ typedef struct FMB135QuickStateHeader
     FMGpuQuickState gpu;
     FMRuntimeQuickState runtime;
 } FMB135QuickStateHeader;
+
+/* V4 extends the frozen v3 ABI; never serialize CPU host function pointers. */
+typedef struct FMQuickExtension {
+    uint32_t extension_bytes, mdec_bytes;
+    uint8_t cd_sector[2048];
+    char cd_search_path[256];
+    FMMemoryAsyncState async;
+    FMMediaSnapshot media;
+    FMAudioSnapshot audio;
+    uint32_t g_cd_lba;
+    uint32_t g_cd_pos;
+    uint32_t g_cd_last_cmd;
+    uint32_t g_cd_sector_count;
+    uint32_t g_cd_reading;
+    uint32_t g_cd_error;
+    uint32_t g_cd_streaming;
+    uint32_t g_cd_mode;
+    uint32_t g_cd_stream_fraction;
+    uint32_t g_cd_search_lba;
+    uint32_t g_cd_search_size;
+    uint32_t g_cd_search_ok;
+    uint32_t g_b57_req;
+    uint32_t g_b57_base_lba;
+    uint32_t g_b57_next_lba;
+    uint32_t g_b57_last_remaining;
+    uint32_t g_b57_read_index;
+    uint32_t g_b32_getsec_ok;
+    uint32_t g_b32_43e_returned;
+    uint32_t g_b32_43e_return_frame;
+    uint32_t g_b33_pending;
+    uint32_t g_b33_pending_cmd;
+    uint32_t g_b33_pending_callback;
+    uint32_t g_b33_pending_gp;
+    uint32_t g_b33_pending_frame;
+    uint32_t g_b34_ready_pending;
+    uint32_t g_b34_ready_arm_frame;
+    uint32_t g_b34_ready_req;
+    uint32_t g_b34_ready_lba;
+    uint32_t g_b34_last_mode;
+    uint32_t g_b34_last_command;
+    uint32_t g_cd_tick_last_frame;
+    uint32_t g_vblank_registered_cb;
+    uint32_t g_vblank_registered_gp;
+    uint32_t g_vblank_deferred;
+    uint32_t g_hit_vblank_cb;
+    uint32_t g_fast401_forced;
+    uint32_t g_fast401_frame;
+    uint32_t g_fast43e_forced;
+    uint32_t g_fast43e_frame;
+    uint32_t g_hit_401a4;
+    uint32_t g_hit_delay_wait;
+    uint32_t g_b47_m_43eb8;
+    uint32_t g_b47_m_43f3c;
+    uint32_t g_b47_m_43f44;
+    uint32_t g_b47_m_43f4c;
+    uint32_t g_b47_m_43f54;
+    uint32_t g_b47_m_43ff8;
+    uint32_t g_b47_m_44054;
+    uint32_t g_b47_m_44064;
+    uint32_t g_b47_m_4406c;
+    uint32_t g_b50_cleanup_done;
+    uint32_t g_b50_cleanup_triggered;
+    uint32_t g_b81_pending_mask;
+    uint32_t g_b81_cleanup_mask;
+    uint32_t g_b81_sel_before;
+    uint32_t g_b81_last_update;
+    uint32_t g_b81_last_frame;
+    uint32_t g_b73_hit_menu_init;
+    uint32_t g_b73_hit_menu_update;
+    uint32_t g_b73_hit_menu_destroy;
+    uint32_t g_vsync_wait_active;
+    uint32_t g_vsync_wait_until_frame;
+    uint32_t g_vsync_wait_mode;
+    uint32_t g_b108_vsync_sync_valid;
+    uint32_t g_b108_vsync_last_sync_frame;
+    uint32_t g_frame_wait_active;
+    uint32_t g_title_graphics_ready;
+    uint32_t g_b102_menu_bridge_cleanup;
+    uint32_t g_b103_name_active_frames;
+    uint32_t g_b103_name_pending_mask;
+    uint32_t g_b103_name_cleanup_mask;
+    uint32_t g_b81_edge_before;
+    uint32_t g_b81_repeat_before;
+    uint32_t g_b81_held_before;
+} FMQuickExtension;
+static uint32_t g_snapshot_save_requested;
+static uint64_t g_snapshot_disc;
+static uint32_t fm_snapshot_schema(void)
+{
+    /* Same sizes alone do not make a schema compatible: bump the tag when
+     * field semantics/order changes. Build label is informational. */
+    uint32_t sizes[5]={0xB1365604u,sizeof(FMB135QuickStateHeader),
+        sizeof(FMQuickExtension),sizeof(FMMediaSnapshot),sizeof(FMAudioSnapshot)};
+    return fm_snapshot_crc(sizes,sizeof(sizes));
+}
+static uint64_t fm_snapshot_disc_id(void)
+{
+    if (g_snapshot_disc) return g_snapshot_disc;
+    const uint32_t sectors[4]={0u,16u,0x442u,233174u};
+    uint8_t raw[2352]; uint64_t h=14695981039346656037ull;
+    for (unsigned i=0;i<4;++i) {
+        if (fm_disc_read_raw_sector(sectors[i],raw)) return 0;
+        for (unsigned n=0;n<sizeof(raw);++n) { h^=raw[n]; h*=1099511628211ull; }
+    }
+    /* Sampled disc identity, not a cryptographic whole-image hash. */
+    g_snapshot_disc=h ? h : 1u; return g_snapshot_disc;
+}
+static void fm_snapshot_status(const char *action,int result,int legacy)
+{
+    FILE *f=fopen("sdmc:/3ds/fm-new3ds/snapshot-status.txt","w");
+    if (!f) return;
+    fprintf(f,"probe=B136.62 action=%s result=%d format=%s\n"
+        "0=success 1=deferred -7=unsafe_legacy -8=invalid_state\n",
+        action,result,legacy ? "v3-partial" : "v4");
+    fclose(f);
+}
+static int fm_snapshot_safe(const CPUState *cpu)
+{
+    return cpu && !g_media_irq_active && !g_b33_cb_active && !g_cd_tick_active
+        && !g_b34_ready_active && !g_b35_finalizer_active && !g_b50_cleanup_active;
+}
+static void fm_snapshot_host_save(FMQuickExtension *out)
+{
+    memcpy(out->cd_sector,g_cd_sector,sizeof(g_cd_sector));
+    memcpy(out->cd_search_path,g_cd_search_path,sizeof(g_cd_search_path));
+    fm_memory_async_save(&out->async); fm_media_snapshot_save(&out->media);
+    fm_audio_snapshot_save(&out->audio);
+    out->g_cd_lba=(uint32_t)g_cd_lba;
+    out->g_cd_pos=(uint32_t)g_cd_pos;
+    out->g_cd_last_cmd=(uint32_t)g_cd_last_cmd;
+    out->g_cd_sector_count=(uint32_t)g_cd_sector_count;
+    out->g_cd_reading=(uint32_t)g_cd_reading;
+    out->g_cd_error=(uint32_t)g_cd_error;
+    out->g_cd_streaming=(uint32_t)g_cd_streaming;
+    out->g_cd_mode=(uint32_t)g_cd_mode;
+    out->g_cd_stream_fraction=(uint32_t)g_cd_stream_fraction;
+    out->g_cd_search_lba=(uint32_t)g_cd_search_lba;
+    out->g_cd_search_size=(uint32_t)g_cd_search_size;
+    out->g_cd_search_ok=(uint32_t)g_cd_search_ok;
+    out->g_b57_req=(uint32_t)g_b57_req;
+    out->g_b57_base_lba=(uint32_t)g_b57_base_lba;
+    out->g_b57_next_lba=(uint32_t)g_b57_next_lba;
+    out->g_b57_last_remaining=(uint32_t)g_b57_last_remaining;
+    out->g_b57_read_index=(uint32_t)g_b57_read_index;
+    out->g_b32_getsec_ok=(uint32_t)g_b32_getsec_ok;
+    out->g_b32_43e_returned=(uint32_t)g_b32_43e_returned;
+    out->g_b32_43e_return_frame=(uint32_t)g_b32_43e_return_frame;
+    out->g_b33_pending=(uint32_t)g_b33_pending;
+    out->g_b33_pending_cmd=(uint32_t)g_b33_pending_cmd;
+    out->g_b33_pending_callback=(uint32_t)g_b33_pending_callback;
+    out->g_b33_pending_gp=(uint32_t)g_b33_pending_gp;
+    out->g_b33_pending_frame=(uint32_t)g_b33_pending_frame;
+    out->g_b34_ready_pending=(uint32_t)g_b34_ready_pending;
+    out->g_b34_ready_arm_frame=(uint32_t)g_b34_ready_arm_frame;
+    out->g_b34_ready_req=(uint32_t)g_b34_ready_req;
+    out->g_b34_ready_lba=(uint32_t)g_b34_ready_lba;
+    out->g_b34_last_mode=(uint32_t)g_b34_last_mode;
+    out->g_b34_last_command=(uint32_t)g_b34_last_command;
+    out->g_cd_tick_last_frame=(uint32_t)g_cd_tick_last_frame;
+    out->g_vblank_registered_cb=(uint32_t)g_vblank_registered_cb;
+    out->g_vblank_registered_gp=(uint32_t)g_vblank_registered_gp;
+    out->g_vblank_deferred=(uint32_t)g_vblank_deferred;
+    out->g_hit_vblank_cb=(uint32_t)g_hit_vblank_cb;
+    out->g_fast401_forced=(uint32_t)g_fast401_forced;
+    out->g_fast401_frame=(uint32_t)g_fast401_frame;
+    out->g_fast43e_forced=(uint32_t)g_fast43e_forced;
+    out->g_fast43e_frame=(uint32_t)g_fast43e_frame;
+    out->g_hit_401a4=(uint32_t)g_hit_401a4;
+    out->g_hit_delay_wait=(uint32_t)g_hit_delay_wait;
+    out->g_b47_m_43eb8=(uint32_t)g_b47_m_43eb8;
+    out->g_b47_m_43f3c=(uint32_t)g_b47_m_43f3c;
+    out->g_b47_m_43f44=(uint32_t)g_b47_m_43f44;
+    out->g_b47_m_43f4c=(uint32_t)g_b47_m_43f4c;
+    out->g_b47_m_43f54=(uint32_t)g_b47_m_43f54;
+    out->g_b47_m_43ff8=(uint32_t)g_b47_m_43ff8;
+    out->g_b47_m_44054=(uint32_t)g_b47_m_44054;
+    out->g_b47_m_44064=(uint32_t)g_b47_m_44064;
+    out->g_b47_m_4406c=(uint32_t)g_b47_m_4406c;
+    out->g_b50_cleanup_done=(uint32_t)g_b50_cleanup_done;
+    out->g_b50_cleanup_triggered=(uint32_t)g_b50_cleanup_triggered;
+    out->g_b81_pending_mask=(uint32_t)g_b81_pending_mask;
+    out->g_b81_cleanup_mask=(uint32_t)g_b81_cleanup_mask;
+    out->g_b81_sel_before=(uint32_t)g_b81_sel_before;
+    out->g_b81_last_update=(uint32_t)g_b81_last_update;
+    out->g_b81_last_frame=(uint32_t)g_b81_last_frame;
+    out->g_b73_hit_menu_init=(uint32_t)g_b73_hit_menu_init;
+    out->g_b73_hit_menu_update=(uint32_t)g_b73_hit_menu_update;
+    out->g_b73_hit_menu_destroy=(uint32_t)g_b73_hit_menu_destroy;
+    out->g_vsync_wait_active=(uint32_t)g_vsync_wait_active;
+    out->g_vsync_wait_until_frame=(uint32_t)g_vsync_wait_until_frame;
+    out->g_vsync_wait_mode=(uint32_t)g_vsync_wait_mode;
+    out->g_b108_vsync_sync_valid=(uint32_t)g_b108_vsync_sync_valid;
+    out->g_b108_vsync_last_sync_frame=(uint32_t)g_b108_vsync_last_sync_frame;
+    out->g_frame_wait_active=(uint32_t)g_frame_wait_active;
+    out->g_title_graphics_ready=(uint32_t)g_title_graphics_ready;
+    out->g_b102_menu_bridge_cleanup=(uint32_t)g_b102_menu_bridge_cleanup;
+    out->g_b103_name_active_frames=(uint32_t)g_b103_name_active_frames;
+    out->g_b103_name_pending_mask=(uint32_t)g_b103_name_pending_mask;
+    out->g_b103_name_cleanup_mask=(uint32_t)g_b103_name_cleanup_mask;
+    out->g_b81_edge_before=(uint32_t)g_b81_edge_before;
+    out->g_b81_repeat_before=(uint32_t)g_b81_repeat_before;
+    out->g_b81_held_before=(uint32_t)g_b81_held_before;
+
+}
+static void fm_snapshot_host_load(const FMQuickExtension *in)
+{
+    memcpy(g_cd_sector,in->cd_sector,sizeof(g_cd_sector));
+    memcpy(g_cd_search_path,in->cd_search_path,sizeof(g_cd_search_path));
+    fm_memory_async_load(&in->async); fm_media_snapshot_load(&in->media);
+    fm_audio_snapshot_load(&in->audio);
+    g_cd_lba=in->g_cd_lba;
+    g_cd_pos=in->g_cd_pos;
+    g_cd_last_cmd=in->g_cd_last_cmd;
+    g_cd_sector_count=in->g_cd_sector_count;
+    g_cd_reading=in->g_cd_reading;
+    g_cd_error=in->g_cd_error;
+    g_cd_streaming=in->g_cd_streaming;
+    g_cd_mode=in->g_cd_mode;
+    g_cd_stream_fraction=in->g_cd_stream_fraction;
+    g_cd_search_lba=in->g_cd_search_lba;
+    g_cd_search_size=in->g_cd_search_size;
+    g_cd_search_ok=in->g_cd_search_ok;
+    g_b57_req=in->g_b57_req;
+    g_b57_base_lba=in->g_b57_base_lba;
+    g_b57_next_lba=in->g_b57_next_lba;
+    g_b57_last_remaining=in->g_b57_last_remaining;
+    g_b57_read_index=in->g_b57_read_index;
+    g_b32_getsec_ok=in->g_b32_getsec_ok;
+    g_b32_43e_returned=in->g_b32_43e_returned;
+    g_b32_43e_return_frame=in->g_b32_43e_return_frame;
+    g_b33_pending=in->g_b33_pending;
+    g_b33_pending_cmd=in->g_b33_pending_cmd;
+    g_b33_pending_callback=in->g_b33_pending_callback;
+    g_b33_pending_gp=in->g_b33_pending_gp;
+    g_b33_pending_frame=in->g_b33_pending_frame;
+    g_b34_ready_pending=in->g_b34_ready_pending;
+    g_b34_ready_arm_frame=in->g_b34_ready_arm_frame;
+    g_b34_ready_req=in->g_b34_ready_req;
+    g_b34_ready_lba=in->g_b34_ready_lba;
+    g_b34_last_mode=in->g_b34_last_mode;
+    g_b34_last_command=in->g_b34_last_command;
+    g_cd_tick_last_frame=in->g_cd_tick_last_frame;
+    g_vblank_registered_cb=in->g_vblank_registered_cb;
+    g_vblank_registered_gp=in->g_vblank_registered_gp;
+    g_vblank_deferred=in->g_vblank_deferred;
+    g_hit_vblank_cb=in->g_hit_vblank_cb;
+    g_fast401_forced=in->g_fast401_forced;
+    g_fast401_frame=in->g_fast401_frame;
+    g_fast43e_forced=in->g_fast43e_forced;
+    g_fast43e_frame=in->g_fast43e_frame;
+    g_hit_401a4=in->g_hit_401a4;
+    g_hit_delay_wait=in->g_hit_delay_wait;
+    g_b47_m_43eb8=in->g_b47_m_43eb8;
+    g_b47_m_43f3c=in->g_b47_m_43f3c;
+    g_b47_m_43f44=in->g_b47_m_43f44;
+    g_b47_m_43f4c=in->g_b47_m_43f4c;
+    g_b47_m_43f54=in->g_b47_m_43f54;
+    g_b47_m_43ff8=in->g_b47_m_43ff8;
+    g_b47_m_44054=in->g_b47_m_44054;
+    g_b47_m_44064=in->g_b47_m_44064;
+    g_b47_m_4406c=in->g_b47_m_4406c;
+    g_b50_cleanup_done=in->g_b50_cleanup_done;
+    g_b50_cleanup_triggered=in->g_b50_cleanup_triggered;
+    g_b81_pending_mask=in->g_b81_pending_mask;
+    g_b81_cleanup_mask=in->g_b81_cleanup_mask;
+    g_b81_sel_before=in->g_b81_sel_before;
+    g_b81_last_update=in->g_b81_last_update;
+    g_b81_last_frame=in->g_b81_last_frame;
+    g_b73_hit_menu_init=in->g_b73_hit_menu_init;
+    g_b73_hit_menu_update=in->g_b73_hit_menu_update;
+    g_b73_hit_menu_destroy=in->g_b73_hit_menu_destroy;
+    g_vsync_wait_active=in->g_vsync_wait_active;
+    g_vsync_wait_until_frame=in->g_vsync_wait_until_frame;
+    g_vsync_wait_mode=in->g_vsync_wait_mode;
+    g_b108_vsync_sync_valid=in->g_b108_vsync_sync_valid;
+    g_b108_vsync_last_sync_frame=in->g_b108_vsync_last_sync_frame;
+    g_frame_wait_active=in->g_frame_wait_active;
+    g_title_graphics_ready=in->g_title_graphics_ready;
+    g_b102_menu_bridge_cleanup=in->g_b102_menu_bridge_cleanup;
+    g_b103_name_active_frames=in->g_b103_name_active_frames;
+    g_b103_name_pending_mask=in->g_b103_name_pending_mask;
+    g_b103_name_cleanup_mask=in->g_b103_name_cleanup_mask;
+    g_b81_edge_before=in->g_b81_edge_before;
+    g_b81_repeat_before=in->g_b81_repeat_before;
+    g_b81_held_before=in->g_b81_held_before;
+
+    g_cd_stream_last_ms=osGetTime();
+}
+static int fm_snapshot_header_valid(const FMB135QuickStateHeader *in)
+{
+    if (in->magic!=FM_B135_QS_MAGIC || in->header_size!=sizeof(*in)
+        || in->ram_size!=FM_B135_QS_RAM_SIZE || in->vram_words!=FM_B135_QS_VRAM_WORDS
+        || in->cpu.read_absorb_which>32 || in->cpu.ld_which_t>32
+        || in->gpu.parser_state>3 || in->gpu.cmd_have>16 || in->gpu.cmd_need>16
+        || in->gpu.upload_index>in->gpu.upload_pixels || in->gpu.upload_pixels>1024u*512u
+        || in->gpu.upload_w>1024 || in->gpu.upload_h>512) return 0;
+    for (unsigned i=0;i<32;++i) {
+        if (in->runtime.events[i].used>1 || in->runtime.events[i].enabled>1
+            || in->runtime.events[i].ready>1) return 0;
+    }
+    return 1;
+}
 
 static int32_t g_b135_qs_last_result = 0;
 static uint32_t g_b135_qs_save_count = 0u;
@@ -11910,6 +12302,8 @@ static int fm_b135_quick_save(
         return -1;
     }
 
+    if (!fm_snapshot_safe(cpu)) return 1;
+    uint64_t disc=fm_snapshot_disc_id(); if (!disc) return -9;
     FMB135QuickStateHeader state;
     memset(&state, 0, sizeof(state));
 
@@ -11947,31 +12341,24 @@ static int fm_b135_quick_save(
         &state.runtime
     );
 
-    FILE *fp = fopen(FM_B135_QS_PATH, "wb");
-
-    if (!fp)
-    {
-        return -2;
-    }
-
-    int ok =
-        fwrite(&state, sizeof(state), 1u, fp) == 1u
-        &&
-        fwrite(ram, FM_B135_QS_RAM_SIZE, 1u, fp) == 1u
-        &&
-        fwrite(
-            vram,
-            sizeof(uint16_t) * FM_B135_QS_VRAM_WORDS,
-            1u,
-            fp
-        ) == 1u;
-
-    if (fclose(fp) != 0)
-    {
-        ok = 0;
-    }
-
-    return ok ? 0 : -3;
+    uint32_t fixed=sizeof(state)+FM_B135_QS_RAM_SIZE+2u*FM_B135_QS_VRAM_WORDS;
+    uint32_t mdec_bytes=mdec_snapshot_bytes();
+    if (mdec_bytes>FM_SNAPSHOT_MAX-fixed-sizeof(FMQuickExtension)) return -6;
+    uint32_t total=fixed+sizeof(FMQuickExtension)+mdec_bytes+fm_spu_snapshot_bytes();
+    uint8_t *blob=malloc(total); if (!blob) return -6;
+    memcpy(blob,&state,sizeof(state)); memcpy(blob+sizeof(state),ram,FM_B135_QS_RAM_SIZE);
+    memcpy(blob+sizeof(state)+FM_B135_QS_RAM_SIZE,vram,2u*FM_B135_QS_VRAM_WORDS);
+    FMQuickExtension *ext=(FMQuickExtension *)(blob+fixed);
+    memset(ext,0,sizeof(*ext)); ext->extension_bytes=sizeof(*ext); ext->mdec_bytes=mdec_bytes;
+    fm_audio_pause(1); fm_snapshot_host_save(ext);
+    mdec_snapshot_write(blob+fixed+sizeof(*ext));
+    fm_spu_snapshot_write(blob+fixed+sizeof(*ext)+mdec_bytes);
+    int result=fm_snapshot_write(FM_B135_QS_PATH,blob,total,fm_snapshot_schema(),disc,13661u);
+    free(blob); fm_audio_pause(0);
+    /* File I/O is an explicit pause, never clock/CD transport catch-up debt. */
+    fm_host_clock_reset(&g_ps1_host_clock); g_cd_stream_last_ms=osGetTime();
+    fm_snapshot_status("save",result,0);
+    return result;
 }
 
 
@@ -11988,69 +12375,55 @@ static int fm_b135_quick_load(
         return -1;
     }
 
-    FILE *fp = fopen(FM_B135_QS_PATH, "rb");
-
-    if (!fp)
-    {
-        return -2;
+    void *owned=NULL; uint32_t bytes=0; int legacy=0;
+    int result=fm_snapshot_read(FM_B135_QS_PATH,&owned,&bytes,
+        fm_snapshot_schema(),fm_snapshot_disc_id(),&legacy);
+    if (result) { fm_snapshot_status("load",result,legacy); return result; }
+    uint8_t *blob=owned;
+    uint32_t fixed=sizeof(FMB135QuickStateHeader)+FM_B135_QS_RAM_SIZE+2u*FM_B135_QS_VRAM_WORDS;
+    if (bytes<fixed) { free(blob); fm_snapshot_status("load",-8,legacy); return -8; }
+    FMB135QuickStateHeader state; memcpy(&state,blob,sizeof(state));
+    FMQuickExtension *ext=NULL;
+    const void *spu_blob=NULL;
+    if (!fm_snapshot_header_valid(&state) || state.version!=(legacy ? 3u : 4u)) goto invalid;
+    if (legacy) {
+        const uint8_t *saved_ram=blob+sizeof(state);
+        uint32_t remaining; memcpy(&remaining,saved_ram+0xEB1C8u,sizeof(remaining));
+        /* v3 omitted CD/MDEC host progress and active callback contexts. */
+        if (bytes!=fixed || remaining || !saved_ram[0x9C3EBu]
+            || (state.gpu.display_mode & 0x10u)
+            || (state.cpu.pc>=0x8000FF00u && state.cpu.pc<0x80010000u)) {
+            free(blob); fm_snapshot_status("load",-7,1); return -7;
+        }
+    } else {
+        if (bytes<fixed+sizeof(FMQuickExtension)) goto invalid;
+        ext=(FMQuickExtension *)(blob+fixed);
+        if (ext->extension_bytes!=sizeof(*ext)
+            || ext->mdec_bytes>bytes-fixed-sizeof(*ext)
+            || ext->g_cd_pos>2048 || ext->g_cd_lba>449849u
+            || ext->g_cd_stream_fraction>=1000 || ext->g_b33_pending>1
+            || ext->g_b34_ready_pending>1 || ext->g_vblank_deferred>1
+            || !fm_memory_async_valid(&ext->async) || !fm_media_snapshot_valid(&ext->media)
+            || !fm_audio_snapshot_valid(&ext->audio)) goto invalid;
+        uint32_t tail=bytes-fixed-sizeof(*ext)-ext->mdec_bytes;
+        if(tail) {
+            spu_blob=blob+fixed+sizeof(*ext)+ext->mdec_bytes;
+            if(!fm_spu_snapshot_valid(spu_blob,tail)) goto invalid;
+        }
+        /* The decoder stages its allocations/parse. Failure preserves its
+         * live FIFOs too, before RAM/MMIO/CPU or the CD are touched. */
+        uint64_t old_frame=fm_mdec_host_frame,old_cycles=fm_mdec_host_cycles;
+        fm_mdec_host_frame=state.frame; fm_mdec_host_cycles=(uint64_t)state.frame*677376u;
+        if (!mdec_snapshot_read(blob+fixed+sizeof(*ext),ext->mdec_bytes)) {
+            fm_mdec_host_frame=old_frame; fm_mdec_host_cycles=old_cycles; goto invalid;
+        }
     }
-
-    const long expected_size =
-        (long)sizeof(FMB135QuickStateHeader)
-        +
-        (long)FM_B135_QS_RAM_SIZE
-        +
-        (long)(sizeof(uint16_t) * FM_B135_QS_VRAM_WORDS);
-
-    if (
-        fseek(fp, 0, SEEK_END) != 0
-        ||
-        ftell(fp) != expected_size
-        ||
-        fseek(fp, 0, SEEK_SET) != 0
-    )
-    {
-        fclose(fp);
-        return -3;
-    }
-
-    FMB135QuickStateHeader state;
-
-    if (
-        fread(&state, sizeof(state), 1u, fp) != 1u
-        ||
-        state.magic != FM_B135_QS_MAGIC
-        ||
-        state.version != FM_B135_QS_VERSION
-        ||
-        state.header_size != sizeof(state)
-        ||
-        state.ram_size != FM_B135_QS_RAM_SIZE
-        ||
-        state.vram_words != FM_B135_QS_VRAM_WORDS
-    )
-    {
-        fclose(fp);
-        return -4;
-    }
-
-    if (
-        fread(ram, FM_B135_QS_RAM_SIZE, 1u, fp) != 1u
-        ||
-        fread(
-            vram,
-            sizeof(uint16_t) * FM_B135_QS_VRAM_WORDS,
-            1u,
-            fp
-        ) != 1u
-    )
-    {
-        fclose(fp);
-        return -5;
-    }
-
-    fclose(fp);
-
+    /* No fallible operations beyond this point: commit all subsystems. */
+    fm_audio_pause(1); fm_cd_hle_reset();
+    if(!spu_blob) fm_spu_reset();
+    if (legacy) mdec_init();
+    memcpy(ram,blob+sizeof(state),FM_B135_QS_RAM_SIZE);
+    memcpy(vram,blob+sizeof(state)+FM_B135_QS_RAM_SIZE,2u*FM_B135_QS_VRAM_WORDS);
     fm_memory_quick_load(
         &state.memory
     );
@@ -12063,6 +12436,7 @@ static int fm_b135_quick_load(
         &state.runtime
     );
 
+    fm_host_clock_reset(&g_ps1_host_clock);
     fm_b135_cpu_quick_load(
         cpu,
         &state.cpu
@@ -12083,9 +12457,28 @@ static int fm_b135_quick_load(
      * Un snapshot est pris entre deux tranches host : aucune attente HLE
      * ne doit rester armee apres un redemarrage de l'application.
      */
+    g_frame_wait_active = 0;
+    fm_runtime_frame_wait_scope(NULL);
     g_vsync_wait_active = 0u;
     g_vsync_wait_until_frame = 0u;
     g_b108_vsync_sync_valid = 0u;
+
+    if (ext) fm_snapshot_host_load(ext);
+    else {
+        /* Explicit partial import for existing idle-scene v3 saves. */
+        g_title_graphics_ready=1u;
+        g_fast401_forced=g_fast43e_forced=1u;
+        g_b47_m_43f3c=g_b47_m_43f4c=1u;
+        g_vblank_registered_cb=0x80012BD8u; g_vblank_registered_gp=state.cpu.gpr[28];
+        g_hit_vblank_cb=0u; g_vblank_deferred=0u;
+        g_cd_lba=state.cpu.pc ? fm_memory_read_word(0x800EB1DCu) : 0u;
+        g_b81_pending_mask=g_b81_cleanup_mask=0u;
+    }
+    if(spu_blob) fm_spu_snapshot_load(spu_blob);
+    fm_audio_spu_reset();
+    g_snapshot_save_requested=0u;
+    fm_mdec_host_frame=state.frame; fm_mdec_host_cycles=(uint64_t)state.frame*677376u;
+    free(blob); fm_audio_pause(0); fm_snapshot_status("load",0,legacy);
 
     /*
      * B135.88:
@@ -12103,6 +12496,7 @@ static int fm_b135_quick_load(
     g_b13578_page_hash[2] = 0u;
     g_b13578_page_hash[3] = 0u;
     g_b1357_last_latched_gp0 = 0u;
+    g_b13589_hold_active = 0u;
     g_b13588_reseed_presenter = 1u;
 
     g_b65_stop_code = 0u;
@@ -12110,7 +12504,12 @@ static int fm_b135_quick_load(
     g_b65_stop_ra = 0u;
     g_b65_stop_detail = 0u;
 
+#if FM_PERF_PROFILE
+    fm_capture_arm(&g_perf_capture);
+#endif
     return 0;
+invalid:
+    free(blob); fm_snapshot_status("load",-8,legacy); return -8;
 }
 
 /*
@@ -12433,8 +12832,8 @@ int main(void)
 
 
     /*
-     * B24 : garder un background de reference immediat, puis le runtime
-     * remplacera automatiquement cet index via le hook 8002E11C.
+     * B24 : garder un background de reference pour le mode preview.
+     * B136.23 : les decors du jeu sont charges par le chemin CD natif.
      */
     if (disc_status == 0 && cpu && memory_status == 0)
     {
@@ -12496,6 +12895,13 @@ int main(void)
     uint64_t gp0_last_frame =
         0;
 
+    fm_audio_init();
+    FILE *audio_status=fopen("sdmc:/3ds/fm-new3ds/audio-status.txt","w");
+    if(audio_status) {
+        fprintf(audio_status,"probe=B136.62 dsp=%08lX spu=24-voices rate=44100 xa_channel=0 spu_channel=1\n",(unsigned long)(uint32_t)fm_audio_status());
+        if((uint32_t)fm_audio_status()==0xD880A7FAu) fprintf(audio_status,"missing DSP component: sdmc:/3ds/dspfirm.cdc (or hb:ndsp)\n");
+        fclose(audio_status);
+    }
     fm_cd_hle_reset();
 
 
@@ -12505,9 +12911,43 @@ int main(void)
      * ========================================================
      */
 
+    aptHook(&g_clock_apt_hook,fm_clock_apt_hook,NULL);
     while (aptMainLoop())
     {
         uint64_t b105_loop_start_ms = osGetTime();
+#if FM_PERF_PROFILE
+        if(fm_capture_begin(&g_perf_capture,b105_loop_start_ms)) {
+            g_perf_capture_reset=1;
+            fm_perf_window(b105_loop_start_ms,frame,0,cpu);
+        }
+        FMPerfCaptureRow capture_row={0};
+        FMDmaDebugStats capture_dma_before={0};
+        uint64_t capture_seq_before=0,capture_overlay_before=0;
+        uint32_t capture_irq_before=0,capture_vsync_before=0,capture_native_before=0,capture_cd_before=0;
+        int capture_this_loop=g_perf_capture.active;
+        if(capture_this_loop) {
+            capture_row.start_pc=cpu?cpu->pc:0;
+            fm_memory_dma_debug(&capture_dma_before);
+            capture_seq_before=g_seq_irq_total_ms;capture_overlay_before=g_b91_fast_instructions;
+            capture_irq_before=g_seq_irq_done;capture_vsync_before=g_b1358_vsync_completions;
+            capture_native_before=g_native_probe_calls;capture_cd_before=g_b32_getsec_calls;
+        }
+#endif
+        uint32_t perf_budget_before_loop = g_b84_budget_yields;
+        g_b105_vblank_ms = g_b106_gfx_ms = g_b106_wait_ms = 0u;
+        fm_cd_stream_tick(b105_loop_start_ms, game_running);
+        fm_mdec_host_frame = frame; fm_mdec_host_cycles = (uint64_t)frame * 677376u;
+        fm_media_poll(g_cd_lba, game_running);
+        fm_audio_spu_clock(osGetTime(),game_running);
+        static uint64_t audio_report_ms;
+        if(b105_loop_start_ms-audio_report_ms>=2000u
+#if FM_PERF_PROFILE
+            && !g_perf_capture.active && !g_perf_capture.armed
+#endif
+        ) {
+            fm_audio_spu_dump("sdmc:/3ds/fm-new3ds/audio-status.txt");
+            audio_report_ms=b105_loop_start_ms;
+        }
 
         int b131_presented_this_loop = 0;
 
@@ -12601,7 +13041,7 @@ int main(void)
          *   Cross/Circle       = 0040/0020
          *   Triangle/Square    = 0010/0080
          */
-        if (g_b102_menu_bridge_active != 0u)
+        if (g_b102_menu_bridge_active != 0u && !(held & KEY_SELECT))
         {
             uint32_t b81_mask = 0u;
 
@@ -12678,7 +13118,7 @@ int main(void)
          * chaque passage. Hors de cet ecran, ce bridge s'eteint
          * tout seul et ne pollue pas le reste du jeu.
          */
-        if (g_b103_name_active_frames != 0u)
+        if (g_b103_name_active_frames != 0u && !(held & KEY_SELECT))
         {
             uint32_t b103_mask = 0u;
 
@@ -12709,108 +13149,14 @@ int main(void)
         }
 
 
-        /*
-         * ====================================================
-         * START titre sans bridge B72
-         * ====================================================
-         *
-         * START suit uniquement le chemin pad normal. Le front physique
-         * sert aussi a armer B73, sans maintenir artificiellement le bit
-         * pendant plusieurs frames.
-         */
-        int b73_title_stage =
-            (
-                g_str_intro_last_done != 0u
-                &&
-                g_title_graphics_ready != 0u
-            );
-
-        if (
-            (down & KEY_START)
-            &&
-            b73_title_stage
-            &&
-            g_b73_menu_force_count == 0u
-        )
+        /* B136.10: request STR completion only on a physical START edge.
+         * Let 35EB0/44084 perform the guest cleanup and menu transition;
+         * do not overwrite 60C/60D/60E or jump directly to state 8. */
+        if ((down & KEY_START) && game_running
+            && fm_memory_read_word(0x8009C818u) != 0u
+            && fm_memory_read_byte(0x8009C3EBu) == 0u)
         {
-            g_b73_menu_force_request = 1u;
-        }
-
-
-        /*
-         * ====================================================
-         * B73 - transition controlee vers l'etat resident 8
-         * ====================================================
-         *
-         * Table 80091F7C :
-         *   index 8 -> FUN_8002D75C
-         *
-         * Ce handler appelle le vrai chargeur SU puis l'overlay
-         * 8018001C/80180390. On ne forge donc ni image, ni menu.
-         */
-        if (
-            b73_title_stage
-            &&
-            g_b73_menu_force_request
-            &&
-            g_b73_menu_force_count == 0u
-        )
-        {
-            g_b73_state60a_before =
-                fm_memory_read_byte(
-                    0x8009C60Au
-                );
-
-            g_b73_state60d_before =
-                fm_memory_read_byte(
-                    0x8009C60Du
-                );
-
-            /*
-             * 60E devient l'index initial du menu dans 8018001C.
-             * 0 = premiere entree.
-             *
-             * 60C n'est pas exploite par le pseudo-C de 8018001C,
-             * mais 1 correspond a la convention d'entree normale.
-             */
-            fm_memory_write_byte(
-                0x8009C60Cu,
-                1u
-            );
-
-            fm_memory_write_byte(
-                0x8009C60Eu,
-                0u
-            );
-
-            /*
-             * Conserver la destination "menu" puis selectionner
-             * directement l'etat 8. Le dispatcher 8002DF60 ajoutera
-             * lui-meme ses bits de service 0x80/0x40.
-             */
-            fm_memory_write_byte(
-                0x8009C60Du,
-                8u
-            );
-
-            fm_memory_write_byte(
-                0x8009C60Au,
-                8u
-            );
-
-            g_b73_state60a_after =
-                fm_memory_read_byte(
-                    0x8009C60Au
-                );
-
-            g_b73_state60d_after =
-                fm_memory_read_byte(
-                    0x8009C60Du
-                );
-
-            g_b73_menu_force_frame = frame;
-            g_b73_menu_force_request = 0u;
-            ++g_b73_menu_force_count;
+            g_str_intro_skip_pending = 0;
         }
 
 
@@ -13020,19 +13366,15 @@ int main(void)
         {
             b135_qs_chord = 1;
 
-            g_b135_qs_last_result =
-                fm_b135_quick_save(
-                    cpu,
-                    ram,
-                    vram,
-                    frame,
-                    last_dispatch_address
-                );
-
-            if (g_b135_qs_last_result == 0)
-            {
-                ++g_b135_qs_save_count;
-            }
+            g_snapshot_save_requested=1u;
+        }
+        if (g_snapshot_save_requested && cpu && memory_status==0) {
+            g_b135_qs_last_result=fm_b135_quick_save(cpu,ram,vram,frame,last_dispatch_address);
+            if (g_b135_qs_last_result!=1) {
+                g_snapshot_save_requested=0u;
+                if (!g_b135_qs_last_result) ++g_b135_qs_save_count;
+                else fm_snapshot_status("save",g_b135_qs_last_result,0);
+            } else if (b135_qs_chord) fm_snapshot_status("save",1,0);
         }
 
         if (
@@ -13046,12 +13388,6 @@ int main(void)
         )
         {
             b135_qs_chord = 1;
-
-            /*
-             * Nettoyer d'abord l'etat HLE host. Le quick-load restaure
-             * ensuite les quelques flags de phase qui doivent survivre.
-             */
-            fm_cd_hle_reset();
 
             g_b135_qs_last_result =
                 fm_b135_quick_load(
@@ -13225,189 +13561,6 @@ int main(void)
 
 
         /*
-         * ====================================================
-         * B75 - settle de l'animation d'entree du menu
-         * ====================================================
-         */
-        if (
-            game_running
-            &&
-            g_b73_hit_menu_init != 0u
-            &&
-            g_b73_hit_menu_update > 24u
-            &&
-            g_b75_menu_entrance_bridge == 0u
-            &&
-            fm_memory_read_word(0x8009C898u) == 0x80180B4Cu
-        )
-        {
-            uint32_t p0 =
-                fm_memory_read_word(0x80184794u);
-
-            uint32_t c0 =
-                fm_memory_read_byte(0x801847C0u);
-
-            uint32_t c5 =
-                fm_memory_read_byte(0x801847C5u);
-
-            /*
-             * Signature exacte vue en B74 :
-             * objet 0 hors ecran + timer d'entree encore a 16.
-             */
-            if (
-                p0 >= 0x80000000u
-                &&
-                p0 < 0x80200000u
-                &&
-                fm_memory_read_half(p0 + 0x60u) == 0x0010u
-                &&
-                (int16_t)fm_memory_read_half(p0 + 0x30u)
-                    ==
-                    (int16_t)fm_memory_read_half(p0 + 0x36u)
-            )
-            {
-                uint32_t settled = 0u;
-
-                g_b75_last_c0 = c0;
-                g_b75_last_c5_before = c5;
-
-                for (unsigned i = 0; i < 11u; ++i)
-                {
-                    uint32_t obj =
-                        fm_memory_read_word(
-                            0x80184794u
-                            +
-                            i * 4u
-                        );
-
-                    if (
-                        obj < 0x80000000u
-                        ||
-                        obj >= 0x80200000u
-                    )
-                    {
-                        continue;
-                    }
-
-                    uint16_t flags =
-                        fm_memory_read_half(
-                            obj + 0x08u
-                        );
-
-                    int visible_group;
-
-                    if (c0 < 5u)
-                    {
-                        visible_group =
-                            i < 5u;
-                    }
-                    else
-                    {
-                        visible_group =
-                            i >= 5u;
-                    }
-
-                    if (visible_group)
-                    {
-                        flags |= 0x0040u;
-                    }
-                    else
-                    {
-                        flags &= (uint16_t)~0x0040u;
-                    }
-
-                    /*
-                     * Match the real 80180390 completion path.
-                     *
-                     * During each entrance-animation tick the game calls:
-                     *
-                     *   FUN_80040734(obj, i*2 + (selected != i))
-                     *
-                     * and FUN_80040734 does exactly:
-                     *   obj[0x69] = variant;
-                     *   obj->flags &= ~0x0010;
-                     *
-                     * The old B75 skipped this step, leaving non-selected
-                     * menu objects with stale sprite/frame state. Reproduce
-                     * that exact state transition here before handing control
-                     * back to the real menu update.
-                     */
-                    uint8_t variant =
-                        (uint8_t)((i << 1) | (uint32_t)(c0 != i));
-
-                    fm_memory_write_byte(
-                        obj + 0x69u,
-                        variant
-                    );
-
-                    flags &= (uint16_t)~0x0010u;
-
-                    /*
-                     * Little-endian halfword writes using the byte
-                     * primitive already used throughout main.c.
-                     */
-                    fm_memory_write_byte(
-                        obj + 0x08u,
-                        (uint8_t)(flags & 0xFFu)
-                    );
-                    fm_memory_write_byte(
-                        obj + 0x09u,
-                        (uint8_t)(flags >> 8)
-                    );
-
-                    uint16_t target =
-                        fm_memory_read_half(
-                            obj + 0x38u
-                        );
-
-                    fm_memory_write_byte(
-                        obj + 0x30u,
-                        (uint8_t)(target & 0xFFu)
-                    );
-                    fm_memory_write_byte(
-                        obj + 0x31u,
-                        (uint8_t)(target >> 8)
-                    );
-
-                    fm_memory_write_byte(
-                        obj + 0x60u,
-                        0u
-                    );
-                    fm_memory_write_byte(
-                        obj + 0x61u,
-                        0u
-                    );
-
-                    ++settled;
-                }
-
-                /*
-                 * L'animation est maintenant terminee.
-                 * Le vrai 80180390 peut reprendre directement sa
-                 * branche interactive (navigation / validation).
-                 */
-                fm_memory_write_byte(
-                    0x801847C5u,
-                    0u
-                );
-
-                g_b75_last_c5_after =
-                    fm_memory_read_byte(
-                        0x801847C5u
-                    );
-
-                g_b75_objects_settled =
-                    settled;
-
-                g_b75_menu_entrance_frame =
-                    frame;
-
-                ++g_b75_menu_entrance_bridge;
-            }
-        }
-
-
-        /*
          * B80 - memoriser les changements reels de selection du menu.
          */
         if (
@@ -13442,6 +13595,287 @@ int main(void)
             }
         }
 
+
+        /* B136.44: input is sampled above; service due clock callbacks before
+         * guest execution, including VBlanks elapsed during the host wait. */
+        /* A long running slice is debt, not a pause. APT events and manual
+         * pause explicitly reset the timeline so sleep/input is not replayed. */
+        if (g_clock_resume_reset) {
+            g_clock_resume_reset=0u;
+            fm_host_clock_reset(&g_ps1_host_clock);
+        }
+        unsigned clock_due=fm_host_clock_update(&g_ps1_host_clock,osGetTime(),game_running);
+        for (unsigned clock_tick=0; clock_tick<clock_due; ++clock_tick) {
+            ++frame;
+            ++g_clock_ticks;
+
+
+            /*
+             * B136.44: consume elapsed VBlanks before guest VSync is retested.
+             */
+            if (memory_status == 0)
+            {
+                uint32_t timer2_remaining=fm_memory_vblank_begin_timer2();
+                unsigned timer2_slices=0;
+                do {
+                    /* Bound tiny-target configurations; the normal E000
+                     * sequencer needs at most two deliveries per VBlank. */
+                    timer2_remaining=fm_memory_timer2_slice(timer2_remaining,
+                        timer2_slices++ < 8u);
+                    if (game_running && fm_execute_guest_timer_callback(cpu) < 0) {
+                        g_b65_stop_code = 4u;
+                        g_b65_stop_pc = 0x8004BBC4u;
+                        g_b65_stop_detail = g_seq_irq_blocks;
+                        game_running = 0;
+                    }
+                } while (timer2_remaining && game_running);
+
+                /*
+                 * B12 : executer le vrai callback VBlank du jeu dans un
+                 * contexte CPU isole, sans detruire les registres du
+                 * thread principal.
+                 */
+                if (game_running)
+                {
+                    {
+                        uint64_t b105_vblank_start_ms =
+                            osGetTime();
+
+                        fm_execute_guest_vblank_callback(
+                            cpu,
+                            frame
+                        );
+
+                        g_b105_vblank_ms =
+                            (uint32_t)(
+                                osGetTime()
+                                -
+                                b105_vblank_start_ms
+                            );
+                    }
+
+                    /*
+                     * B72 - conserver le dernier etat input guest non nul.
+                     * FUN_8003CEA4, executee par le callback VBlank,
+                     * transforme 70C en held/edge/repeat.
+                     */
+                    {
+                        uint32_t b72_raw =
+                            fm_memory_read_word(0x8009C70Cu)
+                            &
+                            0xFFFFu;
+
+                        uint32_t b72_held =
+                            fm_memory_read_word(0x8009C710u)
+                            &
+                            0xFFFFu;
+
+                        uint32_t b72_edge =
+                            fm_memory_read_word(0x8009C72Cu)
+                            &
+                            0xFFFFu;
+
+                        uint32_t b72_rep =
+                            fm_memory_read_word(0x8009C728u)
+                            &
+                            0xFFFFu;
+
+                        if (
+                            b72_raw != 0u
+                            ||
+                            b72_held != 0u
+                            ||
+                            b72_edge != 0u
+                            ||
+                            b72_rep != 0u
+                        )
+                        {
+                            g_b72_guest_raw_latched = b72_raw;
+                            g_b72_guest_held_latched = b72_held;
+                            g_b72_guest_edge_latched = b72_edge;
+                            g_b72_guest_rep_latched = b72_rep;
+                            g_b72_guest_nonzero_frame = frame;
+                        }
+
+                        if ((b72_edge & 0x0008u) != 0u)
+                        {
+                            ++g_b72_edge8_hits;
+                            g_b72_edge8_last_frame = frame;
+                        }
+                    }
+
+                    /*
+                     * =====================================================
+                     * B13 FASTBOOT 401A4
+                     * =====================================================
+                     *
+                     * B12 a prouve que le vrai callback VBlank s'execute
+                     * correctement (retour propre + 8003CE34 traverse),
+                     * mais le startup reste dans la boucle interne de
+                     * FUN_800401A4.
+                     *
+                     * On laisse d'abord la fonction faire son setup et au
+                     * moins quatre vrais callbacks VBlank. Quand le thread
+                     * principal est de nouveau dans le VSync de cette boucle,
+                     * on restaure le SP d'entree et on reprend exactement au
+                     * RA du JAL appelant (80012B48 sur notre build FR).
+                     *
+                     * Cela evite de sauter le setup de 401A4 tout en supprimant
+                     * uniquement son attente infinie dans notre environnement.
+                     */
+                    if (
+                        !g_fast401_forced
+                        && g_hit_401a4 != 0u
+                        && g_sp_401a4 != 0u
+                        && g_ra_401a4 != 0u
+                        && g_irq_exec_ok >= 4u
+                        && ((cpu->pc & 0x1FFFFFFFu) == 0x000746B8u)
+                        && cpu->gpr[31] == 0x80012D48u
+                    )
+                    {
+                        cpu->pc = g_ra_401a4;
+                        cpu->gpr[29] = g_sp_401a4;
+                        cpu->gpr[31] = g_ra_401a4;
+                        cpu->gpr[2] = 0u;
+                        cpu->gpr[0] = 0u;
+
+                        /* Annuler l'attente VSync HLE devenue obsolete. */
+                        g_vsync_wait_active = 0;
+                        g_vsync_wait_until_frame = 0;
+
+                        g_fast401_forced = 1u;
+                        g_fast401_frame = frame;
+                    }
+
+                    /*
+                     * B32 : si FUN_80043E3C revient d'elle-meme apres que
+                     * le pont CD a effectivement livre des secteurs, noter
+                     * ce retour naturel. On ne saute plus sa sequence
+                     * d'initialisation.
+                     */
+                    if (
+                        !g_b32_43e_returned
+                        && g_b32_getsec_ok != 0u
+                        && g_ra_43e3c != 0u
+                        && cpu->pc == g_ra_43e3c
+                    )
+                    {
+                        g_b32_43e_returned = 1u;
+                        g_b32_43e_return_frame = frame;
+                    }
+
+
+                    /*
+                     * =====================================================
+                     * B14 FASTBOOT 43E3C
+                     * =====================================================
+                     *
+                     * B13 a prouve que le retour force de 401A4 nous fait
+                     * bien entrer dans FUN_80043E3C. Le nouveau verrou est
+                     * son attente de chargement asynchrone : 80013700 est
+                     * atteint, mais aucun secteur CD n'est jamais transfere.
+                     *
+                     * On ne saute pas 43E3C a son entree. On attend qu'elle
+                     * ait initialise sa requete et soit effectivement entree
+                     * dans 80013700, puis on restaure le contexte d'entree
+                     * de 43E3C et on reprend au vrai RA du startup.
+                     *
+                     * C'est volontairement un FASTBOOT de bring-up : le but
+                     * est d'atteindre 8002DF60 et de provoquer enfin les
+                     * premieres commandes graphiques utiles du jeu.
+                     */
+                    if (
+                        !g_fast43e_forced
+                        && !g_b32_43e_returned
+                        && g_fast401_forced
+                        && g_hit_intro_init != 0u
+                        && g_hit_load_wait != 0u
+                        && g_ra_43e3c != 0u
+                        && g_sp_43e3c != 0u
+                        && g_irq_exec_ok >= 8u
+                        /*
+                         * B32 laisse maintenant la vraie requete CD se
+                         * terminer. L'ancien fastboot n'est conserve qu'en
+                         * filet de securite si le bridge n'a jamais reussi
+                         * a fournir un secteur apres plusieurs secondes.
+                         */
+                        && g_b32_getsec_ok == 0u
+                        && frame >= (g_fast401_frame + 300u)
+                    )
+                    {
+                        cpu->pc = g_ra_43e3c;
+                        cpu->gpr[29] = g_sp_43e3c;
+                        cpu->gpr[31] = g_ra_43e3c;
+                        cpu->gpr[2] = 0u;
+                        cpu->gpr[0] = 0u;
+
+                        /* Sortir proprement de toute attente HLE en cours. */
+                        g_vsync_wait_active = 0;
+                        g_vsync_wait_until_frame = 0;
+
+                        g_fast43e_forced = 1u;
+                        g_fast43e_frame = frame;
+                    }
+
+                    /*
+                     * =====================================================
+                     * B15 DIRECT MAIN STATE MACHINE
+                     * =====================================================
+                     *
+                     * B14 a enfin fait apparaitre de vraies commandes DRAW
+                     * et COPY GPU, mais le startup n'appelle toujours pas
+                     * naturellement 8002DF60. On cesse d'attendre : apres
+                     * 43E3C, on initialise le flag attendu par le startup et
+                     * on pilote directement la vraie fonction 8002DF60.
+                     */
+                    if (
+                        !g_direct2df_active
+                        &&
+                        (
+                            (
+                                g_fast43e_forced
+                                && frame >= (g_fast43e_frame + 2u)
+                            )
+                            ||
+                            (
+                                /*
+                                 * En chemin naturel, laisser le startup
+                                 * poursuivre seul. Direct-2DF ne redevient
+                                 * qu'un fallback si 8002DF60 n'est toujours
+                                 * jamais atteint deux secondes plus tard.
+                                 */
+                                g_b32_43e_returned
+                                && g_hit_main_loop == 0u
+                                && frame >= (g_b32_43e_return_frame + 120u)
+                            )
+                        )
+                    )
+                    {
+                        fm_memory_write_byte(
+                            0x8009C60Du,
+                            8u
+                        );
+
+                        g_direct2df_active = 1u;
+                        g_direct2df_start_frame = frame;
+
+                        /*
+                         * Forcer le premier scheduling a la frame suivante.
+                         */
+                        cpu->pc = g_direct2df_sentinel;
+                        cpu->gpr[31] = g_direct2df_sentinel;
+                        cpu->gpr[0] = 0u;
+
+                        g_vsync_wait_active = 0;
+                        g_vsync_wait_until_frame = 0;
+                    }
+                }
+            }
+
+
+        } /* wall-clock VBlank ticks */
+        fm_mdec_host_frame = frame;
+        fm_mdec_host_cycles = (uint64_t)frame * 677376u;
 
         /*
          * ====================================================
@@ -13504,13 +13938,14 @@ int main(void)
                 /*
                  * B84 : borne temps pour TOUS les modes.
                  *
-                 * 12 ms laisse encore quelques ms au rendu/present avant
-                 * le VBlank 60 Hz, tout en donnant au fallback R3000A
-                 * assez de temps pour terminer un vrai update guest.
+                 * B136.62: service a due PS1 tick before another dispatch,
+                 * including VSync HLE. The fixed 12ms limit remains a CPU
+                 * responsiveness ceiling, not the interrupt deadline.
                  */
                 if (
-                    handoff != 0u
-                    && (osGetTime() - b16_slice_start_ms) >= g_b105_slice_budget_ms
+                    (handoff != 0u
+                        && (osGetTime() - b16_slice_start_ms) >= g_b105_slice_budget_ms)
+                    || fm_host_clock_wait_ns(&g_ps1_host_clock,osGetTime()) == 0u
                 )
                 {
                     ++g_b16_slice_yields;
@@ -13523,6 +13958,37 @@ int main(void)
                 uint32_t phys =
                     dispatch_address
                     & 0x1FFFFFFFu;
+
+                if (phys == 0x000914A8u && fm_vlc_try(cpu)) {
+                    static_miss = 0; continue;
+                }
+                /* DrawSync can mask IRQs at the host boundary. Service a
+                 * latched timer at the first eligible guest boundary too,
+                 * without changing the PC or postponing this main update. */
+                if (fm_execute_guest_timer_callback(cpu) < 0) {
+                    g_b65_stop_code = 4u;
+                    g_b65_stop_pc = 0x8004BBC4u;
+                    g_b65_stop_detail = g_seq_irq_blocks;
+                    game_running = 0;
+                    break;
+                }
+                if (g_vblank_deferred && fm_irq_cpu_enabled(cpu)
+                    && (fm_memory_i_mask() & 1u) && !g_media_irq_active
+                    && !g_b33_cb_active && !g_cd_tick_active
+                    && !g_b34_ready_active && !g_b35_finalizer_active) {
+                    if (fm_execute_guest_vblank_callback(cpu, frame) < 0) {
+                        g_b65_stop_code = 4u; game_running = 0; break;
+                    }
+                }
+                fm_media_guest_entry(cpu, phys);
+                if (fm_media_irq_dispatch(cpu)) { static_miss = 0; continue; }
+                /* Deliver hardware completion outside guest CD/data/tick callbacks. */
+                if (!g_media_irq_active && !g_cd_tick_active && !g_b34_ready_active && !g_b35_finalizer_active
+                    && fm_b33_deliver_cd_callback(cpu, frame))
+                {
+                    static_miss = 0;
+                    continue;
+                }
 
                 /*
                  * B136.02 - PS1 IRQ preemption inside FUN_80046750.
@@ -13663,15 +14129,18 @@ int main(void)
                  */
                 if (
                     !g_cd_tick_active
+                    && fm_irq_cpu_enabled(cpu)
                     && frame != g_cd_tick_last_frame
                     && fm_memory_read_word(0x80094CB0u) != 0u
                     && fm_memory_read_word(0x800F7270u) != 0u
                     && !g_b33_cb_active
+                    && !g_media_irq_active
                     && !g_b34_ready_active
                     && !g_b35_finalizer_active
                 )
                 {
                     g_cd_tick_last_frame = frame;
+                    g_cd_tick_saved_cpu = *cpu;
                     g_cd_tick_saved_pc = dispatch_address;
                     for (unsigned i = 0; i < 32u; ++i)
                         g_cd_tick_saved_gpr[i] = cpu->gpr[i];
@@ -13698,6 +14167,7 @@ int main(void)
                     for (unsigned i = 0; i < 32u; ++i)
                         cpu->gpr[i] = g_cd_tick_saved_gpr[i];
 
+                    *cpu = g_cd_tick_saved_cpu;
                     cpu->pc = g_cd_tick_saved_pc;
                     cpu->gpr[0] = 0u;
 
@@ -13756,6 +14226,9 @@ int main(void)
                      * Le haut niveau 8007B78C gere desormais lui-meme
                      * son ID et son historique dans le guest.
                      */
+                    *cpu = g_b33_saved_cpu;
+                    cpu->hi = g_b33_saved_hi;
+                    cpu->lo = g_b33_saved_lo;
                     cpu->gpr[2] = g_b33_cb_return_value;
 
                     cpu->pc = resume_pc;
@@ -13811,6 +14284,7 @@ int main(void)
                     {
                         cpu->gpr[i] = g_b35_saved_gpr[i];
                     }
+                    *cpu = g_b35_saved_cpu;
                     ++g_b35_ctx_restored;
 
                     cpu->pc = resume_pc;
@@ -13853,6 +14327,7 @@ int main(void)
                     {
                         cpu->gpr[i] = g_b34_ready_saved_gpr[i];
                     }
+                    *cpu = g_b34_saved_cpu;
                     ++g_b34_ready_ctx_restored;
                     cpu->pc = resume_pc;
                     cpu->gpr[0] = 0u;
@@ -13877,6 +14352,7 @@ int main(void)
                         {
                             g_b35_saved_gpr[i] = cpu->gpr[i];
                         }
+                        g_b35_saved_cpu = *cpu;
                         ++g_b35_ctx_saved;
 
                         g_b35_c460_before = cpu->read_word(0x8009C460u);
@@ -13964,8 +14440,11 @@ int main(void)
                  */
                 if (
                     g_b34_ready_pending
+                    && fm_irq_cpu_enabled(cpu)
+                    && !g_cd_tick_active && !g_b35_finalizer_active
                     && !g_b34_ready_active
                     && !g_b33_cb_active
+                    && !g_media_irq_active
                     && frame >= g_b34_ready_arm_frame
                 )
                 {
@@ -13985,6 +14464,8 @@ int main(void)
 
                     if ((int32_t)remaining > 0)
                     {
+                        g_b34_ready_lba = fm_cd_begin_dataready_sector(
+                            req, cpu->read_word(req + 0x24u), remaining);
                         g_b34_ready_pending = 0u;
                         g_b34_ready_active = 1u;
                         g_b34_ready_resume = dispatch_address;
@@ -13994,6 +14475,7 @@ int main(void)
                         {
                             g_b34_ready_saved_gpr[i] = cpu->gpr[i];
                         }
+                        g_b34_saved_cpu = *cpu;
                         ++g_b34_ready_ctx_saved;
                         ++g_b34_ready_started;
 
@@ -14101,6 +14583,7 @@ int main(void)
                                 cpu->gpr[i];
                         }
 
+                        g_b35_saved_cpu = *cpu;
                         ++g_b35_ctx_saved;
 
                         g_b35_c460_before =
@@ -14242,60 +14725,6 @@ int main(void)
                     dispatch_address;
 
 
-                /*
-                 * ============================================
-                 * TEMP HLE - B0:18 ResetEntryInt
-                 *
-                 * Le handler existe déjà dans
-                 * fm_runtime_shim.c, mais sur le bring-up actuel
-                 * fm_bios_try_hle() retourne malgré tout 0 pour
-                 * cet appel. On le court-circuite ici afin de
-                 * poursuivre le boot et d'exposer le prochain
-                 * vrai verrou.
-                 * ============================================
-                 */
-                if (
-                    phys == 0x000000B0u
-                    &&
-                    (
-                        cpu->gpr[9]
-                        &
-                        0xFFu
-                    )
-                    ==
-                    0x18u
-                )
-                {
-                    /*
-                     * ResetEntryInt : pour le bring-up,
-                     * considérer l'ancien hook comme NULL.
-                     */
-                    cpu->gpr[2] =
-                        0;
-
-                    cpu->pc =
-                        cpu->gpr[31];
-
-                    cpu->gpr[0] =
-                        0;
-
-                    g_bios_debug_addr =
-                        0x000000B0u;
-
-                    g_bios_debug_fn =
-                        0x18u;
-
-                    /*
-                     * 2 = HLE temporaire réalisé par main.c.
-                     */
-                    g_bios_debug_result =
-                        2;
-
-                    static_miss =
-                        0;
-
-                    continue;
-                }
 
 
                 /*
@@ -14848,27 +15277,6 @@ int main(void)
                     g_b13594_low_queue_before = cpu->read_word(0x800F7270u);
                     g_cd_last_cmd = command;
 
-                    if (command == 0x02u && params != 0u)
-                    {
-                        uint32_t minute = fm_bcd_to_u32(cpu->read_byte(params + 0u));
-                        uint32_t second = fm_bcd_to_u32(cpu->read_byte(params + 1u));
-                        uint32_t frame_cd = fm_bcd_to_u32(cpu->read_byte(params + 2u));
-                        uint32_t absolute_sector = ((minute * 60u + second) * 75u) + frame_cd;
-                        g_cd_lba = absolute_sector >= 150u ? absolute_sector - 150u : 0u;
-                        g_cd_pos = 2048u;
-                    }
-
-                    if (command == 0x06u)
-                    {
-                        g_cd_reading = 1;
-                        g_cd_pos = 2048u;
-                        g_cd_error = 0;
-                    }
-                    else if (command == 0x09u)
-                    {
-                        g_cd_reading = 0;
-                    }
-
                     fm_b33_schedule_cd_callback(
                         cpu,
                         command,
@@ -14876,7 +15284,8 @@ int main(void)
                         resume_pc,
                         params,
                         0u,
-                        0u
+                        0u,
+                        frame, -1
                     );
 
                     static_miss = 0;
@@ -14897,27 +15306,6 @@ int main(void)
                     g_b34_last_command = command;
                     g_cd_last_cmd = command;
 
-                    if (command == 0x02u && params != 0u)
-                    {
-                        uint32_t minute = fm_bcd_to_u32(cpu->read_byte(params + 0u));
-                        uint32_t second = fm_bcd_to_u32(cpu->read_byte(params + 1u));
-                        uint32_t frame_cd = fm_bcd_to_u32(cpu->read_byte(params + 2u));
-                        uint32_t absolute_sector = ((minute * 60u + second) * 75u) + frame_cd;
-                        g_cd_lba = absolute_sector >= 150u ? absolute_sector - 150u : 0u;
-                        g_cd_pos = 2048u;
-                    }
-
-                    if (command == 0x06u)
-                    {
-                        g_cd_reading = 1;
-                        g_cd_pos = 2048u;
-                        g_cd_error = 0;
-                    }
-                    else if (command == 0x09u)
-                    {
-                        g_cd_reading = 0;
-                    }
-
                     fm_b33_schedule_cd_callback(
                         cpu,
                         command,
@@ -14925,7 +15313,8 @@ int main(void)
                         resume_pc,
                         params,
                         context,
-                        1u
+                        1u,
+                        frame, mode
                     );
 
                     static_miss = 0;
@@ -15005,7 +15394,10 @@ int main(void)
                             )
                         );
 
-                    if (new_request)
+                    int dataready_sector = g_b34_ready_active
+                        && req == g_b34_ready_req;
+
+                    if (!dataready_sector && new_request)
                     {
                         g_b57_req = req;
                         g_b57_base_lba = base_lba;
@@ -15014,8 +15406,8 @@ int main(void)
                         ++g_b57_resets;
                     }
 
-                    uint32_t lba =
-                        g_b57_next_lba;
+                    uint32_t lba = dataready_sector
+                        ? g_b34_ready_lba : g_b57_next_lba;
 
                     ++g_b32_getsec_calls;
                     ++g_b56_stream_reads;
@@ -15088,10 +15480,14 @@ int main(void)
 
                         /*
                          * Une CdlDataReady consomme exactement le secteur
-                         * courant. Avancer le curseur de CETTE requete.
+                         * courant. DataReady a deja reserve et avance son
+                         * LBA ; les appels hors callback l'avancent ici.
                          */
-                        ++g_b57_next_lba;
-                        ++g_b57_read_index;
+                        if (!dataready_sector)
+                        {
+                            ++g_b57_next_lba;
+                            ++g_b57_read_index;
+                        }
 
                         /*
                          * Garder g_cd_lba coherent pour CdlGetlocL et les
@@ -15113,8 +15509,8 @@ int main(void)
                         cpu->gpr[2] = 0u;
                     }
 
-                    g_b57_last_remaining =
-                        remaining;
+                    if (!dataready_sector)
+                        g_b57_last_remaining = remaining;
 
                     cpu->pc = cpu->gpr[31];
                     cpu->gpr[0] = 0u;
@@ -15150,67 +15546,12 @@ int main(void)
                 }
 
 
-                /*
-                 * ============================================
-                 * B25 - Background loader PAL HLE
-                 *
-                 * FUN_8002E11C (SLES_039.48 FR)
-                 *
-                 * Le code original calcule :
-                 *   sector = 0x29E8 + group_offset + ordinal * size
-                 * puis demarre FUN_80014E08() en asynchrone.
-                 *
-                 * Notre CD bas niveau n'achemine pas encore ce flux
-                 * completement. On lit donc le meme bloc depuis disc.bin,
-                 * on le decode avec le format natif WA_MRG valide en B23,
-                 * puis on retourne synchronement. Ainsi, c'est bien
-                 * l'index demande par le runtime qui choisit le decor.
-                 * ============================================
+                /* B136.23: let 8002E11C create its native CD request.
+                 * Its 8002DFE8 callback uploads all indexed background
+                 * layers and CLUTs through 80013B44 / LoadImage. The old
+                 * synchronous preview hook returned without uploading any
+                 * of those textures, while the scene still rendered them.
                  */
-                if (phys == 0x0002E11Cu)
-                {
-                    uint32_t object = cpu->gpr[4];
-                    uint32_t raw_index = cpu->gpr[5] & 0xFFFFu;
-                    uint32_t resolved =
-                        fm_bg_resolve_runtime_index(cpu, raw_index);
-
-                    ++g_bg_hle_calls;
-                    g_bg_hle_raw = raw_index;
-                    g_bg_hle_resolved = resolved;
-                    g_bg_hle_object = object;
-
-                    /* La routine native memorise l'index final en +0x3C. */
-                    if (object != 0u)
-                    {
-                        cpu->write_half(
-                            object + 0x3Cu,
-                            (uint16_t)resolved
-                        );
-                    }
-
-                    if (
-                        fm_bg_load_game_index(
-                            cpu,
-                            preview,
-                            resolved
-                        )
-                    )
-                    {
-                        ++g_bg_hle_ok;
-                    }
-                    else
-                    {
-                        ++g_bg_hle_fail;
-                    }
-
-                    /* Completion synchrone : ne pas poser le busy flag
-                       0x10 de DAT_8009C460. L'attente 80013700 verra le
-                       chargeur idle et le state machine peut continuer. */
-                    cpu->pc = cpu->gpr[31];
-                    cpu->gpr[0] = 0u;
-                    static_miss = 0;
-                    continue;
-                }
 
 
                 /*
@@ -15562,78 +15903,7 @@ int main(void)
                         command;
 
 
-                    /*
-                     * CdlSetloc = 02
-                     */
-                    if (
-                        command == 0x02u
-                        && params != 0
-                    )
-                    {
-                        uint32_t minute =
-                            fm_bcd_to_u32(
-                                cpu->read_byte(
-                                    params + 0
-                                )
-                            );
-
-                        uint32_t second =
-                            fm_bcd_to_u32(
-                                cpu->read_byte(
-                                    params + 1
-                                )
-                            );
-
-                        uint32_t frame_cd =
-                            fm_bcd_to_u32(
-                                cpu->read_byte(
-                                    params + 2
-                                )
-                            );
-
-                        uint32_t absolute_sector =
-                            (
-                                (
-                                    minute * 60u
-                                    + second
-                                )
-                                * 75u
-                            )
-                            + frame_cd;
-
-                        if (absolute_sector >= 150u)
-                        {
-                            g_cd_lba =
-                                absolute_sector - 150u;
-                        }
-                        else
-                        {
-                            g_cd_lba = 0;
-                        }
-
-                        g_cd_pos = 2048;
-                    }
-
-
-                    /*
-                     * CdlReadN = 06
-                     */
-                    if (command == 0x06u)
-                    {
-                        g_cd_reading = 1;
-                        g_cd_pos = 2048;
-                        g_cd_error = 0;
-                    }
-
-
-                    /*
-                     * CdlPause = 09
-                     */
-                    if (command == 0x09u)
-                    {
-                        g_cd_reading = 0;
-                    }
-
+                    fm_cd_apply_command(cpu, command, params, -1, osGetTime());
 
                     /*
                      * Commandes temporairement traitées en HLE.
@@ -15648,6 +15918,7 @@ int main(void)
                         || command == 0x0Eu
                         || command == 0x15u
                         || command == 0x16u
+                        || command == 0x1Bu
                     )
                     {
                         if (result != 0)
@@ -15900,7 +16171,7 @@ int main(void)
                                         0u;
 
                                     if (
-                                        b13557_chain_has_hand_shape(
+                                        fm_chain_has_hand_shape(
                                             cpu,
                                             hand_tag,
                                             NULL,
@@ -16532,7 +16803,7 @@ int main(void)
                     phys < 0x00200000u
                 )
                 {
-                    const uint32_t b91_block_limit = 512u;
+                    const uint32_t b91_block_limit = 32u;
                     uint32_t b91_blocks = 0u;
                     int b91_time_yield = 0;
 
@@ -16563,19 +16834,19 @@ int main(void)
                          * verifie entre basic blocks de l'overlay.
                          */
                         /*
-                         * B111 - le test temporel par basic block etait
-                         * inutilement couteux dans le fast path. Les
-                         * blocks overlay sont courts; en release on ne
-                         * relit l'horloge qu'une fois tous les 16 blocks.
-                         * Les builds de diagnostic gardent la mesure fine.
+                         * B136.62: chain branches inside the interpreter.
+                         * Check deadlines per 2048-instruction chunk instead
+                         * of returning after every short basic block. Resident
+                         * calls leave the region before executing natively.
                          */
+#if FM_PERF_PROFILE
+                        uint32_t capture_chunk_pc=cpu->pc;
+                        uint64_t capture_chunk_tick=g_perf_capture.active?svcGetSystemTick():0;
+#endif
 #if defined(NDEBUG)
                         if (
-                            b91_blocks != 0u
-                            &&
-                            (b91_blocks & 15u) == 0u
-                            &&
                             (osGetTime() - b16_slice_start_ms) >= g_b105_slice_budget_ms
+                            || fm_host_clock_wait_ns(&g_ps1_host_clock,osGetTime()) == 0u
                         )
                         {
                             ++g_b91_fast_time_yields;
@@ -16584,17 +16855,16 @@ int main(void)
                         }
 
                         interp =
-                            fm_interp_run_block(
-                                cpu,
-                                8192u
+                            fm_interp_run_region(
+                                cpu, 2048u,
+                                0x00100000u, 0x00200000u, 0xFFFFFFFFu
                             );
 
                         g_b91_last_block_ms = 0u;
 #else
                         if (
-                            b91_blocks != 0u
-                            &&
                             (osGetTime() - b16_slice_start_ms) >= g_b105_slice_budget_ms
+                            || fm_host_clock_wait_ns(&g_ps1_host_clock,osGetTime()) == 0u
                         )
                         {
                             ++g_b91_fast_time_yields;
@@ -16605,9 +16875,9 @@ int main(void)
                         uint64_t b91_block_start_ms = osGetTime();
 
                         interp =
-                            fm_interp_run_block(
-                                cpu,
-                                8192u
+                            fm_interp_run_region(
+                                cpu, 2048u,
+                                0x00100000u, 0x00200000u, 0xFFFFFFFFu
                             );
 
                         uint32_t b91_block_ms =
@@ -16622,6 +16892,11 @@ int main(void)
                         }
 #endif
 
+#if FM_PERF_PROFILE
+                        if(g_perf_capture.active)fm_capture_hot(&g_perf_capture,capture_chunk_pc,
+                            interp.instructions,(uint32_t)((svcGetSystemTick()-capture_chunk_tick)
+                                /(SYSCLOCK_ARM11/1000000u)));
+#endif
                         interp_ran = 1;
                         ++b91_blocks;
                         ++g_b91_fast_blocks;
@@ -16766,8 +17041,11 @@ int main(void)
                  * Le profiler complet reste disponible dans un build
                  * sans NDEBUG.
                  */
+                ++g_native_probe_calls;
                 uint32_t b13514_chain_count = 0u;
                 int b13514_chain_region =
+                    fm_native_batchable(dispatch_address)
+                    ||
                     (
                         phys >= 0x000342B0u
                         &&
@@ -16792,6 +17070,19 @@ int main(void)
                         phys < 0x00058860u
                     );
 
+                fm_runtime_frame_wait_scope(cpu);
+#if FM_PERF_PROFILE
+                int frame_wait_probe = phys == 0x00012CB8u || phys == 0x00012CD4u;
+                uint64_t frame_wait_start = frame_wait_probe ? svcGetSystemTick() : 0u;
+#endif
+#if FM_PERF_PROFILE && defined(NDEBUG)
+                static uint32_t perf_probe_rng = 0x13634u;
+                /* Use upper PRNG bits: periodic dispatch patterns must not
+                 * always select the same tiny call every 64 entries. */
+                perf_probe_rng = perf_probe_rng * 1664525u + 1013904223u;
+                int perf_probe_sample = (perf_probe_rng >> 26) == 0u;
+                uint64_t perf_probe_start = perf_probe_sample ? svcGetSystemTick() : 0u;
+#endif
 #if defined(NDEBUG)
                 if (b13514_chain_region)
                 {
@@ -16816,7 +17107,7 @@ int main(void)
                              * budget while still amortizing setjmp/dispatcher
                              * overhead versus the old max=4 behavior.
                              */
-                            16u,
+                            fm_native_batchable(dispatch_address) ? 64u : 16u,
                             &b13514_chain_count
                         );
                 }
@@ -16849,7 +17140,7 @@ int main(void)
                                 0x0008A204u,
                                 0x0005721Cu,
                                 0x00058860u,
-                                16u,
+                                fm_native_batchable(dispatch_address) ? 64u : 16u,
                                 &b13514_chain_count
                             );
                     }
@@ -16882,6 +17173,33 @@ int main(void)
                     );
                 }
 #endif
+
+#if FM_PERF_PROFILE && defined(NDEBUG)
+                if (perf_probe_sample) {
+                    uint32_t us = (uint32_t)((svcGetSystemTick() - perf_probe_start)
+                        / (SYSCLOCK_ARM11 / 1000000u));
+                    b110_profile_probe(dispatch_address, probe.pc, us);
+                }
+#endif
+
+                fm_runtime_frame_wait_scope(NULL);
+#if FM_PERF_PROFILE
+                if (frame_wait_probe) {
+                    ++g_frame_wait_probe_calls;
+                    g_frame_wait_probe_us += (svcGetSystemTick() - frame_wait_start)
+                        / (SYSCLOCK_ARM11 / 1000000u);
+                }
+#endif
+                if (g_frame_wait_active && probe.reason != FM_STOP_FRAME_WAIT) {
+                    g_frame_wait_active = 0;
+                    ++g_frame_wait_resumes;
+                }
+                if (probe.reason == FM_STOP_FRAME_WAIT) {
+                    g_frame_wait_active = 1;
+                    ++g_frame_wait_stops;
+                    static_miss = 0;
+                    break;
+                }
 
                 if (b13514_chain_count != 0u)
                 {
@@ -17140,6 +17458,10 @@ int main(void)
                             b13519_chunks < 32u
                         )
                         {
+#if FM_PERF_PROFILE
+                            uint32_t capture_chunk_pc=cpu->pc;
+                            uint64_t capture_chunk_tick=g_perf_capture.active?svcGetSystemTick():0;
+#endif
                             interp =
                                 fm_interp_run_region(
                                     cpu,
@@ -17149,6 +17471,11 @@ int main(void)
                                     0x00034D30u
                                 );
 
+#if FM_PERF_PROFILE
+                            if(g_perf_capture.active)fm_capture_hot(&g_perf_capture,capture_chunk_pc,
+                                interp.instructions,(uint32_t)((svcGetSystemTick()-capture_chunk_tick)
+                                    /(SYSCLOCK_ARM11/1000000u)));
+#endif
                             interp_ran = 1;
                             ++b13519_chunks;
                             ++g_b13517_interp_blocks;
@@ -17216,12 +17543,20 @@ int main(void)
                     }
                     else
                     {
+#if FM_PERF_PROFILE
+                        uint32_t capture_chunk_pc=cpu->pc;
+                        uint64_t capture_chunk_tick=g_perf_capture.active?svcGetSystemTick():0;
+#endif
                         interp =
                             fm_interp_run_block(
                                 cpu,
                                 8192u
                             );
-
+#if FM_PERF_PROFILE
+                        if(g_perf_capture.active)fm_capture_hot(&g_perf_capture,capture_chunk_pc,
+                            interp.instructions,(uint32_t)((svcGetSystemTick()-capture_chunk_tick)
+                                /(SYSCLOCK_ARM11/1000000u)));
+#endif
                         interp_ran = 1;
 
                         if (
@@ -17355,6 +17690,9 @@ int main(void)
 
         uint64_t b105_render_start_ms =
             osGetTime();
+#if FM_PERF_PROFILE
+        uint32_t perf_pre_ms = (uint32_t)(b105_render_start_ms - b105_loop_start_ms);
+#endif
 
         /*
          * B15 FIRST IMAGE :
@@ -18405,7 +18743,7 @@ int main(void)
          */
 
         if (
-            frame % 120u == 0u
+            FM_LEGACY_FILE_DIAGNOSTICS && frame % 120u == 0u
         )
         {
             printf(
@@ -20713,6 +21051,419 @@ int main(void)
                         (unsigned long)fm_memory_read_half(fm_memory_read_word(0x80093FB8u) + 0x1AAu),
                         (unsigned long)fm_memory_read_half(fm_memory_read_word(0x80093FB8u) + 0x1AEu)
                     );
+                    /* B136.7: read-only black-screen evidence. Sample at the
+                     * existing 120-host-frame debug cadence, never per GP0. */
+                    {
+                        FMGpuQuickState video_gpu = {0};
+                        uint32_t video_nz[6] = {0};
+                        uint32_t video_hash[6] = {0};
+                        fm_gpu_quick_save(&video_gpu);
+                        for (unsigned vp = 0u; vp < 5u; ++vp)
+                        {
+                            unsigned vx = vp < 4u ? ((vp & 1u) ? 320u : 0u)
+                                : video_gpu.display_x;
+                            unsigned vy = vp < 4u ? ((vp & 2u) ? 256u : 0u)
+                                : video_gpu.display_y;
+                            if (vx <= 704u && vy <= 272u)
+                                b13578_sample_page(vram, vx, vy,
+                                    &video_hash[vp], &video_nz[vp]);
+                        }
+                        if (g_b84_latch_valid)
+                        {
+                            video_hash[5] = 2166136261u;
+                            for (unsigned vy = 0u; vy < 240u; vy += 8u)
+                                for (unsigned vx = 0u; vx < 320u; vx += 8u)
+                                {
+                                    uint16_t pixel = composite[vy * 320u + vx];
+                                    if ((pixel & 0x7FFFu) != 0u) ++video_nz[5];
+                                    video_hash[5] = (video_hash[5] ^ pixel) * 16777619u;
+                                }
+                        }
+                        fprintf(dbg,
+                            "video_probe=B136.62\nvideo_mode=%08lX\n"
+                            "video_disabled=%ld\nvideo_has_frame=%lu\n"
+                            "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
+                            "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
+                            "video_gp1=%lu,%lu\nvideo_latch=%u,%u\n"
+                            "video_latch_valid=%lu\nvideo_pick=%lu\n"
+                            "video_latches=%lu\nvideo_presents=%lu\n"
+                            "video_menu_init=%lu\nvideo_menu_update=%lu\n"
+                            "video_menu_destroy=%lu\nvideo_menu_force=%lu\n",
+                            (unsigned long)video_gpu.display_mode,
+                            (long)video_gpu.display_disabled,
+                            (unsigned long)video_gpu.has_frame,
+                            (unsigned long)video_gpu.parser_state,
+                            (unsigned long)video_gpu.cmd_have,
+                            (unsigned long)video_gpu.cmd_need,
+                            (long)video_gpu.draw_x1, (long)video_gpu.draw_y1,
+                            (long)video_gpu.draw_x2, (long)video_gpu.draw_y2,
+                            (long)video_gpu.offset_x, (long)video_gpu.offset_y,
+                            (unsigned long)video_gpu.display_x,
+                            (unsigned long)video_gpu.display_y,
+                            g_b84_latch_x, g_b84_latch_y,
+                            (unsigned long)g_b84_latch_valid,
+                            (unsigned long)g_b13578_last_pick,
+                            (unsigned long)g_b84_latch_count,
+                            (unsigned long)g_b86_present_count,
+                            (unsigned long)g_b73_hit_menu_init,
+                            (unsigned long)g_b73_hit_menu_update,
+                            (unsigned long)g_b73_hit_menu_destroy,
+                            (unsigned long)g_b73_menu_force_count);
+                        for (unsigned vp = 0u; vp < 6u; ++vp)
+                            fprintf(dbg, "video_page%u_nz=%lu\nvideo_page%u_hash=%08lX\n",
+                                vp, (unsigned long)video_nz[vp],
+                                vp, (unsigned long)video_hash[vp]);
+
+                        fprintf(dbg,
+                            "video_gate=%02lX\nvideo_fade_rgba=%08lX\n"
+                            "video_fade_current=%02lX\nvideo_fade_target=%02lX\n"
+                            "video_fade_flags=%02lX\nvideo_fade_step=%02lX\n"
+                            "video_packets_fill=%llu\nvideo_packets_draw=%llu\n"
+                            "video_packets_copy=%llu\nvideo_packets_upload=%llu\n"
+                            "video_packets_env=%llu\nvideo_dma2_transfers=%lu\n"
+                            "video_dma2_last_nodes=%lu\nvideo_dma2_last_words=%lu\n",
+                            (unsigned long)fm_memory_read_byte(0x8009C4B8u),
+                            (unsigned long)fm_memory_read_word(0x800EB248u),
+                            (unsigned long)fm_memory_read_byte(0x800EB24Cu),
+                            (unsigned long)fm_memory_read_byte(0x800EB24Du),
+                            (unsigned long)fm_memory_read_byte(0x800EB24Eu),
+                            (unsigned long)fm_memory_read_byte(0x800EB24Fu),
+                            (unsigned long long)gpu_debug.packets_fill,
+                            (unsigned long long)gpu_debug.packets_draw,
+                            (unsigned long long)gpu_debug.packets_copy,
+                            (unsigned long long)gpu_debug.packets_upload,
+                            (unsigned long long)gpu_debug.packets_env,
+                            (unsigned long)b130_dma.dma2_transfer_count,
+                            (unsigned long)b130_dma.dma2_last_nodes,
+                            (unsigned long)b130_dma.dma2_last_words);
+
+                        /* B136.12: persist post-name evidence at the existing
+                         * debug cadence. Observe the LIVE request and text path. */
+                        FILE *intro_file = fopen("sdmc:/3ds/fm-new3ds/intro-diag.txt", "wb");
+                        if (intro_file)
+                        {
+                            FMTextTrace intro_text = {0};
+                            fm_runtime_text_trace_get(&intro_text);
+                            uint32_t intro_req = fm_memory_read_word(0x8009C2A8u);
+                            int intro_req_valid = intro_req >= 0x80000000u
+                                && intro_req <= 0x801FFFB8u;
+                            fprintf(intro_file,
+                                "probe=B136.62\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "state=%02lX/%02lX/%02lX/%02lX\n"
+                                "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
+                                "request=%08lX valid=%d\n"
+                                "cd_reading=%d lba=%08lX error=%ld\n"
+                                "dataready=pending:%lu active:%lu start:%lu done:%lu\n"
+                                "sector=calls:%lu ok:%lu fail:%lu last_lba:%08lX\n",
+                                (unsigned long)frame, (unsigned long)(cpu ? cpu->pc : 0u),
+                                (unsigned long)(cpu ? cpu->gpr[31] : 0u),
+                                (unsigned long)fm_memory_read_byte(0x8009C60Au),
+                                (unsigned long)fm_memory_read_byte(0x8009C60Cu),
+                                (unsigned long)fm_memory_read_byte(0x8009C60Du),
+                                (unsigned long)fm_memory_read_byte(0x8009C60Eu),
+                                (unsigned long)fm_memory_read_word(0x8009C460u),
+                                (unsigned long)fm_memory_read_word(0x8009C484u),
+                                (unsigned long)fm_memory_read_byte(0x80094BECu),
+                                (unsigned long)fm_memory_read_byte(0x8009492Du),
+                                (unsigned long)intro_req, intro_req_valid,
+                                (int)g_cd_reading, (unsigned long)g_cd_lba, (long)g_cd_error,
+                                (unsigned long)g_b34_ready_pending,
+                                (unsigned long)g_b34_ready_active,
+                                (unsigned long)g_b34_ready_started,
+                                (unsigned long)g_b34_ready_done,
+                                (unsigned long)g_b32_getsec_calls,
+                                (unsigned long)g_b32_getsec_ok,
+                                (unsigned long)g_b32_getsec_fail,
+                                (unsigned long)g_b32_last_lba);
+                            fprintf(intro_file,
+                                "cd_callback=pending:%lu active:%lu cmd:%02lX addr:%08lX\n"
+                                "xa_stage=%02lX flags=%04lX position=%08lX end=%08lX\n",
+                                (unsigned long)g_b33_pending, (unsigned long)g_b33_cb_active,
+                                (unsigned long)g_b33_cb_cmd, (unsigned long)g_b33_cb_addr,
+                                (unsigned long)fm_memory_read_byte(0x8009C464u),
+                                (unsigned long)fm_memory_read_half(0x8009C47Cu),
+                                (unsigned long)fm_memory_read_word(0x800EB1E8u),
+                                (unsigned long)fm_memory_read_word(0x800EB1ECu));
+                            fprintf(intro_file,
+                                "xa_transport=active:%d mode:%02X lba:%08lX fraction:%lu\n",
+                                g_cd_streaming, (unsigned)g_cd_mode,
+                                (unsigned long)g_cd_lba, (unsigned long)g_cd_stream_fraction);
+                            if (intro_req_valid)
+                            {
+                                static const unsigned req_offsets[] =
+                                    {8u, 0x10u, 0x18u, 0x1Cu, 0x20u, 0x24u, 0x28u, 0x2Cu, 0x34u, 0x40u};
+                                for (unsigned ri = 0u; ri < sizeof(req_offsets)/sizeof(req_offsets[0]); ++ri)
+                                    fprintf(intro_file, "req%02X=%08lX\n", req_offsets[ri],
+                                        (unsigned long)fm_memory_read_word(intro_req + req_offsets[ri]));
+                                fprintf(intro_file, "req_type=%02lX\n",
+                                    (unsigned long)fm_memory_read_byte(intro_req + 0x46u));
+                            }
+                            fprintf(intro_file,
+                                "text_ctx=%08lX ptr=%08lX flags=%08lX id=%08lX state=%08lX\n"
+                                "text_next=%08lX object=%08lX glyph_write=%08lX last_char=%08lX\n"
+                                "str_base=%08lX done=%02lX skip=%lu\n"
+                                "mdec_reset/in/out/insync/outsync=%lu/%lu/%lu/%lu/%lu\n",
+                                (unsigned long)intro_text.script_ctx, (unsigned long)intro_text.script_ptr,
+                                (unsigned long)intro_text.script_flags, (unsigned long)intro_text.script_id,
+                                (unsigned long)intro_text.script_state, (unsigned long)intro_text.script_next_byte,
+                                (unsigned long)intro_text.text_object, (unsigned long)intro_text.glyph_write,
+                                (unsigned long)intro_text.last_char,
+                                (unsigned long)fm_memory_read_word(0x8009C818u),
+                                (unsigned long)fm_memory_read_byte(0x8009C3EBu),
+                                (unsigned long)g_str_intro_skip_count,
+                                (unsigned long)g_b104_mdec_reset, (unsigned long)g_b104_mdec_in,
+                                (unsigned long)g_b104_mdec_out, (unsigned long)g_b104_mdec_in_sync,
+                                (unsigned long)g_b104_mdec_out_sync);
+                            for (unsigned ti = 0u; ti < 7u; ++ti)
+                                fprintf(intro_file, "text_path%u=%lu/%lu\n", ti,
+                                    (unsigned long)intro_text.gen[ti], (unsigned long)intro_text.outer[ti]);
+                            int text_head = (int16_t)fm_memory_read_half(0x800F11CCu);
+                            fprintf(intro_file, "text_list_head=%d\n", text_head);
+                            if (text_head >= 0 && text_head < 0x60)
+                            {
+                                uint32_t text_obj = 0x800F1210u + (uint32_t)text_head * 0x70u;
+                                fprintf(intro_file, "text_list_obj=%08lX flags=%04lX callback=%08lX\n",
+                                    (unsigned long)text_obj,
+                                    (unsigned long)fm_memory_read_half(text_obj + 8u),
+                                    (unsigned long)fm_memory_read_word(text_obj + 0x24u));
+                            }
+                            /* Retain the model-state evidence for later native
+                             * 3D scenes. Main state 2 instead uses the scripted
+                             * 2D scene slots below (2D038/30228/2FCA4). */
+                            fprintf(intro_file,
+                                "scene=sub:%02lX pipeline:%02lX phase:%02lX current:%02lX intro:%02lX/%02lX\n",
+                                (unsigned long)fm_memory_read_byte(0x8009C60Bu),
+                                (unsigned long)fm_memory_read_byte(0x8009C324u),
+                                (unsigned long)fm_memory_read_byte(0x8009C32Au),
+                                (unsigned long)fm_memory_read_byte(0x8009C337u),
+                                (unsigned long)fm_memory_read_byte(0x8009C394u),
+                                (unsigned long)fm_memory_read_byte(0x8009C395u));
+                            for (unsigned mi = 0u; mi < 3u; ++mi)
+                            {
+                                uint32_t model = 0x800F4178u + mi * 0xE20u;
+                                fprintf(intro_file,
+                                    "model%u=id:%04lX load:%02lX ready:%02lX tint:%08lX parts:%02lX object:%08lX data:%08lX packets:%08lX anim:%04lX\n",
+                                    mi,
+                                    (unsigned long)fm_memory_read_half(model + 0xDF8u),
+                                    (unsigned long)fm_memory_read_byte(model + 0xE14u),
+                                    (unsigned long)fm_memory_read_byte(model + 0xE1Fu),
+                                    (unsigned long)fm_memory_read_word(model + 0xDC0u),
+                                    (unsigned long)fm_memory_read_byte(model + 0xE1Bu),
+                                    (unsigned long)fm_memory_read_word(model + 0xD18u),
+                                    (unsigned long)fm_memory_read_word(model + 0xDE0u),
+                                    (unsigned long)fm_memory_read_word(model + 0xDF0u),
+                                    (unsigned long)fm_memory_read_half(model + 0xE06u));
+                            }
+                            fprintf(intro_file,
+                                "scene_overlay=%08lX/%08lX/%08lX\n",
+                                (unsigned long)fm_memory_read_word(0x80180004u),
+                                (unsigned long)fm_memory_read_word(0x8018019Cu),
+                                (unsigned long)fm_memory_read_word(0x80180420u));
+                            fprintf(intro_file,
+                                "script_scene=handler:%08lX id:%04lX opcode:%04lX next:%04lX ptr:%08lX bg:%04lX text_obj:%08lX\n",
+                                (unsigned long)fm_memory_read_word(0x80091F7Cu +
+                                    (fm_memory_read_byte(0x8009C60Au) & 0x1Fu) * 4u),
+                                (unsigned long)fm_memory_read_half(0x8009C628u),
+                                (unsigned long)fm_memory_read_half(0x8009C610u),
+                                (unsigned long)fm_memory_read_half(0x8009C622u),
+                                (unsigned long)fm_memory_read_word(0x8009C624u),
+                                (unsigned long)fm_memory_read_half(0x8009C630u),
+                                (unsigned long)fm_memory_read_word(0x8009C614u));
+                            fprintf(intro_file,
+                                "seq_irq=calls:%lu done:%lu blocks:%lu active:%u\n",
+                                (unsigned long)g_seq_irq_calls,
+                                (unsigned long)g_seq_irq_done,
+                                (unsigned long)g_seq_irq_blocks,
+                                0u);
+                            fprintf(intro_file,
+                                "seq_delivery=serviced:%lu skipped:%lu max_ms:%lu cadence:timer2-target\n",
+                                (unsigned long)g_seq_irq_serviced,
+                                (unsigned long)g_seq_irq_skipped,
+                                (unsigned long)g_seq_irq_max_ms);
+                            fprintf(intro_file, "spu_reverb_mask=%08lX\n",
+                                (unsigned long)fm_memory_read_word(0x1F801D98u));
+                            uint32_t seq_ctx = fm_memory_read_word(0x8009C7D8u);
+                            uint32_t seq_engine = fm_memory_read_word(0x8009C7E0u);
+                            if (seq_ctx >= 0x80000000u && seq_ctx <= 0x801FF000u
+                                && seq_engine >= 0x80000000u && seq_engine <= 0x801FE000u) {
+                                FMMemoryQuickState seq_clock;
+                                fm_memory_quick_save(&seq_clock);
+                                fprintf(intro_file,
+                                    "seq_state=status:%04lX channels:%u ended:%u cursor:%08lX delay:%lu flags:%04lX\n",
+                                    (unsigned long)fm_memory_read_half(seq_ctx + 0x7E2u),
+                                    (unsigned)fm_memory_read_half(seq_ctx + 0x7FAu),
+                                    (unsigned)fm_memory_read_byte(seq_ctx + 0x53Cu),
+                                    (unsigned long)fm_memory_read_word(seq_ctx + 0x518u),
+                                    (unsigned long)fm_memory_read_word(seq_ctx + 0x534u),
+                                    (unsigned long)fm_memory_read_half(seq_engine + 0x40u));
+                                fprintf(intro_file, "seq_timer=count:%04X mode:%04X target:%04X irq:%04X mask:%04X\n",
+                                    (unsigned)seq_clock.timers[2].count,
+                                    (unsigned)seq_clock.timers[2].mode,
+                                    (unsigned)seq_clock.timers[2].target,
+                                    (unsigned)seq_clock.i_stat, (unsigned)seq_clock.i_mask);
+                            }
+                            for (unsigned si = 0u; si < 3u; ++si)
+                            {
+                                uint32_t slot = 0x800EC220u + si * 0x14u;
+                                uint32_t obj = fm_memory_read_word(slot);
+                                fprintf(intro_file,
+                                    "scene_slot%u=obj:%08lX control:%08lX w2:%08lX w3:%08lX w4:%08lX\n",
+                                    si, (unsigned long)obj,
+                                    (unsigned long)fm_memory_read_word(slot + 4u),
+                                    (unsigned long)fm_memory_read_word(slot + 8u),
+                                    (unsigned long)fm_memory_read_word(slot + 12u),
+                                    (unsigned long)fm_memory_read_word(slot + 16u));
+                                if (obj >= 0x80000000u && obj <= 0x801FFF90u)
+                                {
+                                    fprintf(intro_file,
+                                        "scene_obj%u=flags:%08lX/%04lX color:%08lX pos:%08lX/%08lX tex:%08lX/%08lX\n",
+                                        si,
+                                        (unsigned long)fm_memory_read_word(obj + 4u),
+                                        (unsigned long)fm_memory_read_half(obj + 8u),
+                                        (unsigned long)fm_memory_read_word(obj + 12u),
+                                        (unsigned long)fm_memory_read_word(obj + 0x30u),
+                                        (unsigned long)fm_memory_read_word(obj + 0x34u),
+                                        (unsigned long)fm_memory_read_word(obj + 0x40u),
+                                        (unsigned long)fm_memory_read_word(obj + 0x44u));
+                                    uint32_t desc = fm_memory_read_word(obj + 0x4Cu);
+                                    fprintf(intro_file,
+                                        "scene_data%u=desc:%08lX sequence:%08lX base:%08lX frame:%04lX delay:%04lX anim:%08lX callback:%08lX\n",
+                                        si, (unsigned long)desc,
+                                        (unsigned long)fm_memory_read_word(obj + 0x50u),
+                                        (unsigned long)fm_memory_read_word(obj + 0x54u),
+                                        (unsigned long)fm_memory_read_half(obj + 0x58u),
+                                        (unsigned long)fm_memory_read_half(obj + 0x5Au),
+                                        (unsigned long)fm_memory_read_word(obj + 0x64u),
+                                        (unsigned long)fm_memory_read_word(obj + 0x24u));
+                                    if (desc >= 0x80000000u && desc <= 0x801FFFE0u)
+                                    {
+                                        fprintf(intro_file, "scene_desc%u=", si);
+                                        for (unsigned wi = 0u; wi < 8u; ++wi)
+                                            fprintf(intro_file, "%s%08lX", wi ? "/" : "",
+                                                (unsigned long)fm_memory_read_word(desc + wi * 4u));
+                                        fputc('\n', intro_file);
+                                    }
+                                }
+                            }
+                            FMDialogueLayerTrace scene_trace = {0};
+                            fm_runtime_dialogue_layer_trace(&scene_trace);
+                            uint64_t scene_seen[2] = {0u, 0u};
+                            int scene_idx = (int16_t)fm_memory_read_half(0x800F11C4u);
+                            unsigned scene_nodes = 0u, scene_mask = 0u;
+                            while (scene_idx >= 0 && scene_idx < 0x60 && scene_nodes < 0x60u)
+                            {
+                                unsigned bit = (unsigned)scene_idx;
+                                if (scene_seen[bit >> 6] & (1ull << (bit & 63u))) break;
+                                scene_seen[bit >> 6] |= 1ull << (bit & 63u);
+                                uint32_t node = 0x800F1210u + bit * 0x70u;
+                                for (unsigned si = 0u; si < 3u; ++si)
+                                    if (node == fm_memory_read_word(0x800EC220u + si * 0x14u))
+                                        scene_mask |= 1u << si;
+                                ++scene_nodes;
+                                scene_idx = (int16_t)fm_memory_read_half(node + 2u);
+                            }
+                            fprintf(intro_file, "scene_chain=nodes:%u backgrounds:%X end:%d\n",
+                                scene_nodes, scene_mask, scene_idx);
+                            fprintf(intro_file,
+                                "scene_render=walk:%lu nonempty:%lu object:%lu primitive:%lu head:%ld table:%08lX/%08lX\n",
+                                (unsigned long)scene_trace.category2_calls,
+                                (unsigned long)scene_trace.category2_with_head,
+                                (unsigned long)scene_trace.object_render_calls,
+                                (unsigned long)scene_trace.primitive_calls,
+                                (long)(int16_t)fm_memory_read_half(0x800F11C4u),
+                                (unsigned long)fm_memory_read_word(0x800923E4u),
+                                (unsigned long)fm_memory_read_word(0x8009C860u));
+                            /* The observed background objects select CLUTs at
+                             * x=640, y=208..210. Read their 256 entries without
+                             * modifying renderer state. */
+                            for (unsigned pi = 0u; pi < 3u; ++pi)
+                            {
+                                uint32_t nonzero = 0u, hash = 2166136261u;
+                                for (unsigned xi = 0u; xi < 256u; ++xi)
+                                {
+                                    uint16_t pixel = vram[(208u + pi) * 1024u + 640u + xi];
+                                    if (pixel & 0x7FFFu) ++nonzero;
+                                    hash = (hash ^ pixel) * 16777619u;
+                                }
+                                fprintf(intro_file, "scene_clut%u=nz:%lu hash:%08lX\n", pi,
+                                    (unsigned long)nonzero, (unsigned long)hash);
+                            }
+                            fm_media_dump(intro_file);
+                            fclose(intro_file);
+                        }
+
+                        /* Keep the last 16 diagnostic refreshes so the brief
+                         * title/menu appearance can be compared with black.
+                         * Fixed-size host-only ring, rewritten each refresh. */
+                        static char video_ring[16][512];
+                        static unsigned video_next = 0u, video_count = 0u;
+                        /* B136.11: distinguish SU prompt from menu visibility. */
+                        uint32_t menu_items_mask = 0u, menu_prompt_visible = 0u;
+                        if (fm_memory_read_word(0x8009C898u) == 0x80180B4Cu)
+                        {
+                            uint32_t prompt = fm_memory_read_word(0x8018478Cu);
+                            if (prompt >= 0x80000000u && prompt <= 0x801FFF90u)
+                                menu_prompt_visible =
+                                    (fm_memory_read_half(prompt + 8u) & 0xC0u) == 0xC0u;
+                            for (unsigned mi = 0u; mi < 11u; ++mi)
+                            {
+                                uint32_t item = fm_memory_read_word(0x80184794u + mi * 4u);
+                                if (item >= 0x80000000u && item <= 0x801FFF90u
+                                    && (fm_memory_read_half(item + 8u) & 0xC0u) == 0xC0u)
+                                    menu_items_mask |= 1u << mi;
+                            }
+                        }
+                        fprintf(dbg, "video_menu_prompt_visible=%lu\n"
+                            "video_menu_items_visible=%03lX\n"
+                            "video_menu_c4=%02lX\nvideo_menu_c5=%02lX\n",
+                            (unsigned long)menu_prompt_visible,
+                            (unsigned long)menu_items_mask,
+                            (unsigned long)fm_memory_read_byte(0x801847C4u),
+                            (unsigned long)fm_memory_read_byte(0x801847C5u));
+                        snprintf(video_ring[video_next], sizeof(video_ring[0]),
+                            "frame=%lu pc=%08lX gp0=%llu disabled=%ld mode=%08lX "
+                            "gp1=%lu,%lu latch=%u,%u valid=%lu pick=%lu "
+                            "nz=%lu/%lu/%lu/%lu/%lu/%lu "
+                            "menu=%lu/%lu/%lu c460=%08lX "
+                            "title=%02lX/%02lX str=%lu/%lu pad=%04lX "
+                            "fade=%02lX/%02lX/%02lX prompt=%lu items=%03lX\n",
+                            (unsigned long)frame, (unsigned long)(cpu ? cpu->pc : 0u),
+                            (unsigned long long)fm_gpu_gp0_count(),
+                            (long)video_gpu.display_disabled,
+                            (unsigned long)video_gpu.display_mode,
+                            (unsigned long)video_gpu.display_x,
+                            (unsigned long)video_gpu.display_y,
+                            g_b84_latch_x, g_b84_latch_y,
+                            (unsigned long)g_b84_latch_valid,
+                            (unsigned long)g_b13578_last_pick,
+                            (unsigned long)video_nz[0], (unsigned long)video_nz[1],
+                            (unsigned long)video_nz[2], (unsigned long)video_nz[3],
+                            (unsigned long)video_nz[4], (unsigned long)video_nz[5],
+                            (unsigned long)g_b73_hit_menu_init,
+                            (unsigned long)g_b73_hit_menu_update,
+                            (unsigned long)g_b73_hit_menu_destroy,
+                            (unsigned long)fm_memory_read_word(0x8009C460u),
+                            (unsigned long)fm_memory_read_byte(0x8009C6A0u),
+                            (unsigned long)fm_memory_read_byte(0x8009C7A8u),
+                            (unsigned long)fm_memory_read_byte(0x8009C3EBu),
+                            (unsigned long)g_str_intro_skip_count,
+                            (unsigned long)(fm_memory_read_word(0x8009C72Cu) & 0xFFFFu),
+                            (unsigned long)fm_memory_read_byte(0x800EB24Cu),
+                            (unsigned long)fm_memory_read_byte(0x800EB24Du),
+                            (unsigned long)fm_memory_read_byte(0x800EB24Eu),
+                            (unsigned long)menu_prompt_visible,
+                            (unsigned long)menu_items_mask);
+                        video_next = (video_next + 1u) % 16u;
+                        if (video_count < 16u) ++video_count;
+                        FILE *video_file = fopen("sdmc:/3ds/fm-new3ds/video-watch.txt", "wb");
+                        if (video_file)
+                        {
+                            for (unsigned vi = 0u; vi < video_count; ++vi)
+                                fputs(video_ring[(video_next + 16u - video_count + vi) % 16u],
+                                    video_file);
+                            fclose(video_file);
+                        }
+                    }
                     fclose(dbg);
                 }
             }
@@ -21145,257 +21896,6 @@ int main(void)
         }
 
 
-        ++frame;
-
-
-        /*
-         * Latch VBlank PS1 une fois par frame 3DS.
-         */
-        if (memory_status == 0)
-        {
-            fm_memory_vblank_tick();
-
-            /*
-             * B12 : executer le vrai callback VBlank du jeu dans un
-             * contexte CPU isole, sans detruire les registres du
-             * thread principal.
-             */
-            if (game_running)
-            {
-                {
-                    uint64_t b105_vblank_start_ms =
-                        osGetTime();
-
-                    fm_execute_guest_vblank_callback(
-                        cpu,
-                        frame
-                    );
-
-                    g_b105_vblank_ms =
-                        (uint32_t)(
-                            osGetTime()
-                            -
-                            b105_vblank_start_ms
-                        );
-                }
-
-                /*
-                 * B72 - conserver le dernier etat input guest non nul.
-                 * FUN_8003CEA4, executee par le callback VBlank,
-                 * transforme 70C en held/edge/repeat.
-                 */
-                {
-                    uint32_t b72_raw =
-                        fm_memory_read_word(0x8009C70Cu)
-                        &
-                        0xFFFFu;
-
-                    uint32_t b72_held =
-                        fm_memory_read_word(0x8009C710u)
-                        &
-                        0xFFFFu;
-
-                    uint32_t b72_edge =
-                        fm_memory_read_word(0x8009C72Cu)
-                        &
-                        0xFFFFu;
-
-                    uint32_t b72_rep =
-                        fm_memory_read_word(0x8009C728u)
-                        &
-                        0xFFFFu;
-
-                    if (
-                        b72_raw != 0u
-                        ||
-                        b72_held != 0u
-                        ||
-                        b72_edge != 0u
-                        ||
-                        b72_rep != 0u
-                    )
-                    {
-                        g_b72_guest_raw_latched = b72_raw;
-                        g_b72_guest_held_latched = b72_held;
-                        g_b72_guest_edge_latched = b72_edge;
-                        g_b72_guest_rep_latched = b72_rep;
-                        g_b72_guest_nonzero_frame = frame;
-                    }
-
-                    if ((b72_edge & 0x0008u) != 0u)
-                    {
-                        ++g_b72_edge8_hits;
-                        g_b72_edge8_last_frame = frame;
-                    }
-                }
-
-                /*
-                 * =====================================================
-                 * B13 FASTBOOT 401A4
-                 * =====================================================
-                 *
-                 * B12 a prouve que le vrai callback VBlank s'execute
-                 * correctement (retour propre + 8003CE34 traverse),
-                 * mais le startup reste dans la boucle interne de
-                 * FUN_800401A4.
-                 *
-                 * On laisse d'abord la fonction faire son setup et au
-                 * moins quatre vrais callbacks VBlank. Quand le thread
-                 * principal est de nouveau dans le VSync de cette boucle,
-                 * on restaure le SP d'entree et on reprend exactement au
-                 * RA du JAL appelant (80012B48 sur notre build FR).
-                 *
-                 * Cela evite de sauter le setup de 401A4 tout en supprimant
-                 * uniquement son attente infinie dans notre environnement.
-                 */
-                if (
-                    !g_fast401_forced
-                    && g_hit_401a4 != 0u
-                    && g_sp_401a4 != 0u
-                    && g_ra_401a4 != 0u
-                    && g_irq_exec_ok >= 4u
-                    && ((cpu->pc & 0x1FFFFFFFu) == 0x000746B8u)
-                    && cpu->gpr[31] == 0x80012D48u
-                )
-                {
-                    cpu->pc = g_ra_401a4;
-                    cpu->gpr[29] = g_sp_401a4;
-                    cpu->gpr[31] = g_ra_401a4;
-                    cpu->gpr[2] = 0u;
-                    cpu->gpr[0] = 0u;
-
-                    /* Annuler l'attente VSync HLE devenue obsolete. */
-                    g_vsync_wait_active = 0;
-                    g_vsync_wait_until_frame = 0;
-
-                    g_fast401_forced = 1u;
-                    g_fast401_frame = frame;
-                }
-
-                /*
-                 * B32 : si FUN_80043E3C revient d'elle-meme apres que
-                 * le pont CD a effectivement livre des secteurs, noter
-                 * ce retour naturel. On ne saute plus sa sequence
-                 * d'initialisation.
-                 */
-                if (
-                    !g_b32_43e_returned
-                    && g_b32_getsec_ok != 0u
-                    && g_ra_43e3c != 0u
-                    && cpu->pc == g_ra_43e3c
-                )
-                {
-                    g_b32_43e_returned = 1u;
-                    g_b32_43e_return_frame = frame;
-                }
-
-
-                /*
-                 * =====================================================
-                 * B14 FASTBOOT 43E3C
-                 * =====================================================
-                 *
-                 * B13 a prouve que le retour force de 401A4 nous fait
-                 * bien entrer dans FUN_80043E3C. Le nouveau verrou est
-                 * son attente de chargement asynchrone : 80013700 est
-                 * atteint, mais aucun secteur CD n'est jamais transfere.
-                 *
-                 * On ne saute pas 43E3C a son entree. On attend qu'elle
-                 * ait initialise sa requete et soit effectivement entree
-                 * dans 80013700, puis on restaure le contexte d'entree
-                 * de 43E3C et on reprend au vrai RA du startup.
-                 *
-                 * C'est volontairement un FASTBOOT de bring-up : le but
-                 * est d'atteindre 8002DF60 et de provoquer enfin les
-                 * premieres commandes graphiques utiles du jeu.
-                 */
-                if (
-                    !g_fast43e_forced
-                    && !g_b32_43e_returned
-                    && g_fast401_forced
-                    && g_hit_intro_init != 0u
-                    && g_hit_load_wait != 0u
-                    && g_ra_43e3c != 0u
-                    && g_sp_43e3c != 0u
-                    && g_irq_exec_ok >= 8u
-                    /*
-                     * B32 laisse maintenant la vraie requete CD se
-                     * terminer. L'ancien fastboot n'est conserve qu'en
-                     * filet de securite si le bridge n'a jamais reussi
-                     * a fournir un secteur apres plusieurs secondes.
-                     */
-                    && g_b32_getsec_ok == 0u
-                    && frame >= (g_fast401_frame + 300u)
-                )
-                {
-                    cpu->pc = g_ra_43e3c;
-                    cpu->gpr[29] = g_sp_43e3c;
-                    cpu->gpr[31] = g_ra_43e3c;
-                    cpu->gpr[2] = 0u;
-                    cpu->gpr[0] = 0u;
-
-                    /* Sortir proprement de toute attente HLE en cours. */
-                    g_vsync_wait_active = 0;
-                    g_vsync_wait_until_frame = 0;
-
-                    g_fast43e_forced = 1u;
-                    g_fast43e_frame = frame;
-                }
-
-                /*
-                 * =====================================================
-                 * B15 DIRECT MAIN STATE MACHINE
-                 * =====================================================
-                 *
-                 * B14 a enfin fait apparaitre de vraies commandes DRAW
-                 * et COPY GPU, mais le startup n'appelle toujours pas
-                 * naturellement 8002DF60. On cesse d'attendre : apres
-                 * 43E3C, on initialise le flag attendu par le startup et
-                 * on pilote directement la vraie fonction 8002DF60.
-                 */
-                if (
-                    !g_direct2df_active
-                    &&
-                    (
-                        (
-                            g_fast43e_forced
-                            && frame >= (g_fast43e_frame + 2u)
-                        )
-                        ||
-                        (
-                            /*
-                             * En chemin naturel, laisser le startup
-                             * poursuivre seul. Direct-2DF ne redevient
-                             * qu'un fallback si 8002DF60 n'est toujours
-                             * jamais atteint deux secondes plus tard.
-                             */
-                            g_b32_43e_returned
-                            && g_hit_main_loop == 0u
-                            && frame >= (g_b32_43e_return_frame + 120u)
-                        )
-                    )
-                )
-                {
-                    fm_memory_write_byte(
-                        0x8009C60Du,
-                        8u
-                    );
-
-                    g_direct2df_active = 1u;
-                    g_direct2df_start_frame = frame;
-
-                    /*
-                     * Forcer le premier scheduling a la frame suivante.
-                     */
-                    cpu->pc = g_direct2df_sentinel;
-                    cpu->gpr[31] = g_direct2df_sentinel;
-                    cpu->gpr[0] = 0u;
-
-                    g_vsync_wait_active = 0;
-                    g_vsync_wait_until_frame = 0;
-                }
-            }
-        }
 
 
         /*
@@ -21407,14 +21907,13 @@ int main(void)
          */
         if (memory_status == 0)
         {
-            fm_service_fade_bridge();
+            fm_observe_fade();
 
             fm_update_game_state_debug();
 
             /*
-             * Des que le vrai boot atteint le lecteur STR, sauter
-             * uniquement la premiere video pour viser directement
-             * l'ecran titre/menu et obtenir une image jouable.
+             * Finish the first unsupported STR automatically. The SU
+             * title prompt then handles START through its normal update.
              */
             fm_try_force_intro_stream_end(
                 game_running
@@ -21505,12 +22004,31 @@ int main(void)
              * current 60 Hz budget. Do not idle until another VBlank; start
              * the next guest slice immediately.
              */
-            if (g_b105_work_ms < 16u)
+            int continue_budget = g_b84_budget_yields != perf_budget_before_loop
+                && !g_vsync_wait_active && !g_frame_wait_active;
+            /* Clock debt must not incur an additional host VBlank sleep,
+             * even when the guest is waiting on VSync/frame completion. */
+            continue_budget |= game_running && fm_host_clock_pending(&g_ps1_host_clock);
+            /* Recheck after guest/raster/presentation, not just before them. */
+            uint64_t clock_wait_ns=fm_host_clock_wait_ns(&g_ps1_host_clock,osGetTime());
+            continue_budget |= game_running && clock_wait_ns == 0u;
+            if (g_b105_work_ms < 16u && !continue_budget)
             {
+#if FM_PERF_PROFILE
+                g_perf_wait_reason = g_b84_budget_yields != perf_budget_before_loop
+                    ? (g_frame_wait_active ? 1u : 0u)
+                    : (g_vsync_wait_active || g_frame_wait_active) ? 1u : 2u;
+#endif
                 uint64_t b106_wait_start_ms =
                     osGetTime();
 
-                gspWaitForVBlank();
+                /* PS1 deadlines are independent of the GSP event phase.
+                 * A GSP wait here can miss a PS1 tick already due during the
+                 * guest slice and postpone both IRQs and VSync completion. */
+                if (game_running)
+                    svcSleepThread((s64)clock_wait_ns);
+                else
+                    gspWaitForVBlank();
 
                 g_b106_wait_ms =
                     (uint32_t)(
@@ -21522,7 +22040,11 @@ int main(void)
             else
             {
                 g_b106_wait_ms = 0u;
-                ++g_b13518_late_vblank_skips;
+#if FM_PERF_PROFILE
+                g_perf_wait_reason = 3u;
+#endif
+                if (continue_budget && g_b105_work_ms < 16u) ++g_budget_wait_skips;
+                else ++g_b13518_late_vblank_skips;
             }
         }
 
@@ -21554,6 +22076,30 @@ int main(void)
         {
             ++g_b110_loop_over33;
         }
+#if FM_PERF_PROFILE
+        uint64_t capture_now=osGetTime();
+        if(capture_this_loop && g_perf_capture.active) {
+            FMDmaDebugStats after={0};fm_memory_dma_debug(&after);
+            capture_row.end_pc=cpu?cpu->pc:0;capture_row.frame=frame;
+            capture_row.images=g_b84_latch_count;capture_row.running=game_running;
+            capture_row.pre_ms=perf_pre_ms;capture_row.render_ms=g_b105_render_ms;
+            capture_row.vblank_ms=g_b105_vblank_ms;capture_row.gfx_ms=g_b106_gfx_ms;
+            capture_row.wait_ms=g_b106_wait_ms;capture_row.loop_ms=g_b105_loop_ms;
+            capture_row.wait_reason=g_perf_wait_reason;
+            capture_row.dma_calls=after.dma2_linked_transfer_count-capture_dma_before.dma2_linked_transfer_count;
+            capture_row.dma_us=after.dma2_payload_us-capture_dma_before.dma2_payload_us;
+            capture_row.irq_calls=g_seq_irq_done-capture_irq_before;
+            capture_row.seq_ms=g_seq_irq_total_ms-capture_seq_before;
+            capture_row.vsyncs=g_b1358_vsync_completions-capture_vsync_before;
+            capture_row.native_probes=g_native_probe_calls-capture_native_before;
+            capture_row.cd_sectors=g_b32_getsec_calls-capture_cd_before;
+            capture_row.overlay_instructions=g_b91_fast_instructions-capture_overlay_before;
+            capture_row.clock_debt=g_ps1_host_clock.pending;
+            int completed=fm_capture_push(&g_perf_capture,capture_now,&capture_row);
+            fm_perf_window(capture_now,frame,perf_pre_ms,cpu);
+            if(completed)fm_perf_capture_finish();
+        } else if(!g_perf_capture.armed) fm_perf_window(capture_now,frame,perf_pre_ms,cpu);
+#endif
     }
 
 
@@ -21563,6 +22109,8 @@ int main(void)
      * ========================================================
      */
 
+    fm_audio_exit();
+    aptUnhook(&g_clock_apt_hook);
     fm_disc_close();
 
     free(vram);
