@@ -18,6 +18,7 @@ class FrameWaitTests(unittest.TestCase):
 #include <setjmp.h>
 #include "fm_frame_wait.h"
 #include "fm_runtime_shim.h"
+static int fm_model_walk_try(CPUState *cpu,uint32_t address) {(void)cpu;(void)address;return 0;}
 static const uint32_t code_words[6]={0x9383018C,0x8F820190,0,0x0043102A,0x1440FFFB,0};
 static uint32_t done, target, bad_word=99;
 static uint32_t read_word(uint32_t a) {

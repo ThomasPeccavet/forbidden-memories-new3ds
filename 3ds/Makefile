@@ -129,6 +129,7 @@ OBJECTS := \
 	$(BUILD)/fm_spu.o \
 	$(BUILD)/fm_runtime_shim.o \
 	$(BUILD)/fm_sort_swap.o \
+	$(BUILD)/fm_model_walk.o \
 	$(BUILD)/fm_interp.o \
 	$(BUILD)/fm_gpu.o \
 	$(BUILD)/gpu_sw_renderer.o \

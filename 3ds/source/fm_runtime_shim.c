@@ -3,6 +3,7 @@
 #include "fm_native_batch.h"
 #include "fm_sort_swap.h"
 #include "fm_geometry_cache.h"
+#include "fm_model_walk.h"
 #include <3ds.h>
 #include "fm_runtime_shim.h"
 #include "fm_memory.h"
@@ -773,7 +774,7 @@ FMRuntimeProbeResult fm_runtime_probe(
 
     if (jumped == 0)
     {
-        int dispatched =
+        int dispatched = fm_model_walk_try(cpu, addr) ? 1 :
             psx_dispatch_game_compiled(
                 cpu,
                 addr
@@ -953,7 +954,7 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
             if (dispatched_count && (dispatched_count & 3u)==0u
                 && osGetTime()-batch_start_ms>=2u) break;
 
-            last_dispatch =
+            last_dispatch = fm_model_walk_try(cpu, current) ? 1 :
                 psx_dispatch_game_compiled(
                     cpu,
                     current
@@ -1453,6 +1454,12 @@ void psx_check_interrupts_dispatch_entry(
     uint32_t phys =
         resume_pc & 0x1FFFFFFFu;
 
+    /* A generated direct call must leave its host stack before handing the
+     * primitive callback to the dispatcher. The guest stack is already valid. */
+    if (g_probe_armed && fm_model_walk_try(cpu, resume_pc)) {
+        fm_probe_stop(FM_STOP_BUDGET, cpu->pc);
+        return;
+    }
     /* Escape before the native prologue for a direct generated VLC call.
      * Failed translations are transactional and continue through native code. */
     if (g_probe_armed && phys == 0x000914A8u && fm_vlc_try(cpu)) {

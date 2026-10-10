@@ -20,6 +20,10 @@ static int g_probe_reason,g_probe_armed;
 static jmp_buf g_probe_jmp;
 static uint64_t now;
 static unsigned calls,scenario;
+static int fm_model_walk_try(CPUState *cpu,uint32_t address) {
+ if(scenario==6 && address==0x8008a0d8u){cpu->pc=0x80153070u;return 1;}
+ return 0;
+}
 static uint64_t osGetTime(void){return now;}
 static int psx_dispatch_game_compiled(CPUState *cpu,uint32_t current){
  ++calls;++g_probe_checks;
@@ -74,6 +78,8 @@ int main(void){
  assert(count==3 && calls==3 && r.reason==FM_STOP_RETURNED && r.pc==0x80042538);
  /* Re-entering the diagnostic/safety boundary must never execute it. */
  r=run(&cpu,64,&count);assert(count==0 && calls==0 && r.pc==0x80042538);
+ scenario=6;cpu.pc=0x8008a0d8;r=run(&cpu,16,&count);
+ assert(count==1 && calls==0 && r.pc==0x80153070 && r.dispatch_result==1);
  return 0;
 }'''
   with tempfile.TemporaryDirectory() as tmp:
