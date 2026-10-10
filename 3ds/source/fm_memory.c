@@ -4,6 +4,7 @@
 #include "fm_gpu.h"
 #include "mdec.h"
 #include "fm_media.h"
+#include "fm_spu.h"
 
 #include <3ds.h>
 #include <stddef.h>
@@ -102,7 +103,7 @@
 #define PSX_DMA_DICR        0x1F8010F4u
 
 /*
- * Minimal SPU MMIO needed by Psy-Q transfer setup.
+ * SPU MMIO and transfer-status compatibility needed by Psy-Q transfer setup.
  * Base 1F801C00; only a few control/status registers are modeled.
  */
 #define PSX_SPU_BASE        0x1F801C00u
@@ -2410,13 +2411,11 @@ static void fm_dma2_try_start(void)
 
 /*
  * ============================================================
- * DMA4 SPU - minimal completion bridge
+ * DMA4 SPU - synchronous sample transfer and completion
  * ============================================================
  *
- * SPU sample RAM/audio are not emulated yet.  For bring-up, retain the
- * hardware-visible DMA semantics the game waits on: START clears, DICR
- * channel-4 completion is latched, and one completion token is exposed
- * to the BIOS event bridge.
+ * Data reaches SPU RAM before START/DICR and the BIOS completion token
+ * are published. The established IRQ timing remains synchronous.
  */
 static void fm_dma4_complete(void)
 {
@@ -2444,10 +2443,26 @@ static void fm_dma4_try_start(void)
         return;
     }
 
-    /*
-     * Transfer payload is intentionally not rendered into SPU RAM yet.
-     * The current game path only requires completion/liveness.
-     */
+    /* DMA4 copies actual sample data before exposing completion.  Keep MADR
+     * at its programmed value, as the existing synchronous bus contract does. */
+    uint64_t words=g_dma4_bcr&0xffffu;
+    unsigned sync=(g_dma4_chcr>>9)&3u;
+    if (!words) words=0x10000u;
+    if (sync==1u) words*=((g_dma4_bcr>>16) ? (g_dma4_bcr>>16) : 0x10000u);
+    /* Invalid oversized requests must not hang the host. */
+    if (words>PSX_RAM_SIZE/4u) words=PSX_RAM_SIZE/4u;
+    uint32_t address=g_dma4_madr&0x1ffffcu;
+    for (uint32_t n=0;n<(uint32_t)words && g_ram_size>=PSX_RAM_SIZE;++n) {
+        if (g_dma4_chcr&1u) {
+            fm_spu_transfer_write((uint16_t)(g_ram[address]|((uint16_t)g_ram[address+1u]<<8)));
+            fm_spu_transfer_write((uint16_t)(g_ram[address+2u]|((uint16_t)g_ram[address+3u]<<8)));
+        } else {
+            uint16_t lo=fm_spu_transfer_read(),hi=fm_spu_transfer_read();
+            g_ram[address]=(uint8_t)lo;g_ram[address+1u]=(uint8_t)(lo>>8);
+            g_ram[address+2u]=(uint8_t)hi;g_ram[address+3u]=(uint8_t)(hi>>8);
+        }
+        address=(address+((g_dma4_chcr&2u)?-4u:4u))&0x1ffffcu;
+    }
     fm_dma4_complete();
 }
 
@@ -3317,6 +3332,7 @@ void fm_memory_init(
     g_dma4_last_bcr_write = 0u;
     g_dma4_last_chcr_write = 0u;
 
+    fm_spu_reset();
     g_spu_xfer_addr = 0u;
     g_spu_xfer_data = 0u;
     g_spu_ctrl = 0u;
@@ -3496,6 +3512,8 @@ uint8_t fm_memory_read_byte(
         return g_scratch[phys - PSX_SCRATCH_BASE];
     }
 
+    if (phys >= PSX_SPU_BASE && phys < PSX_SPU_BASE+0x280u)
+        return (uint8_t)(fm_spu_read_half(phys&~1u)>>((phys&1u)*8u));
     if (phys >= PSX_SPU_REVERB_MASK && phys < PSX_SPU_REVERB_MASK + 4u)
         return (uint8_t)(g_spu_reverb_mask >> ((phys - PSX_SPU_REVERB_MASK) * 8u));
     if (phys >= 0x1F801800u && phys < 0x1F801804u) return fm_media_cd_read(phys);
@@ -3690,6 +3708,14 @@ void fm_memory_write_byte(
         unsigned shift = (phys - PSX_SPU_REVERB_MASK) * 8u;
         g_spu_reverb_mask = ((g_spu_reverb_mask & ~(0xFFu << shift))
             | ((uint32_t)value << shift)) & 0x00FFFFFFu;
+        fm_spu_reg_write(PSX_SPU_REVERB_MASK,(uint16_t)g_spu_reverb_mask);
+        fm_spu_reg_write(PSX_SPU_REVERB_MASK+2u,(uint16_t)(g_spu_reverb_mask>>16));
+        return;
+    }
+    if(phys>=PSX_SPU_BASE && phys<PSX_SPU_BASE+0x280u) {
+        unsigned shift=(phys&1u)*8u;
+        uint16_t old=fm_spu_read_half(phys&~1u);
+        fm_spu_write_half(phys&~1u,(uint16_t)((old&~(0xffu<<shift))|((uint16_t)value<<shift)));
         return;
     }
     if (phys >= 0x1F801800u && phys < 0x1F801804u) { fm_media_cd_write(phys, value); return; }
@@ -3834,17 +3860,7 @@ uint16_t fm_memory_read_half(
         return fm_ram_load16(g_scratch + phys - PSX_SCRATCH_BASE);
     }
 
-    if (
-        phys == PSX_SPU_REVERB_MASK
-        || phys == PSX_SPU_REVERB_MASK + 2u
-        || phys == PSX_SPU_XFER_ADDR
-        ||
-        phys == PSX_SPU_XFER_DATA
-        ||
-        phys == PSX_SPU_CTRL
-        ||
-        phys == PSX_SPU_STAT
-    )
+    if (phys >= PSX_SPU_BASE && phys < PSX_SPU_BASE + 0x280u)
     {
         return fm_spu_read_half(phys);
     }
@@ -4091,14 +4107,7 @@ void fm_memory_write_half(
     }
 
     /* Psy-Q programs these 16-bit registers with SH, not only SW. */
-    if (
-        phys == PSX_SPU_REVERB_MASK
-        || phys == PSX_SPU_REVERB_MASK + 2u
-        || phys == PSX_SPU_XFER_ADDR
-        || phys == PSX_SPU_XFER_DATA
-        || phys == PSX_SPU_CTRL
-        || phys == PSX_SPU_STAT
-    )
+    if (phys >= PSX_SPU_BASE && phys < PSX_SPU_BASE + 0x280u)
     {
         fm_spu_write_half(phys, value);
         return;
@@ -4289,7 +4298,7 @@ void fm_memory_write_half(
 
 /*
  * ============================================================
- * Minimal SPU MMIO
+ * SPU MMIO and transfer-status compatibility
  * ============================================================
  *
  * Psy-Q SPU transfer code used by Forbidden Memories polls:
@@ -4297,27 +4306,20 @@ void fm_memory_write_half(
  *   1F801DAA control bits 0x30
  *   1F801DAE status bit 0x400 / low 11 bits
  *
- * We do not render audio here.  We mirror the control transfer mode into
- * status sufficiently for the library's bounded wait loops to observe the
- * hardware as ready.
+ * Voice registers and sample RAM live in fm_spu.c. Preserve the established
+ * immediate transfer-status mirror used by the library bounded waits.
  */
 static uint16_t fm_spu_read_half(uint32_t phys)
 {
-    switch (phys)
-    {
-        case PSX_SPU_REVERB_MASK: return (uint16_t)g_spu_reverb_mask;
-        case PSX_SPU_REVERB_MASK + 2u: return (uint16_t)(g_spu_reverb_mask >> 16);
-        case PSX_SPU_XFER_ADDR: return g_spu_xfer_addr;
-        case PSX_SPU_XFER_DATA: return g_spu_xfer_data;
-        case PSX_SPU_CTRL:      return g_spu_ctrl;
-        case PSX_SPU_STAT:      return g_spu_stat;
-        default:                return 0u;
-    }
+    if (phys==PSX_SPU_XFER_DATA) return g_spu_xfer_data;
+    if (phys==PSX_SPU_STAT) return g_spu_stat;
+    return fm_spu_reg_read(phys);
 }
 
 
 static void fm_spu_write_half(uint32_t phys, uint16_t value)
 {
+    fm_spu_reg_write(phys,value);
     switch (phys)
     {
         /* B136.29: SpuSetReverbVoice polls this 24-bit read/write mask.
@@ -4446,29 +4448,8 @@ uint32_t fm_memory_read_word(
     }
 
 
-    /*
-     * SPU packed word reads (two adjacent 16-bit registers).
-     */
-    if (phys == PSX_SPU_REVERB_MASK) return g_spu_reverb_mask;
-
-    if (phys == 0x1F801DA4u)
-    {
-        return
-            (uint32_t)fm_spu_read_half(PSX_SPU_XFER_ADDR) << 16;
-    }
-
-    if (phys == 0x1F801DA8u)
-    {
-        return
-            (uint32_t)fm_spu_read_half(PSX_SPU_XFER_DATA)
-            |
-            ((uint32_t)fm_spu_read_half(PSX_SPU_CTRL) << 16);
-    }
-
-    if (phys == 0x1F801DACu)
-    {
-        return
-            (uint32_t)fm_spu_read_half(PSX_SPU_STAT) << 16;
+    if (phys >= PSX_SPU_BASE && phys < PSX_SPU_BASE + 0x280u) {
+        return fm_spu_read_half(phys) | ((uint32_t)fm_spu_read_half(phys+2u)<<16);
     }
 
     /*
@@ -4770,30 +4751,9 @@ void fm_memory_write_word(
     }
 
 
-    /*
-     * SPU packed word writes (two adjacent 16-bit registers).
-     */
-    if (phys == PSX_SPU_REVERB_MASK) {
-        g_spu_reverb_mask = value & 0x00FFFFFFu;
-        return;
-    }
-
-    if (phys == 0x1F801DA4u)
-    {
-        fm_spu_write_half(PSX_SPU_XFER_ADDR, (uint16_t)(value >> 16));
-        return;
-    }
-
-    if (phys == 0x1F801DA8u)
-    {
-        fm_spu_write_half(PSX_SPU_XFER_DATA, (uint16_t)value);
-        fm_spu_write_half(PSX_SPU_CTRL, (uint16_t)(value >> 16));
-        return;
-    }
-
-    if (phys == 0x1F801DACu)
-    {
-        return;
+    if (phys >= PSX_SPU_BASE && phys < PSX_SPU_BASE + 0x280u) {
+        fm_spu_write_half(phys,(uint16_t)value);
+        fm_spu_write_half(phys+2u,(uint16_t)(value>>16));return;
     }
 
     /*
@@ -5588,6 +5548,10 @@ void fm_memory_quick_load(
     g_spu_ctrl = in->spu_ctrl;
     g_spu_stat = in->spu_stat;
     g_spu_reverb_mask = in->spu_reverb_mask & 0x00FFFFFFu;
+    fm_spu_reg_write(PSX_SPU_REVERB_MASK,(uint16_t)g_spu_reverb_mask);
+    fm_spu_reg_write(PSX_SPU_REVERB_MASK+2u,(uint16_t)(g_spu_reverb_mask>>16));
+    fm_spu_reg_write(PSX_SPU_XFER_ADDR,g_spu_xfer_addr);
+    fm_spu_reg_write(PSX_SPU_CTRL,g_spu_ctrl);
 
     /*
      * La table de detection de boucle DMA est purement host/debug.

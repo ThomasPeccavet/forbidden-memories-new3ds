@@ -19,3 +19,7 @@ typedef struct FMAudioSnapshot {
 void fm_audio_snapshot_save(FMAudioSnapshot *out);
 int fm_audio_snapshot_valid(const FMAudioSnapshot *in);
 void fm_audio_snapshot_load(const FMAudioSnapshot *in);
+
+/* Independent SPU PCM stream; never changes the XA channel's sample rate. */
+int fm_audio_spu_push(const int16_t *pcm, unsigned frames);
+void fm_audio_spu_reset(void);

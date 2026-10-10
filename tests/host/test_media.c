@@ -17,23 +17,26 @@ void fm_gpu_b13532_profile_reset(void) { assert(0); }
 static int dsp_fail, paused;
 static unsigned queued, clears, flush_bytes;
 static float audio_rate;
-static ndspWaveBuf *audio_queue[256];
+static ndspWaveBuf *audio_queue[256], *spu_queue[4];
+static unsigned spu_queued;
+static float spu_rate;
 int32_t ndspInit(void) { return dsp_fail ? -123 : 0; }
 void ndspExit(void) {}
 void *linearAlloc(size_t n) { return malloc(n); }
 void linearFree(void *p) { free(p); }
 void ndspSetOutputMode(int mode) { assert(mode == NDSP_OUTPUT_STEREO); }
-void ndspChnReset(int ch) { assert(ch == 0); }
-void ndspChnSetFormat(int ch, unsigned format) { assert(ch == 0 && format == NDSP_FORMAT_STEREO_PCM16); }
-void ndspChnSetInterp(int ch, int interp) { assert(ch == 0 && interp == NDSP_INTERP_POLYPHASE); }
-void ndspChnSetMix(int ch, float mix[12]) { assert(ch == 0 && mix[0] == 1 && mix[1] == 1); }
-void ndspChnSetRate(int ch, float rate) { assert(ch == 0); audio_rate = rate; }
-void ndspChnWaveBufClear(int ch) { assert(ch == 0); ++clears;
+void ndspChnReset(int ch) { assert(ch == 0 || ch == 1); }
+void ndspChnSetFormat(int ch, unsigned format) { assert((ch == 0 || ch == 1) && format == NDSP_FORMAT_STEREO_PCM16); }
+void ndspChnSetInterp(int ch, int interp) { assert((ch == 0 || ch == 1) && interp == NDSP_INTERP_POLYPHASE); }
+void ndspChnSetMix(int ch, float mix[12]) { assert((ch == 0 || ch == 1) && mix[0] == 1 && mix[1] == 1); }
+void ndspChnSetRate(int ch, float rate) { assert(ch == 0 || ch == 1); if(ch==0) audio_rate = rate; else spu_rate=rate; }
+void ndspChnWaveBufClear(int ch) { assert(ch == 0 || ch == 1); if(ch==1) {for(unsigned i=0;i<spu_queued;++i) spu_queue[i]->status=NDSP_WBUF_FREE;spu_queued=0;return;}
+    ++clears;
     for (unsigned i = 0; i < queued; ++i) audio_queue[i]->status = NDSP_WBUF_FREE;
     queued = 0; }
-void ndspChnWaveBufAdd(int ch, ndspWaveBuf *w) { assert(ch == 0 && queued < 256);
-    w->status = NDSP_WBUF_QUEUED; audio_queue[queued++] = w; }
-void ndspChnSetPaused(int ch, bool p) { assert(ch == 0); paused = p; }
+void ndspChnWaveBufAdd(int ch, ndspWaveBuf *w) { assert((ch == 0 || ch == 1) && queued < 256);
+    w->status = NDSP_WBUF_QUEUED; if(ch==1) {assert(spu_queued<4);spu_queue[spu_queued++]=w;} else audio_queue[queued++] = w; }
+void ndspChnSetPaused(int ch, bool p) { assert(ch == 0 || ch == 1); paused = p; }
 void DSP_FlushDataCache(void *p, uint32_t size) { assert(p); flush_bytes = size; }
 static uint8_t ram[2 * 1024 * 1024];
 static uint8_t raw[2352];
@@ -98,6 +101,12 @@ static void audio_test(void)
     fm_audio_pause(1); assert(paused); fm_audio_pause(0); assert(!paused);
     unsigned old_clears = clears; fm_audio_reset(); assert(clears > old_clears);
     assert(fm_audio_push(pcm, 4032, 18900) && audio_rate == 18900);
+    unsigned xa_count=queued;float xa_rate=audio_rate;
+    for(unsigned i=0;i<4;++i) assert(fm_audio_spu_push(pcm,735));
+    assert(!fm_audio_spu_push(pcm,735));assert(spu_rate==44100 && queued==xa_count && audio_rate==xa_rate);
+    assert(((int16_t *)spu_queue[0]->data_vaddr)[0]==0x1212);
+    fm_audio_spu_reset();assert(!spu_queued && queued==xa_count);
+    assert(fm_audio_spu_push(pcm,735));fm_audio_reset();assert(spu_queued==1);
     fm_audio_exit(); dsp_fail = 1;
     assert(fm_audio_init() == -1 && fm_audio_status() == -123);
     assert(fm_audio_ready() && fm_audio_push(pcm, 2016, 37800));

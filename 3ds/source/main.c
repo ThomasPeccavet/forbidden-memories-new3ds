@@ -36,6 +36,7 @@
 #include "fm_media.h"
 #include "fm_vlc.h"
 #include "fm_audio.h"
+#include "fm_spu.h"
 #include "fm_mdec_clock.h"
 #include "mdec.h"
 
@@ -7135,7 +7136,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         /* A single stdio buffer avoids small writes per formatted line. */
         char report_buffer[8192];
         setvbuf(fp, report_buffer, _IOFBF, sizeof(report_buffer));
-        fprintf(fp, "probe=B136.56 window_ms=%llu pc=%08lX script=%04lX\n",
+        fprintf(fp, "probe=B136.57 window_ms=%llu pc=%08lX script=%04lX\n",
             (unsigned long long)elapsed, (unsigned long)(cpu ? cpu->pc : 0u),
             (unsigned long)fm_memory_read_half(0x8009C610u));
         fprintf(fp, "host_fps_x100=%llu new_images_fps_x100=%llu samples=%lu\n",
@@ -11970,7 +11971,7 @@ static void fm_snapshot_status(const char *action,int result,int legacy)
 {
     FILE *f=fopen("sdmc:/3ds/fm-new3ds/snapshot-status.txt","w");
     if (!f) return;
-    fprintf(f,"probe=B136.56 action=%s result=%d format=%s\n"
+    fprintf(f,"probe=B136.57 action=%s result=%d format=%s\n"
         "0=success 1=deferred -7=unsafe_legacy -8=invalid_state\n",
         action,result,legacy ? "v3-partial" : "v4");
     fclose(f);
@@ -12274,7 +12275,7 @@ static int fm_b135_quick_save(
     uint32_t fixed=sizeof(state)+FM_B135_QS_RAM_SIZE+2u*FM_B135_QS_VRAM_WORDS;
     uint32_t mdec_bytes=mdec_snapshot_bytes();
     if (mdec_bytes>FM_SNAPSHOT_MAX-fixed-sizeof(FMQuickExtension)) return -6;
-    uint32_t total=fixed+sizeof(FMQuickExtension)+mdec_bytes;
+    uint32_t total=fixed+sizeof(FMQuickExtension)+mdec_bytes+fm_spu_snapshot_bytes();
     uint8_t *blob=malloc(total); if (!blob) return -6;
     memcpy(blob,&state,sizeof(state)); memcpy(blob+sizeof(state),ram,FM_B135_QS_RAM_SIZE);
     memcpy(blob+sizeof(state)+FM_B135_QS_RAM_SIZE,vram,2u*FM_B135_QS_VRAM_WORDS);
@@ -12282,7 +12283,8 @@ static int fm_b135_quick_save(
     memset(ext,0,sizeof(*ext)); ext->extension_bytes=sizeof(*ext); ext->mdec_bytes=mdec_bytes;
     fm_audio_pause(1); fm_snapshot_host_save(ext);
     mdec_snapshot_write(blob+fixed+sizeof(*ext));
-    int result=fm_snapshot_write(FM_B135_QS_PATH,blob,total,fm_snapshot_schema(),disc,13656u);
+    fm_spu_snapshot_write(blob+fixed+sizeof(*ext)+mdec_bytes);
+    int result=fm_snapshot_write(FM_B135_QS_PATH,blob,total,fm_snapshot_schema(),disc,13657u);
     free(blob); fm_audio_pause(0);
     /* File I/O is an explicit pause, never clock/CD transport catch-up debt. */
     fm_host_clock_reset(&g_ps1_host_clock); g_cd_stream_last_ms=osGetTime();
@@ -12313,6 +12315,7 @@ static int fm_b135_quick_load(
     if (bytes<fixed) { free(blob); fm_snapshot_status("load",-8,legacy); return -8; }
     FMB135QuickStateHeader state; memcpy(&state,blob,sizeof(state));
     FMQuickExtension *ext=NULL;
+    const void *spu_blob=NULL;
     if (!fm_snapshot_header_valid(&state) || state.version!=(legacy ? 3u : 4u)) goto invalid;
     if (legacy) {
         const uint8_t *saved_ram=blob+sizeof(state);
@@ -12327,12 +12330,17 @@ static int fm_b135_quick_load(
         if (bytes<fixed+sizeof(FMQuickExtension)) goto invalid;
         ext=(FMQuickExtension *)(blob+fixed);
         if (ext->extension_bytes!=sizeof(*ext)
-            || ext->mdec_bytes!=bytes-fixed-sizeof(*ext)
+            || ext->mdec_bytes>bytes-fixed-sizeof(*ext)
             || ext->g_cd_pos>2048 || ext->g_cd_lba>449849u
             || ext->g_cd_stream_fraction>=1000 || ext->g_b33_pending>1
             || ext->g_b34_ready_pending>1 || ext->g_vblank_deferred>1
             || !fm_memory_async_valid(&ext->async) || !fm_media_snapshot_valid(&ext->media)
             || !fm_audio_snapshot_valid(&ext->audio)) goto invalid;
+        uint32_t tail=bytes-fixed-sizeof(*ext)-ext->mdec_bytes;
+        if(tail) {
+            spu_blob=blob+fixed+sizeof(*ext)+ext->mdec_bytes;
+            if(!fm_spu_snapshot_valid(spu_blob,tail)) goto invalid;
+        }
         /* The decoder stages its allocations/parse. Failure preserves its
          * live FIFOs too, before RAM/MMIO/CPU or the CD are touched. */
         uint64_t old_frame=fm_mdec_host_frame,old_cycles=fm_mdec_host_cycles;
@@ -12343,6 +12351,7 @@ static int fm_b135_quick_load(
     }
     /* No fallible operations beyond this point: commit all subsystems. */
     fm_audio_pause(1); fm_cd_hle_reset();
+    if(!spu_blob) fm_spu_reset();
     if (legacy) mdec_init();
     memcpy(ram,blob+sizeof(state),FM_B135_QS_RAM_SIZE);
     memcpy(vram,blob+sizeof(state)+FM_B135_QS_RAM_SIZE,2u*FM_B135_QS_VRAM_WORDS);
@@ -12396,6 +12405,8 @@ static int fm_b135_quick_load(
         g_cd_lba=state.cpu.pc ? fm_memory_read_word(0x800EB1DCu) : 0u;
         g_b81_pending_mask=g_b81_cleanup_mask=0u;
     }
+    if(spu_blob) fm_spu_snapshot_load(spu_blob);
+    fm_audio_spu_reset();
     g_snapshot_save_requested=0u;
     fm_mdec_host_frame=state.frame; fm_mdec_host_cycles=(uint64_t)state.frame*677376u;
     free(blob); fm_audio_pause(0); fm_snapshot_status("load",0,legacy);
@@ -12813,6 +12824,12 @@ int main(void)
         0;
 
     fm_audio_init();
+    FILE *audio_status=fopen("sdmc:/3ds/fm-new3ds/audio-status.txt","w");
+    if(audio_status) {
+        fprintf(audio_status,"probe=B136.57 dsp=%08lX spu=24-voices rate=44100 xa_channel=0 spu_channel=1\n",(unsigned long)(uint32_t)fm_audio_status());
+        if((uint32_t)fm_audio_status()==0xD880A7FAu) fprintf(audio_status,"missing DSP component: sdmc:/3ds/dspfirm.cdc (or hb:ndsp)\n");
+        fclose(audio_status);
+    }
     fm_cd_hle_reset();
 
 
@@ -13756,6 +13773,11 @@ int main(void)
             }
 
 
+            if (game_running && memory_status==0) {
+                static int16_t spu_pcm[FM_SPU_FRAME_SAMPLES*2u];
+                fm_spu_render(spu_pcm,FM_SPU_FRAME_SAMPLES);
+                fm_audio_spu_push(spu_pcm,FM_SPU_FRAME_SAMPLES);
+            }
         } /* wall-clock VBlank ticks */
         fm_mdec_host_frame = frame;
         fm_mdec_host_cycles = (uint64_t)frame * 677376u;
@@ -20941,7 +20963,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.56\nvideo_mode=%08lX\n"
+                            "video_probe=B136.57\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -21009,7 +21031,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.56\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.57\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"

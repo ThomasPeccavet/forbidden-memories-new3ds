@@ -18,7 +18,7 @@ class MediaHostTests(unittest.TestCase):
             raise unittest.SkipTest("Host C compiler required")
         cls.temp = tempfile.TemporaryDirectory()
         cls.binary = Path(cls.temp.name) / "media"
-        sources = ["fm_memory", "fm_mdec", "fm_media", "fm_vlc", "fm_xa", "fm_audio", "disc"]
+        sources = ["fm_memory","fm_spu", "fm_mdec", "fm_media", "fm_vlc", "fm_xa", "fm_audio", "disc"]
         cmd = cc + ["-std=gnu11", "-O2", "-Wall", "-Werror=implicit-function-declaration",
                     "-DPSX_NO_DEBUG_TOOLS", "-I", str(ROOT / "tests/host/include"),
                     "-I", str(ROOT / "3ds/include")]

@@ -126,6 +126,7 @@ OBJECTS := \
 	$(BUILD)/fm_mdec.o \
 	$(BUILD)/fm_cpu.o \
 	$(BUILD)/fm_memory.o \
+	$(BUILD)/fm_spu.o \
 	$(BUILD)/fm_runtime_shim.o \
 	$(BUILD)/fm_sort_swap.o \
 	$(BUILD)/fm_interp.o \

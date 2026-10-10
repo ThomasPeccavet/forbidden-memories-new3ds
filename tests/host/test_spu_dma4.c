@@ -1,4 +1,5 @@
 #include "fm_memory.h"
+#include "fm_spu.h"
 #include "fm_native_memory.h"
 #include "fm_sort_swap.h"
 #include "fm_gpu.h"
@@ -482,6 +483,22 @@ static void dma_partial(void)
     assert(fm_memory_dma4_take_completion() == 0);
 }
 
+static void dma_payload(void)
+{
+    for(unsigned n=0;n<64;++n) ram[0x200+n]=(uint8_t)(n*3u);
+    fm_memory_write_half(0x1f801da6,0xffff);
+    fm_memory_write_word(MADR,0x200);fm_memory_write_word(BCR,0x10010);
+    fm_memory_write_word(CHCR,0x01000201);
+    assert(fm_memory_dma4_take_completion()==1);
+    fm_memory_write_half(0x1f801da6,0xffff);
+    for(unsigned n=0;n<32;++n) assert(fm_spu_transfer_read()==(uint16_t)(ram[0x200+2*n]|((uint16_t)ram[0x201+2*n]<<8)));
+    fm_memory_write_half(0x1f801da6,0xffff);
+    fm_memory_write_word(MADR,0x400);fm_memory_write_word(BCR,0x10010);
+    fm_memory_write_word(CHCR,0x01000200);
+    assert(!memcmp(ram+0x200,ram+0x400,64));
+    assert(fm_memory_dma4_take_completion()==1);
+}
+
 static void dma_completion(void)
 {
     /* Exercise existing synchronous bring-up semantics, not full SPU DMA. */
@@ -537,6 +554,7 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "native_reverb_poll")) native_reverb_poll();
     else if (!strcmp(argv[1], "timer2_clock")) timer2_clock();
     else if (!strcmp(argv[1], "dma_partial")) dma_partial();
+    else if (!strcmp(argv[1], "dma_payload")) dma_payload();
     else if (!strcmp(argv[1], "dma_completion")) dma_completion();
     else if (!strcmp(argv[1], "reset")) reset();
     else return 2;

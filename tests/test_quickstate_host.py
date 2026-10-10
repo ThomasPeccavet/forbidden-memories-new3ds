@@ -20,6 +20,7 @@ class QuickStateTests(unittest.TestCase):
         fixture=str(ROOT/"tests/host/test_media.c")
         harness=r'''
 #include "fm_snapshot.h"
+#include "fm_spu.h"
 #include "fm_gpu.h"
 #include "fm_runtime_shim.h"
 #include "fm_host_clock.h"
@@ -68,6 +69,16 @@ int main(void) {
     assert(!fm_snapshot_read(FM_B135_QS_PATH,&blob,&bytes,fm_snapshot_schema(),123,&legacy));
     unsigned fixed=sizeof(FMB135QuickStateHeader)+sizeof(ram)+sizeof(vram);
     FMQuickExtension *ext=(FMQuickExtension *)((uint8_t *)blob+fixed);
+    /* B136.56 v4 files have no SPU tail; preserve their import path. */
+    unsigned old_bytes=bytes-fm_spu_snapshot_bytes();
+    assert(!fm_snapshot_write(FM_B135_QS_PATH,blob,old_bytes,fm_snapshot_schema(),123,13656));
+    assert(!fm_b135_quick_load(&cpu,ram,vram,&frame,&dispatch));
+    /* A malformed SPU tail is rejected before CD/CPU/RAM are committed. */
+    uint8_t *spu=(uint8_t *)blob+old_bytes;spu[0]^=1;
+    assert(!fm_snapshot_write(FM_B135_QS_PATH,blob,bytes,fm_snapshot_schema(),123,13657));
+    unsigned before=reset_calls;
+    assert(fm_b135_quick_load(&cpu,ram,vram,&frame,&dispatch)==-8 && reset_calls==before);
+    spu[0]^=1;
     uint8_t *decoder=(uint8_t *)blob+fixed+sizeof(*ext); decoder[62]=255;
     assert(!fm_snapshot_write(FM_B135_QS_PATH,blob,bytes,fm_snapshot_schema(),123,13656));
     unsigned previous=reset_calls; g_cd_lba=222;
@@ -90,7 +101,7 @@ int main(void) {
 '''
         with tempfile.TemporaryDirectory() as temp:
             c=Path(temp)/"test.c"; c.write_text(harness); exe=Path(temp)/"test"
-            sources=["fm_memory","fm_mdec","fm_media","fm_vlc","fm_xa","fm_audio","disc","fm_snapshot"]
+            sources=["fm_memory","fm_spu","fm_mdec","fm_media","fm_vlc","fm_xa","fm_audio","disc","fm_snapshot"]
             cmd=["cc","-std=gnu11","-O2","-Wall","-Werror=implicit-function-declaration","-DPSX_NO_DEBUG_TOOLS",
                 "-I",str(ROOT/"tests/host/include"),"-I",str(ROOT/"3ds/include"),str(c)]
             cmd+=[str(ROOT/f"3ds/source/{s}.c") for s in sources]+["-o",str(exe)]

@@ -30,6 +30,7 @@ class SpuDma4HostTests(unittest.TestCase):
                     "-I", str(ROOT / "tests/host/include"),
                     "-I", str(ROOT / "3ds/include"),
                     str(ROOT / "3ds/source/fm_memory.c"),
+                    str(ROOT / "3ds/source/fm_spu.c"),
                     str(ROOT / "3ds/source/fm_sort_swap.c"),
                     str(ROOT / "3ds/source/fm_mdec.c"),
                     str(ROOT / "3ds/source/fm_interp.c"),
@@ -42,7 +43,7 @@ class SpuDma4HostTests(unittest.TestCase):
                 result = subprocess.run(cmd, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 for case in ("sort_swap", "native_ram_fast", "scratch_fast", "interp_ram_fast", "ram_fast", "spu_half", "spu_word", "reverb_mask", "native_reverb_poll",
-                             "timer2_clock", "dma_partial", "dma_completion", "reset"):
+                             "timer2_clock", "dma_partial", "dma_completion", "dma_payload", "reset"):
                     with self.subTest(profile=profile, cycles=cycles, case=case):
                         result = subprocess.run([str(binary), case], capture_output=True, text=True, cwd=temp)
                         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

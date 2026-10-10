@@ -45,6 +45,7 @@ jobs:
             build-profile/fm_mdec.o \
             build-profile/fm_cpu.o \
             build-profile/fm_memory.o \
+            build-profile/fm_spu.o \
             build-profile/fm_runtime_shim.o \
             build-profile/fm_sort_swap.o \
             build-profile/fm_interp.o \
