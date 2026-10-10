@@ -111,7 +111,7 @@ static void volume(uint16_t reg,int32_t *level,uint32_t *counter) {
 }
 static void decode(unsigned i) {
     static const int coef[5][2]={{0,0},{60,0},{115,-52},{98,-55},{122,-60}};
-    Voice *v=&s.voice[i];uint32_t address=v->address&~15u;
+    Voice *v=&s.voice[i];uint32_t address=v->address&RAM_MASK;
     unsigned h=s.ram[address],shift=h&15u,filter=h>>4;
     if(shift>12u) shift=9;
     if(filter>4u) filter=0;
