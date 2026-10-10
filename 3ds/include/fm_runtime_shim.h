@@ -380,3 +380,6 @@ int fm_runtime_take_timer_callback(uint32_t *callback);
 
 /* Enable only around a main-thread probe; isolated callbacks stay unchanged. */
 void fm_runtime_frame_wait_scope(CPUState *cpu);
+
+/* Exact geometry cache diagnostics; host-only and absent from snapshots. */
+void fm_runtime_geometry_cache_stats(uint64_t out[3]);

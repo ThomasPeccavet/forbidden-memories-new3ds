@@ -2,6 +2,7 @@
 #include "fm_frame_wait.h"
 #include "fm_native_batch.h"
 #include "fm_sort_swap.h"
+#include "fm_geometry_cache.h"
 #include <3ds.h>
 #include "fm_runtime_shim.h"
 #include "fm_memory.h"
@@ -3635,7 +3636,75 @@ int psx_vsync_query_hle_try(
  * Cette logique reprend la semantique O(1) du PSXRecomp epingle par le projet,
  * sans les caches PGXP qui ne sont pas utilises sur 3DS.
  */
-#include "fm_native_gte.h"
+static uint32_t fm_b136_gte_sign_extend_16(uint32_t value)
+{
+    return (uint32_t)(int32_t)(int16_t)(value & 0xFFFFu);
+}
+
+
+static uint32_t fm_b136_gte_lzcr(uint32_t value)
+{
+    uint32_t bits =
+        (value & 0x80000000u)
+            ? ~value
+            : value;
+
+    if (bits == 0u)
+    {
+        return 32u;
+    }
+
+    uint32_t count = 0u;
+
+    while ((bits & 0x80000000u) == 0u)
+    {
+        bits <<= 1;
+        ++count;
+    }
+
+    return count;
+}
+
+
+static uint32_t fm_b136_gte_irgb_component(uint32_t value)
+{
+    int32_t ir =
+        (int32_t)(int16_t)(value & 0xFFFFu);
+
+    if (ir <= 0)
+    {
+        return 0u;
+    }
+
+    uint32_t scaled =
+        (uint32_t)ir >> 7;
+
+    return
+        scaled > 0x1Fu
+            ? 0x1Fu
+            : scaled;
+}
+
+
+static uint32_t fm_b136_gte_pack_irgb(const CPUState *cpu)
+{
+    uint32_t r =
+        fm_b136_gte_irgb_component(cpu->gte_data[9]);
+
+    uint32_t g =
+        fm_b136_gte_irgb_component(cpu->gte_data[10]);
+
+    uint32_t b =
+        fm_b136_gte_irgb_component(cpu->gte_data[11]);
+
+    return
+        (b << 10)
+        |
+        (g << 5)
+        |
+        r;
+}
+
 
 static void fm_b136_gte_canonicalize_backing(CPUState *cpu)
 {
@@ -3724,10 +3793,226 @@ static void fm_b136_gte_canonicalize_backing(CPUState *cpu)
 }
 
 
-uint32_t gte_read_data(CPUState *cpu, uint8_t reg) { return fm_native_gte_read_data(cpu, reg); }
-uint32_t gte_read_ctrl(CPUState *cpu, uint8_t reg) { return fm_native_gte_read_ctrl(cpu, reg); }
-void gte_write_data(CPUState *cpu, uint8_t reg, uint32_t value) { fm_native_gte_write_data(cpu, reg, value); }
-void gte_write_ctrl(CPUState *cpu, uint8_t reg, uint32_t value) { fm_native_gte_write_ctrl(cpu, reg, value); }
+uint32_t gte_read_data(
+    CPUState *cpu,
+    uint8_t reg
+)
+{
+    reg &= 31u;
+
+    switch (reg)
+    {
+        case 1u:
+        case 3u:
+        case 5u:
+        case 7u:
+        case 16u:
+        case 17u:
+        case 18u:
+        case 19u:
+            return cpu->gte_data[reg] & 0xFFFFu;
+
+        case 8u:
+        case 9u:
+        case 10u:
+        case 11u:
+            return
+                fm_b136_gte_sign_extend_16(
+                    cpu->gte_data[reg]
+                );
+
+        case 15u:
+            return cpu->gte_data[14];
+
+        case 23u:
+            return 0u;
+
+        case 28u:
+        case 29u:
+            return fm_b136_gte_pack_irgb(cpu);
+
+        case 31u:
+            return fm_b136_gte_lzcr(cpu->gte_data[30]);
+
+        default:
+            return cpu->gte_data[reg];
+    }
+}
+
+
+uint32_t gte_read_ctrl(
+    CPUState *cpu,
+    uint8_t reg
+)
+{
+    reg &= 31u;
+
+    switch (reg)
+    {
+        case 4u:
+        case 12u:
+        case 20u:
+        case 26u:
+            return cpu->gte_ctrl[reg] & 0xFFFFu;
+
+        case 27u:
+        case 29u:
+        case 30u:
+            return
+                fm_b136_gte_sign_extend_16(
+                    cpu->gte_ctrl[reg]
+                );
+
+        default:
+            return cpu->gte_ctrl[reg];
+    }
+}
+
+
+void gte_write_data(
+    CPUState *cpu,
+    uint8_t reg,
+    uint32_t value
+)
+{
+    reg &= 31u;
+
+    switch (reg)
+    {
+        case 1u:
+        case 3u:
+        case 5u:
+        case 7u:
+        case 16u:
+        case 17u:
+        case 18u:
+        case 19u:
+            cpu->gte_data[reg] =
+                value & 0xFFFFu;
+            return;
+
+        case 8u:
+        case 9u:
+        case 10u:
+        case 11u:
+            cpu->gte_data[reg] =
+                fm_b136_gte_sign_extend_16(value);
+
+            if (reg >= 9u)
+            {
+                uint32_t packed =
+                    fm_b136_gte_pack_irgb(cpu);
+
+                cpu->gte_data[28] = packed;
+                cpu->gte_data[29] = packed;
+            }
+            return;
+
+        case 12u:
+        case 13u:
+            cpu->gte_data[reg] = value;
+            return;
+
+        case 14u:
+            cpu->gte_data[14] = value;
+            cpu->gte_data[15] = value;
+            return;
+
+        case 15u:
+            cpu->gte_data[12] = cpu->gte_data[13];
+            cpu->gte_data[13] = cpu->gte_data[14];
+            cpu->gte_data[14] = value;
+            cpu->gte_data[15] = value;
+            return;
+
+        case 23u:
+            cpu->gte_data[23] = 0u;
+            return;
+
+        case 28u:
+        {
+            cpu->gte_data[9] =
+                (value & 0x1Fu) << 7;
+
+            cpu->gte_data[10] =
+                ((value >> 5) & 0x1Fu) << 7;
+
+            cpu->gte_data[11] =
+                ((value >> 10) & 0x1Fu) << 7;
+
+            uint32_t packed =
+                value & 0x7FFFu;
+
+            cpu->gte_data[28] = packed;
+            cpu->gte_data[29] = packed;
+            return;
+        }
+
+        case 29u:
+        {
+            uint32_t packed =
+                fm_b136_gte_pack_irgb(cpu);
+
+            cpu->gte_data[28] = packed;
+            cpu->gte_data[29] = packed;
+            return;
+        }
+
+        case 30u:
+            cpu->gte_data[30] = value;
+            cpu->gte_data[31] =
+                fm_b136_gte_lzcr(value);
+            return;
+
+        case 31u:
+            cpu->gte_data[31] =
+                fm_b136_gte_lzcr(
+                    cpu->gte_data[30]
+                );
+            return;
+
+        default:
+            cpu->gte_data[reg] = value;
+            return;
+    }
+}
+
+
+void gte_write_ctrl(
+    CPUState *cpu,
+    uint8_t reg,
+    uint32_t value
+)
+{
+    reg &= 31u;
+
+    switch (reg)
+    {
+        case 4u:
+        case 12u:
+        case 20u:
+        case 26u:
+            cpu->gte_ctrl[reg] =
+                value & 0xFFFFu;
+            return;
+
+        case 27u:
+        case 29u:
+        case 30u:
+            cpu->gte_ctrl[reg] =
+                fm_b136_gte_sign_extend_16(value);
+            return;
+
+        case 31u:
+            cpu->gte_ctrl[31] =
+                value & 0x7FFFF000u;
+            return;
+
+        default:
+            cpu->gte_ctrl[reg] = value;
+            return;
+    }
+}
 
 
 /*
@@ -4187,7 +4472,7 @@ static void fm_b135_gte_unpack_vertex(
 }
 
 
-static void fm_b135_gte_rtps_one(
+static void fm_geometry_project_uncached(
     CPUState *cpu,
     const int32_t vertex[3],
     int set_mac0,
@@ -4370,11 +4655,42 @@ static void fm_b135_gte_rtps_one(
 }
 
 
+/* B136.63: transform shared vertices once per unchanged geometry context.
+ * The cache never replaces command delivery or the mutable FIFO state. */
+static FMGeometryCache g_geometry_cache;
+void fm_runtime_geometry_cache_stats(uint64_t out[3])
+{
+    if (!out) return;
+    out[0]=g_geometry_cache.hits;out[1]=g_geometry_cache.misses;
+    out[2]=g_geometry_cache.contexts;
+}
+
+static void fm_b135_gte_rtps_one(CPUState *cpu,const int32_t vertex[3],
+    int set_mac0,uint32_t cmd,uint32_t *flags)
+{
+#if FM_GEOMETRY_CACHE
+    FMGeometryProjection *entry=fm_geometry_cache_slot(&g_geometry_cache,
+        vertex,(unsigned)set_mac0);
+    if (fm_geometry_cache_apply(&g_geometry_cache,entry,cpu,vertex,
+        (unsigned)set_mac0,flags)) return;
+    uint32_t local_flags=0;
+    fm_geometry_project_uncached(cpu,vertex,set_mac0,cmd,&local_flags);
+    fm_geometry_cache_store(&g_geometry_cache,entry,cpu,vertex,
+        (unsigned)set_mac0,local_flags);
+    *flags |= local_flags;
+#else
+    fm_geometry_project_uncached(cpu,vertex,set_mac0,cmd,flags);
+#endif
+}
+
 static void fm_b135_gte_rtps(
     CPUState *cpu,
     uint32_t cmd
 )
 {
+#if FM_GEOMETRY_CACHE
+    fm_geometry_cache_prepare(&g_geometry_cache,cpu,cmd);
+#endif
     uint32_t flags = 0u;
     int32_t v0[3];
 
@@ -4404,6 +4720,9 @@ static void fm_b135_gte_rtpt(
     uint32_t cmd
 )
 {
+#if FM_GEOMETRY_CACHE
+    fm_geometry_cache_prepare(&g_geometry_cache,cpu,cmd);
+#endif
     uint32_t flags = 0u;
     int32_t v[3];
 
