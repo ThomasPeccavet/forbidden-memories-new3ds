@@ -2,6 +2,7 @@
 #include "fm_irq.h"
 #include "fm_native_batch.h"
 #include "fm_host_clock.h"
+#include "fm_perf_capture.h"
 #include <3ds.h>
 
 #include <stdbool.h>
@@ -7088,6 +7089,8 @@ static int fm_execute_guest_timer_callback(CPUState *cpu)
 }
 
 #if FM_PERF_PROFILE
+static FMPerfCapture g_perf_capture;
+static unsigned g_perf_capture_reset;
 /* B136.32: wall-time windows, completed image latches rather than host swaps.
  * Nested SEQ time belongs to pre-render or IRQ work; never add it twice. */
 static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUState *cpu)
@@ -7104,9 +7107,23 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
     static uint32_t wait_reason_calls[4];
     static uint32_t mode0_before, modeN_before, immediate_before, completions_before, budget_before;
     static uint32_t dma_calls_before;
+    static uint32_t overlay_entries_before,overlay_blocks_before;
+    static uint64_t overlay_instructions_before;
+#if FM_GPU_UNAI
+    static uint32_t previous_s,previous_p,previous_f;
+#endif
     FMDmaDebugStats dma = {0};
     fm_memory_dma_debug(&dma);
+    if (g_perf_capture_reset) {
+        g_perf_capture_reset=0;start=0;pre=render=vb=gfx=wait=loops=0;
+        samples=max_loop=report_ms=0;
+        memset(wait_reason_ms,0,sizeof(wait_reason_ms));
+        memset(wait_reason_calls,0,sizeof(wait_reason_calls));
+        memset(g_b110_prof,0,sizeof(g_b110_prof));
+    }
     if (!start) {
+        overlay_entries_before=g_b91_fast_entries;overlay_blocks_before=g_b91_fast_blocks;
+        overlay_instructions_before=g_b91_fast_instructions;
         start = now; frame_before = frame; image_before = g_b84_latch_count;
         irq_before = g_seq_irq_done; seq_before = g_seq_irq_total_ms;
         dma_before = dma.dma2_linked_total_ms; payload_before = dma.dma2_payload_us;
@@ -7118,6 +7135,9 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         completions_before=g_b1358_vsync_completions; budget_before=g_b84_budget_yields;
         frame_probe_before=g_frame_wait_probe_us; frame_calls_before=g_frame_wait_probe_calls;
         frame_stops_before=g_frame_wait_stops; frame_resumes_before=g_frame_wait_resumes;
+#if FM_GPU_UNAI
+        fm_unai_counts(&previous_s,&previous_p,&previous_f);
+#endif
         fm_gpu_perf_window_reset();
         return;
     }
@@ -7129,14 +7149,18 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
     ++samples;
     if (g_b105_loop_ms > max_loop) max_loop = g_b105_loop_ms;
     uint64_t elapsed = now - start;
-    if (elapsed < 2000u) return;
+    if (elapsed < (g_perf_capture.active ? FM_CAPTURE_DURATION_MS : 2000u)) return;
     uint64_t report_start = osGetTime();
-    FILE *fp = fopen("sdmc:/3ds/fm-new3ds/perf-latest.txt", "wb");
+    FILE *fp = fopen(g_perf_capture.active
+        ? "sdmc:/3ds/fm-new3ds/perf-capture-summary.txt"
+        : "sdmc:/3ds/fm-new3ds/perf-latest.txt", "wb");
     if (fp) {
         /* A single stdio buffer avoids small writes per formatted line. */
         char report_buffer[8192];
         setvbuf(fp, report_buffer, _IOFBF, sizeof(report_buffer));
-        fprintf(fp, "probe=B136.60 window_ms=%llu pc=%08lX script=%04lX\n",
+        if(g_perf_capture.active)fprintf(fp,"capture_start_ms=%llu requested_ms=10000 rows=%u dropped=%u completed=1\n",
+            (unsigned long long)g_perf_capture.start_ms,g_perf_capture.count,g_perf_capture.dropped);
+        fprintf(fp, "probe=B136.61 window_ms=%llu pc=%08lX script=%04lX\n",
             (unsigned long long)elapsed, (unsigned long)(cpu ? cpu->pc : 0u),
             (unsigned long)fm_memory_read_half(0x8009C610u));
         fprintf(fp, "host_fps_x100=%llu new_images_fps_x100=%llu samples=%lu\n",
@@ -7197,6 +7221,10 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
             (unsigned long long)g_b115_last_repair_ms,
             (unsigned long long)g_b115_last_submit_ms,
             (unsigned long long)g_b115_last_merge_ms, (unsigned long)g_b115_last_calls);
+        fprintf(fp,"overlay_window entries=%lu chunks=%lu instructions=%llu\n",
+            (unsigned long)(g_b91_fast_entries-overlay_entries_before),
+            (unsigned long)(g_b91_fast_blocks-overlay_blocks_before),
+            (unsigned long long)(g_b91_fast_instructions-overlay_instructions_before));
         fprintf(fp, "overlay_totals entries=%lu blocks=%lu instructions=%llu slow_handoff_pc=%08lX slow_handoff_ms=%lu\n",
             (unsigned long)g_b91_fast_entries, (unsigned long)g_b91_fast_blocks,
             (unsigned long long)g_b91_fast_instructions,
@@ -7211,7 +7239,6 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
             (unsigned long long)neutral_pixels, (unsigned long long)fast_pixels);
 #if FM_GPU_UNAI
         uint32_t unai_s=0,unai_p=0,unai_f=0;
-        static uint32_t previous_s,previous_p,previous_f;
         fm_unai_counts(&unai_s,&unai_p,&unai_f);
         fprintf(fp,"renderer=unai-experiment sprites=%lu polygons=%lu fallback=%lu\n",
             (unsigned long)(unai_s-previous_s),(unsigned long)(unai_p-previous_p),
@@ -7221,9 +7248,9 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         fprintf(fp,"renderer=native-reference\n");
 #endif
         fprintf(fp, "gpu_timing=all_completed_commands profiling_overhead_included\n");
-        for (unsigned rank=0; rank<6; ++rank) {
+        for (unsigned rank=0; rank<(g_perf_capture.active?256u:6u); ++rank) {
             FMGpuOpcodePerf hot = {0}; fm_gpu_perf_window_rank(rank, &hot);
-            if (!hot.calls) continue;
+            if (!hot.calls) break;
             fprintf(fp, "gpu%u opcode=%02X calls=%lu us=%llu max_us=%lu\n",
                 rank, (unsigned)hot.opcode, (unsigned long)hot.calls,
                 (unsigned long long)hot.total_us, (unsigned long)hot.max_us);
@@ -7240,6 +7267,8 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         fclose(fp);
     }
     report_ms = (uint32_t)(osGetTime()-report_start);
+    overlay_entries_before=g_b91_fast_entries;overlay_blocks_before=g_b91_fast_blocks;
+    overlay_instructions_before=g_b91_fast_instructions;
     start=now; pre=render=vb=gfx=wait=loops=0; samples=max_loop=0;
     frame_before=frame; image_before=g_b84_latch_count;
     seq_before=g_seq_irq_total_ms; irq_before=g_seq_irq_done;
@@ -7257,6 +7286,46 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
     frame_stops_before=g_frame_wait_stops; frame_resumes_before=g_frame_wait_resumes;
     memset(g_b110_prof, 0, sizeof(g_b110_prof));
 }
+static void fm_perf_capture_finish(void)
+{
+    FILE *f=fopen("sdmc:/3ds/fm-new3ds/perf-capture.csv","wb");
+    if(f) {
+        char buffer[16384];setvbuf(f,buffer,_IOFBF,sizeof(buffer));
+        fprintf(f,"# probe=B136.61 capture_start_ms=%llu duration_ms=%u rows=%u dropped=%u completed=1\n",
+            (unsigned long long)g_perf_capture.start_ms,g_perf_capture.elapsed_ms,
+            g_perf_capture.count,g_perf_capture.dropped);
+        fprintf(f,"elapsed_ms,start_pc,end_pc,ps1_frame,images_total,running,pre_guest_ms,presentation_ms,vblank_ms,gfx_ms,wait_ms,loop_ms,wait_reason,dma_calls,irq_calls,vsync_completed,native_probes,cd_sectors,dma_us_nested,seq_ms_nested,overlay_instructions,clock_debt\n");
+        for(unsigned i=0;i<g_perf_capture.count;++i) {
+            const FMPerfCaptureRow *r=&g_perf_capture.rows[i];
+            fprintf(f,"%lu,%08lX,%08lX,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%llu,%llu,%llu,%llu\n",
+                (unsigned long)r->elapsed_ms,(unsigned long)r->start_pc,(unsigned long)r->end_pc,
+                (unsigned long)r->frame,(unsigned long)r->images,(unsigned long)r->running,
+                (unsigned long)r->pre_ms,(unsigned long)r->render_ms,(unsigned long)r->vblank_ms,
+                (unsigned long)r->gfx_ms,(unsigned long)r->wait_ms,(unsigned long)r->loop_ms,
+                (unsigned long)r->wait_reason,(unsigned long)r->dma_calls,(unsigned long)r->irq_calls,
+                (unsigned long)r->vsyncs,(unsigned long)r->native_probes,(unsigned long)r->cd_sectors,
+                (unsigned long long)r->dma_us,(unsigned long long)r->seq_ms,
+                (unsigned long long)r->overlay_instructions,(unsigned long long)r->clock_debt);
+        }
+        fclose(f);
+    }
+    f=fopen("sdmc:/3ds/fm-new3ds/perf-capture-summary.txt","ab");
+    if(f) {
+        char buffer[8192];setvbuf(f,buffer,_IOFBF,sizeof(buffer));
+        fprintf(f,"interpreted_chunks=all_main_during_capture hot_slots=%u overflow_calls=%u\n",
+            FM_CAPTURE_HOT_SLOTS,g_perf_capture.hot_dropped);
+        for(unsigned i=0;i<FM_CAPTURE_HOT_SLOTS;++i) {
+            const FMPerfCaptureHot *h=&g_perf_capture.hot[i];
+            if(h->calls)fprintf(f,"interp pc=%08lX calls=%lu instructions=%llu us=%llu max_us=%lu\n",
+                (unsigned long)h->pc,(unsigned long)h->calls,
+                (unsigned long long)h->instructions,(unsigned long long)h->total_us,
+                (unsigned long)h->max_us);
+        }
+        fclose(f);
+    }
+    g_perf_capture.active=0;
+}
+
 #endif
 
 static int fm_execute_guest_vblank_callback(
@@ -11971,7 +12040,7 @@ static void fm_snapshot_status(const char *action,int result,int legacy)
 {
     FILE *f=fopen("sdmc:/3ds/fm-new3ds/snapshot-status.txt","w");
     if (!f) return;
-    fprintf(f,"probe=B136.60 action=%s result=%d format=%s\n"
+    fprintf(f,"probe=B136.61 action=%s result=%d format=%s\n"
         "0=success 1=deferred -7=unsafe_legacy -8=invalid_state\n",
         action,result,legacy ? "v3-partial" : "v4");
     fclose(f);
@@ -12284,7 +12353,7 @@ static int fm_b135_quick_save(
     fm_audio_pause(1); fm_snapshot_host_save(ext);
     mdec_snapshot_write(blob+fixed+sizeof(*ext));
     fm_spu_snapshot_write(blob+fixed+sizeof(*ext)+mdec_bytes);
-    int result=fm_snapshot_write(FM_B135_QS_PATH,blob,total,fm_snapshot_schema(),disc,13660u);
+    int result=fm_snapshot_write(FM_B135_QS_PATH,blob,total,fm_snapshot_schema(),disc,13661u);
     free(blob); fm_audio_pause(0);
     /* File I/O is an explicit pause, never clock/CD transport catch-up debt. */
     fm_host_clock_reset(&g_ps1_host_clock); g_cd_stream_last_ms=osGetTime();
@@ -12435,6 +12504,9 @@ static int fm_b135_quick_load(
     g_b65_stop_ra = 0u;
     g_b65_stop_detail = 0u;
 
+#if FM_PERF_PROFILE
+    fm_capture_arm(&g_perf_capture);
+#endif
     return 0;
 invalid:
     free(blob); fm_snapshot_status("load",-8,legacy); return -8;
@@ -12826,7 +12898,7 @@ int main(void)
     fm_audio_init();
     FILE *audio_status=fopen("sdmc:/3ds/fm-new3ds/audio-status.txt","w");
     if(audio_status) {
-        fprintf(audio_status,"probe=B136.60 dsp=%08lX spu=24-voices rate=44100 xa_channel=0 spu_channel=1\n",(unsigned long)(uint32_t)fm_audio_status());
+        fprintf(audio_status,"probe=B136.61 dsp=%08lX spu=24-voices rate=44100 xa_channel=0 spu_channel=1\n",(unsigned long)(uint32_t)fm_audio_status());
         if((uint32_t)fm_audio_status()==0xD880A7FAu) fprintf(audio_status,"missing DSP component: sdmc:/3ds/dspfirm.cdc (or hb:ndsp)\n");
         fclose(audio_status);
     }
@@ -12843,6 +12915,24 @@ int main(void)
     while (aptMainLoop())
     {
         uint64_t b105_loop_start_ms = osGetTime();
+#if FM_PERF_PROFILE
+        if(fm_capture_begin(&g_perf_capture,b105_loop_start_ms)) {
+            g_perf_capture_reset=1;
+            fm_perf_window(b105_loop_start_ms,frame,0,cpu);
+        }
+        FMPerfCaptureRow capture_row={0};
+        FMDmaDebugStats capture_dma_before={0};
+        uint64_t capture_seq_before=0,capture_overlay_before=0;
+        uint32_t capture_irq_before=0,capture_vsync_before=0,capture_native_before=0,capture_cd_before=0;
+        int capture_this_loop=g_perf_capture.active;
+        if(capture_this_loop) {
+            capture_row.start_pc=cpu?cpu->pc:0;
+            fm_memory_dma_debug(&capture_dma_before);
+            capture_seq_before=g_seq_irq_total_ms;capture_overlay_before=g_b91_fast_instructions;
+            capture_irq_before=g_seq_irq_done;capture_vsync_before=g_b1358_vsync_completions;
+            capture_native_before=g_native_probe_calls;capture_cd_before=g_b32_getsec_calls;
+        }
+#endif
         uint32_t perf_budget_before_loop = g_b84_budget_yields;
         g_b105_vblank_ms = g_b106_gfx_ms = g_b106_wait_ms = 0u;
         fm_cd_stream_tick(b105_loop_start_ms, game_running);
@@ -12850,7 +12940,11 @@ int main(void)
         fm_media_poll(g_cd_lba, game_running);
         fm_audio_spu_clock(osGetTime(),game_running);
         static uint64_t audio_report_ms;
-        if(b105_loop_start_ms-audio_report_ms>=2000u) {
+        if(b105_loop_start_ms-audio_report_ms>=2000u
+#if FM_PERF_PROFILE
+            && !g_perf_capture.active && !g_perf_capture.armed
+#endif
+        ) {
             fm_audio_spu_dump("sdmc:/3ds/fm-new3ds/audio-status.txt");
             audio_report_ms=b105_loop_start_ms;
         }
@@ -13844,7 +13938,7 @@ int main(void)
                 /*
                  * B84 : borne temps pour TOUS les modes.
                  *
-                 * B136.60: service a due PS1 tick before another dispatch,
+                 * B136.61: service a due PS1 tick before another dispatch,
                  * including VSync HLE. The fixed 12ms limit remains a CPU
                  * responsiveness ceiling, not the interrupt deadline.
                  */
@@ -16740,11 +16834,15 @@ int main(void)
                          * verifie entre basic blocks de l'overlay.
                          */
                         /*
-                         * B136.60: chain branches inside the interpreter.
+                         * B136.61: chain branches inside the interpreter.
                          * Check deadlines per 2048-instruction chunk instead
                          * of returning after every short basic block. Resident
                          * calls leave the region before executing natively.
                          */
+#if FM_PERF_PROFILE
+                        uint32_t capture_chunk_pc=cpu->pc;
+                        uint64_t capture_chunk_tick=g_perf_capture.active?svcGetSystemTick():0;
+#endif
 #if defined(NDEBUG)
                         if (
                             (osGetTime() - b16_slice_start_ms) >= g_b105_slice_budget_ms
@@ -16794,6 +16892,11 @@ int main(void)
                         }
 #endif
 
+#if FM_PERF_PROFILE
+                        if(g_perf_capture.active)fm_capture_hot(&g_perf_capture,capture_chunk_pc,
+                            interp.instructions,(uint32_t)((svcGetSystemTick()-capture_chunk_tick)
+                                /(SYSCLOCK_ARM11/1000000u)));
+#endif
                         interp_ran = 1;
                         ++b91_blocks;
                         ++g_b91_fast_blocks;
@@ -17355,6 +17458,10 @@ int main(void)
                             b13519_chunks < 32u
                         )
                         {
+#if FM_PERF_PROFILE
+                            uint32_t capture_chunk_pc=cpu->pc;
+                            uint64_t capture_chunk_tick=g_perf_capture.active?svcGetSystemTick():0;
+#endif
                             interp =
                                 fm_interp_run_region(
                                     cpu,
@@ -17364,6 +17471,11 @@ int main(void)
                                     0x00034D30u
                                 );
 
+#if FM_PERF_PROFILE
+                            if(g_perf_capture.active)fm_capture_hot(&g_perf_capture,capture_chunk_pc,
+                                interp.instructions,(uint32_t)((svcGetSystemTick()-capture_chunk_tick)
+                                    /(SYSCLOCK_ARM11/1000000u)));
+#endif
                             interp_ran = 1;
                             ++b13519_chunks;
                             ++g_b13517_interp_blocks;
@@ -17431,12 +17543,20 @@ int main(void)
                     }
                     else
                     {
+#if FM_PERF_PROFILE
+                        uint32_t capture_chunk_pc=cpu->pc;
+                        uint64_t capture_chunk_tick=g_perf_capture.active?svcGetSystemTick():0;
+#endif
                         interp =
                             fm_interp_run_block(
                                 cpu,
                                 8192u
                             );
-
+#if FM_PERF_PROFILE
+                        if(g_perf_capture.active)fm_capture_hot(&g_perf_capture,capture_chunk_pc,
+                            interp.instructions,(uint32_t)((svcGetSystemTick()-capture_chunk_tick)
+                                /(SYSCLOCK_ARM11/1000000u)));
+#endif
                         interp_ran = 1;
 
                         if (
@@ -20960,7 +21080,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.60\nvideo_mode=%08lX\n"
+                            "video_probe=B136.61\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -21028,7 +21148,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.60\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.61\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"
@@ -21957,7 +22077,28 @@ int main(void)
             ++g_b110_loop_over33;
         }
 #if FM_PERF_PROFILE
-        fm_perf_window(osGetTime(), frame, perf_pre_ms, cpu);
+        uint64_t capture_now=osGetTime();
+        if(capture_this_loop && g_perf_capture.active) {
+            FMDmaDebugStats after={0};fm_memory_dma_debug(&after);
+            capture_row.end_pc=cpu?cpu->pc:0;capture_row.frame=frame;
+            capture_row.images=g_b84_latch_count;capture_row.running=game_running;
+            capture_row.pre_ms=perf_pre_ms;capture_row.render_ms=g_b105_render_ms;
+            capture_row.vblank_ms=g_b105_vblank_ms;capture_row.gfx_ms=g_b106_gfx_ms;
+            capture_row.wait_ms=g_b106_wait_ms;capture_row.loop_ms=g_b105_loop_ms;
+            capture_row.wait_reason=g_perf_wait_reason;
+            capture_row.dma_calls=after.dma2_linked_transfer_count-capture_dma_before.dma2_linked_transfer_count;
+            capture_row.dma_us=after.dma2_payload_us-capture_dma_before.dma2_payload_us;
+            capture_row.irq_calls=g_seq_irq_done-capture_irq_before;
+            capture_row.seq_ms=g_seq_irq_total_ms-capture_seq_before;
+            capture_row.vsyncs=g_b1358_vsync_completions-capture_vsync_before;
+            capture_row.native_probes=g_native_probe_calls-capture_native_before;
+            capture_row.cd_sectors=g_b32_getsec_calls-capture_cd_before;
+            capture_row.overlay_instructions=g_b91_fast_instructions-capture_overlay_before;
+            capture_row.clock_debt=g_ps1_host_clock.pending;
+            int completed=fm_capture_push(&g_perf_capture,capture_now,&capture_row);
+            fm_perf_window(capture_now,frame,perf_pre_ms,cpu);
+            if(completed)fm_perf_capture_finish();
+        } else if(!g_perf_capture.armed) fm_perf_window(capture_now,frame,perf_pre_ms,cpu);
 #endif
     }
 

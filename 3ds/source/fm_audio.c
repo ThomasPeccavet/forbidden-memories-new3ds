@@ -171,7 +171,7 @@ void fm_audio_spu_dump(const char *path)
     unsigned active=0;
     for(unsigned i=0;i<24u;++i) if(fm_spu_reg_read(0x1f801c0cu+i*16u)) ++active;
     uint32_t activity[3];fm_spu_key_activity(activity);
-    fprintf(f,"probe=B136.60 dsp=%08lX rate=44100 active_voices=%u\n"
+    fprintf(f,"probe=B136.61 dsp=%08lX rate=44100 active_voices=%u\n"
         "spu_queued=%lu full=%lu underruns=%lu priming=%u preroll_ms=100 capacity_ms=200\n",
         (unsigned long)(uint32_t)init_result,active,(unsigned long)spu_queued_total,
         (unsigned long)spu_full,(unsigned long)spu_underruns,spu_priming);

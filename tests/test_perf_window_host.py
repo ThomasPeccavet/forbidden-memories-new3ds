@@ -15,6 +15,9 @@ class PerfWindowTests(unittest.TestCase):
 #include <string.h>
 #include <assert.h>
 #include "fm_host_clock.h"
+#include "fm_perf_capture.h"
+static FMPerfCapture g_perf_capture;
+static unsigned g_perf_capture_reset;
 static FMHostClock g_ps1_host_clock;
 typedef struct { uint32_t pc; } CPUState;
 typedef struct { uint32_t start_pc,end_pc,hits,max_us; uint64_t total_us; } B110ProbeStat;
@@ -60,7 +63,7 @@ static uint64_t osGetTime(void) { return 123; }
 static uint16_t fm_memory_read_half(uint32_t a) { (void)a; return 0x8002; }
 static void b110_get_rank(unsigned i, B110ProbeStat *out) { *out=g_b110_prof[i]; }
 static FILE *report_open(const char *path, const char *mode) {
-    assert(strstr(path,"perf-latest.txt") && !strcmp(mode,"wb")); return report;
+    assert((strstr(path,"perf-latest.txt") || strstr(path,"perf-capture-summary.txt")) && !strcmp(mode,"wb")); return report;
 }
 #define fopen report_open
 static int report_close(FILE *fp) {
@@ -110,6 +113,20 @@ static int report_close(FILE *fp) {
     assert(strstr(text,"wait_reasons budget_ms=50 budget_loops=25 vsync_ms=50 vsync_loops=25 other_ms=50 other_loops=25 no_wait_loops=25"));
     assert(strstr(text,"scheduler budget_ms=12 budget_yields=100 vsync_mode0=20 vsync_modeN=0 vsync_immediate=0 vsync_completed=20"));
     assert(strstr(text,"texture_fast format_specialization=1 color_lookup=1 neutral_triangles=10 fast_triangles=20 neutral_pixels=1000 fast_pixels=2000"));
+    // A successful load resets the old two-second window; nothing is written
+    // during the ten-second capture. Samples include the very first loop.
+    report=tmpfile();assert(report);
+    fm_capture_arm(&g_perf_capture);assert(fm_capture_begin(&g_perf_capture,5000));
+    g_perf_capture_reset=1;fm_perf_window(5000,1000,0,&cpu);
+    for(unsigned i=1;i<=50;++i){
+        FMPerfCaptureRow row={0};fm_capture_push(&g_perf_capture,5000+i*200,&row);
+        fm_perf_window(5000+i*200,1000+i,12,&cpu);
+        if(i<50)assert(ftell(report)==0);
+    }
+    rewind(report);memset(text,0,sizeof(text));fread(text,1,sizeof(text)-1,report);
+    assert(strstr(text,"capture_start_ms=5000 requested_ms=10000 rows=50 dropped=0 completed=1"));
+    assert(strstr(text,"window_ms=10000"));assert(strstr(text,"samples=50"));
+    assert(strstr(text,"pre_guest_input=600"));
     return 0;
 }
 '''

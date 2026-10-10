@@ -24,6 +24,7 @@ class QuickStateTests(unittest.TestCase):
 #include "fm_gpu.h"
 #include "fm_runtime_shim.h"
 #include "fm_host_clock.h"
+#include "fm_perf_capture.h"
 #include "fm_mdec_clock.h"
 #define main media_fixture_main
 #include "FIXTURE"
