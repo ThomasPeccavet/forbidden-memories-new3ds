@@ -15,6 +15,8 @@ static void sample(void) {
     write(8,0x00ff);write(10,0x1fc0);write(0x180,0x3fff);write(0x182,0x3fff);
     write(0x1aa,0xc000);write(0x188,1);
 }
+static int16_t transient[200];
+static void sync_transient(void) {fm_spu_render(transient,100);}
 int main(void) {
     fm_spu_reset();sample();int16_t pcm[200],expected[200],actual[200];
     fm_spu_render(pcm,100);assert(pcm[12]>20000 && pcm[13]>10000 && pcm[13]<pcm[12]);
@@ -28,5 +30,9 @@ int main(void) {
     for(unsigned n=90;n<100;++n) assert(!pcm[n*2] && !pcm[n*2+1]);
     fm_spu_reset();sample();write(0x1aa,0x8000);fm_spu_render(pcm,100);
     for(unsigned n=0;n<200;++n) assert(!pcm[n]);
+    /* A short effect contributes samples before its KEY OFF changes state. */
+    fm_spu_reset();sample();fm_spu_set_sync(sync_transient);
+    write(0x18c,1);fm_spu_set_sync(NULL);
+    assert(transient[12]>20000);
     free(snap);puts("SPU: wrapped transfer, voices, loop, ADSR, stereo, mute and exact resume passed");
 }

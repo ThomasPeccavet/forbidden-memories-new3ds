@@ -24,9 +24,14 @@ typedef struct {
     uint32_t main_counter[2], noise_counter, noise;
 } SPUState;
 static SPUState s;
+static uint32_t key_ons,key_offs,last_key_on;
+void fm_spu_key_activity(uint32_t out[3]) {out[0]=key_ons;out[1]=key_offs;out[2]=last_key_on;}
+static void (*host_sync)(void);
+void fm_spu_set_sync(void (*sync)(void)) {host_sync=sync;}
+void fm_spu_sync_now(void) {if(host_sync) host_sync();}
 static int16_t clip(int32_t x) { return x < -32768 ? -32768 : x > 32767 ? 32767 : (int16_t)x; }
 static int32_t direct_volume(uint16_t r) { return (int16_t)(r*2u); }
-void fm_spu_reset(void) { memset(&s,0,sizeof(s)); s.magic=0x31555053u; s.bytes=sizeof(s); s.noise=1; }
+void fm_spu_reset(void) { key_ons=key_offs=last_key_on=0;memset(&s,0,sizeof(s)); s.magic=0x31555053u; s.bytes=sizeof(s); s.noise=1; }
 uint16_t fm_spu_transfer_read(void) {
     uint16_t v=s.ram[s.transfer] | ((uint16_t)s.ram[(s.transfer+1u)&RAM_MASK]<<8);
     s.transfer=(s.transfer+2u)&RAM_MASK; return v;
@@ -37,6 +42,7 @@ void fm_spu_transfer_write(uint16_t v) {
 }
 static void key(unsigned i, int on) {
     Voice *v=&s.voice[i];
+    if(on) {++key_ons;last_key_on=i;} else ++key_offs;
     if (!on) { if(v->active) {v->stage=3;v->counter=0;} return; }
     v->address=(uint32_t)s.reg[i*8u+3u]*8u;
     v->phase=v->counter=0; v->hist1=v->hist2=v->envelope=0;
@@ -53,6 +59,7 @@ uint16_t fm_spu_reg_read(uint32_t a) {
     return s.reg[(a-BASE)/2u];
 }
 void fm_spu_reg_write(uint32_t a,uint16_t value) {
+    if(host_sync) host_sync();
     if(a<BASE || a>=BASE+sizeof(s.reg) || a==0x1f801daeu || a==0x1f801d9cu || a==0x1f801d9eu) return;
     if(a==0x1f801d92u || a==0x1f801d96u || a==0x1f801d9au || a==0x1f801d8au || a==0x1f801d8eu) value&=0xffu;
     unsigned r=(a-BASE)/2u; s.reg[r]=value;

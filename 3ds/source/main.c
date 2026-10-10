@@ -7136,7 +7136,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         /* A single stdio buffer avoids small writes per formatted line. */
         char report_buffer[8192];
         setvbuf(fp, report_buffer, _IOFBF, sizeof(report_buffer));
-        fprintf(fp, "probe=B136.57 window_ms=%llu pc=%08lX script=%04lX\n",
+        fprintf(fp, "probe=B136.58 window_ms=%llu pc=%08lX script=%04lX\n",
             (unsigned long long)elapsed, (unsigned long)(cpu ? cpu->pc : 0u),
             (unsigned long)fm_memory_read_half(0x8009C610u));
         fprintf(fp, "host_fps_x100=%llu new_images_fps_x100=%llu samples=%lu\n",
@@ -11971,7 +11971,7 @@ static void fm_snapshot_status(const char *action,int result,int legacy)
 {
     FILE *f=fopen("sdmc:/3ds/fm-new3ds/snapshot-status.txt","w");
     if (!f) return;
-    fprintf(f,"probe=B136.57 action=%s result=%d format=%s\n"
+    fprintf(f,"probe=B136.58 action=%s result=%d format=%s\n"
         "0=success 1=deferred -7=unsafe_legacy -8=invalid_state\n",
         action,result,legacy ? "v3-partial" : "v4");
     fclose(f);
@@ -12284,7 +12284,7 @@ static int fm_b135_quick_save(
     fm_audio_pause(1); fm_snapshot_host_save(ext);
     mdec_snapshot_write(blob+fixed+sizeof(*ext));
     fm_spu_snapshot_write(blob+fixed+sizeof(*ext)+mdec_bytes);
-    int result=fm_snapshot_write(FM_B135_QS_PATH,blob,total,fm_snapshot_schema(),disc,13657u);
+    int result=fm_snapshot_write(FM_B135_QS_PATH,blob,total,fm_snapshot_schema(),disc,13658u);
     free(blob); fm_audio_pause(0);
     /* File I/O is an explicit pause, never clock/CD transport catch-up debt. */
     fm_host_clock_reset(&g_ps1_host_clock); g_cd_stream_last_ms=osGetTime();
@@ -12826,7 +12826,7 @@ int main(void)
     fm_audio_init();
     FILE *audio_status=fopen("sdmc:/3ds/fm-new3ds/audio-status.txt","w");
     if(audio_status) {
-        fprintf(audio_status,"probe=B136.57 dsp=%08lX spu=24-voices rate=44100 xa_channel=0 spu_channel=1\n",(unsigned long)(uint32_t)fm_audio_status());
+        fprintf(audio_status,"probe=B136.58 dsp=%08lX spu=24-voices rate=44100 xa_channel=0 spu_channel=1\n",(unsigned long)(uint32_t)fm_audio_status());
         if((uint32_t)fm_audio_status()==0xD880A7FAu) fprintf(audio_status,"missing DSP component: sdmc:/3ds/dspfirm.cdc (or hb:ndsp)\n");
         fclose(audio_status);
     }
@@ -12848,6 +12848,12 @@ int main(void)
         fm_cd_stream_tick(b105_loop_start_ms, game_running);
         fm_mdec_host_frame = frame; fm_mdec_host_cycles = (uint64_t)frame * 677376u;
         fm_media_poll(g_cd_lba, game_running);
+        fm_audio_spu_clock(osGetTime(),game_running);
+        static uint64_t audio_report_ms;
+        if(b105_loop_start_ms-audio_report_ms>=2000u) {
+            fm_audio_spu_dump("sdmc:/3ds/fm-new3ds/audio-status.txt");
+            audio_report_ms=b105_loop_start_ms;
+        }
 
         int b131_presented_this_loop = 0;
 
@@ -13773,11 +13779,6 @@ int main(void)
             }
 
 
-            if (game_running && memory_status==0) {
-                static int16_t spu_pcm[FM_SPU_FRAME_SAMPLES*2u];
-                fm_spu_render(spu_pcm,FM_SPU_FRAME_SAMPLES);
-                fm_audio_spu_push(spu_pcm,FM_SPU_FRAME_SAMPLES);
-            }
         } /* wall-clock VBlank ticks */
         fm_mdec_host_frame = frame;
         fm_mdec_host_cycles = (uint64_t)frame * 677376u;
@@ -20963,7 +20964,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.57\nvideo_mode=%08lX\n"
+                            "video_probe=B136.58\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -21031,7 +21032,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.57\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.58\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"

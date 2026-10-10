@@ -2443,6 +2443,7 @@ static void fm_dma4_try_start(void)
         return;
     }
 
+    fm_spu_sync_now();
     /* DMA4 copies actual sample data before exposing completion.  Keep MADR
      * at its programmed value, as the existing synchronous bus contract does. */
     uint64_t words=g_dma4_bcr&0xffffu;

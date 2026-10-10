@@ -3,6 +3,10 @@
 #include <stdint.h>
 #define FM_SPU_FRAME_SAMPLES 735u
 void fm_spu_reset(void);
+/* Host-only hook: flush elapsed audio before register/sample changes. */
+void fm_spu_set_sync(void (*sync)(void));
+void fm_spu_sync_now(void);
+void fm_spu_key_activity(uint32_t out[3]);
 uint16_t fm_spu_reg_read(uint32_t address);
 void fm_spu_reg_write(uint32_t address, uint16_t value);
 uint16_t fm_spu_transfer_read(void);

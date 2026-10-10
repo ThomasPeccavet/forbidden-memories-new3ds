@@ -23,3 +23,7 @@ void fm_audio_snapshot_load(const FMAudioSnapshot *in);
 /* Independent SPU PCM stream; never changes the XA channel's sample rate. */
 int fm_audio_spu_push(const int16_t *pcm, unsigned frames);
 void fm_audio_spu_reset(void);
+
+/* Advance at 44.1kHz wall time independently of display VBlanks. */
+void fm_audio_spu_clock(uint64_t now_ms, int running);
+void fm_audio_spu_dump(const char *path);
