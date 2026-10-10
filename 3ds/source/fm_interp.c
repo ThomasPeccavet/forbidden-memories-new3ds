@@ -297,6 +297,67 @@ static inline void set_reg(
 }
 
 
+/* B136.60: common instructions execute in the hot ARM loop. Control flow,
+ * delay slots, GTE, multiply/divide and unaligned merges retain exec_normal.
+ * This matches the existing interpreter contracts, including immediate loads. */
+#ifndef FM_INTERP_FAST_COMMON
+#define FM_INTERP_FAST_COMMON 1
+#endif
+#if FM_INTERP_FAST_COMMON
+static inline int interp_fast_common(CPUState *cpu, uint32_t instruction,
+    uint32_t opcode, uint32_t rs_v, uint32_t rt_v, uint32_t rt,
+    uint32_t rd, uint32_t funct, uint32_t simm)
+{
+    uint32_t value, dest=rt;
+    switch (opcode) {
+    case 0x00:
+        dest=rd;
+        switch (funct) {
+        case 0x00: value=rt_v << ((instruction>>6)&31u); break;
+        case 0x02: value=rt_v >> ((instruction>>6)&31u); break;
+        case 0x03: value=(uint32_t)((int32_t)rt_v >> ((instruction>>6)&31u)); break;
+        case 0x04: value=rt_v << (rs_v&31u); break;
+        case 0x06: value=rt_v >> (rs_v&31u); break;
+        case 0x07: value=(uint32_t)((int32_t)rt_v >> (rs_v&31u)); break;
+        case 0x20: case 0x21: value=rs_v+rt_v; break;
+        case 0x22: case 0x23: value=rs_v-rt_v; break;
+        case 0x24: value=rs_v&rt_v; break;
+        case 0x25: value=rs_v|rt_v; break;
+        case 0x26: value=rs_v^rt_v; break;
+        case 0x27: value=~(rs_v|rt_v); break;
+        case 0x2A: value=(int32_t)rs_v<(int32_t)rt_v; break;
+        case 0x2B: value=rs_v<rt_v; break;
+        default: return 0;
+        }
+        break;
+    case 0x08: case 0x09: value=rs_v+simm; break;
+    case 0x0A: value=(int32_t)rs_v<(int32_t)simm; break;
+    case 0x0B: value=rs_v<simm; break;
+    case 0x0C: value=rs_v&(instruction&0xFFFFu); break;
+    case 0x0D: value=rs_v|(instruction&0xFFFFu); break;
+    case 0x0E: value=rs_v^(instruction&0xFFFFu); break;
+    case 0x0F: value=instruction<<16; break;
+    case 0x20: value=(uint32_t)(int32_t)(int8_t)interp_read_byte(cpu,rs_v+simm); break;
+    case 0x21: value=(uint32_t)(int32_t)(int16_t)interp_read_half(cpu,rs_v+simm); break;
+    case 0x23: value=interp_read_word(cpu,rs_v+simm); break;
+    case 0x24: value=interp_read_byte(cpu,rs_v+simm); break;
+    case 0x25: value=interp_read_half(cpu,rs_v+simm); break;
+    case 0x28: case 0x29: case 0x2B:
+#if FM_PERF_PROFILE
+        g_debug_last_store_pc=cpu->pc;
+#endif
+        if(opcode==0x28) interp_write_byte(cpu,rs_v+simm,(uint8_t)rt_v);
+        else if(opcode==0x29) interp_write_half(cpu,rs_v+simm,(uint16_t)rt_v);
+        else interp_write_word(cpu,rs_v+simm,rt_v);
+        return 1;
+    default: return 0;
+    }
+    set_reg(cpu,dest,value);
+    return 1;
+}
+#endif
+
+
 /*
  * ============================================================
  * Résultat helper
@@ -1885,6 +1946,13 @@ static FMInterpResult fm_interp_run_internal(
 
 
         ++count;
+#if FM_INTERP_FAST_COMMON
+        if (interp_fast_common(cpu,instruction,opcode,rs_v,rt_v,rt,rd,funct,simm)) {
+            cpu->pc=pc+4u;
+            cpu->gpr[0]=0u;
+            continue;
+        }
+#endif
 
 
         /*

@@ -7136,7 +7136,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         /* A single stdio buffer avoids small writes per formatted line. */
         char report_buffer[8192];
         setvbuf(fp, report_buffer, _IOFBF, sizeof(report_buffer));
-        fprintf(fp, "probe=B136.59 window_ms=%llu pc=%08lX script=%04lX\n",
+        fprintf(fp, "probe=B136.60 window_ms=%llu pc=%08lX script=%04lX\n",
             (unsigned long long)elapsed, (unsigned long)(cpu ? cpu->pc : 0u),
             (unsigned long)fm_memory_read_half(0x8009C610u));
         fprintf(fp, "host_fps_x100=%llu new_images_fps_x100=%llu samples=%lu\n",
@@ -11971,7 +11971,7 @@ static void fm_snapshot_status(const char *action,int result,int legacy)
 {
     FILE *f=fopen("sdmc:/3ds/fm-new3ds/snapshot-status.txt","w");
     if (!f) return;
-    fprintf(f,"probe=B136.59 action=%s result=%d format=%s\n"
+    fprintf(f,"probe=B136.60 action=%s result=%d format=%s\n"
         "0=success 1=deferred -7=unsafe_legacy -8=invalid_state\n",
         action,result,legacy ? "v3-partial" : "v4");
     fclose(f);
@@ -12284,7 +12284,7 @@ static int fm_b135_quick_save(
     fm_audio_pause(1); fm_snapshot_host_save(ext);
     mdec_snapshot_write(blob+fixed+sizeof(*ext));
     fm_spu_snapshot_write(blob+fixed+sizeof(*ext)+mdec_bytes);
-    int result=fm_snapshot_write(FM_B135_QS_PATH,blob,total,fm_snapshot_schema(),disc,13659u);
+    int result=fm_snapshot_write(FM_B135_QS_PATH,blob,total,fm_snapshot_schema(),disc,13660u);
     free(blob); fm_audio_pause(0);
     /* File I/O is an explicit pause, never clock/CD transport catch-up debt. */
     fm_host_clock_reset(&g_ps1_host_clock); g_cd_stream_last_ms=osGetTime();
@@ -12826,7 +12826,7 @@ int main(void)
     fm_audio_init();
     FILE *audio_status=fopen("sdmc:/3ds/fm-new3ds/audio-status.txt","w");
     if(audio_status) {
-        fprintf(audio_status,"probe=B136.59 dsp=%08lX spu=24-voices rate=44100 xa_channel=0 spu_channel=1\n",(unsigned long)(uint32_t)fm_audio_status());
+        fprintf(audio_status,"probe=B136.60 dsp=%08lX spu=24-voices rate=44100 xa_channel=0 spu_channel=1\n",(unsigned long)(uint32_t)fm_audio_status());
         if((uint32_t)fm_audio_status()==0xD880A7FAu) fprintf(audio_status,"missing DSP component: sdmc:/3ds/dspfirm.cdc (or hb:ndsp)\n");
         fclose(audio_status);
     }
@@ -13844,7 +13844,7 @@ int main(void)
                 /*
                  * B84 : borne temps pour TOUS les modes.
                  *
-                 * B136.59: service a due PS1 tick before another dispatch,
+                 * B136.60: service a due PS1 tick before another dispatch,
                  * including VSync HLE. The fixed 12ms limit remains a CPU
                  * responsiveness ceiling, not the interrupt deadline.
                  */
@@ -16709,7 +16709,7 @@ int main(void)
                     phys < 0x00200000u
                 )
                 {
-                    const uint32_t b91_block_limit = 512u;
+                    const uint32_t b91_block_limit = 32u;
                     uint32_t b91_blocks = 0u;
                     int b91_time_yield = 0;
 
@@ -16740,19 +16740,15 @@ int main(void)
                          * verifie entre basic blocks de l'overlay.
                          */
                         /*
-                         * B111 - le test temporel par basic block etait
-                         * inutilement couteux dans le fast path. Les
-                         * blocks overlay sont courts; en release on ne
-                         * relit l'horloge qu'une fois tous les 16 blocks.
-                         * Les builds de diagnostic gardent la mesure fine.
+                         * B136.60: chain branches inside the interpreter.
+                         * Check deadlines per 2048-instruction chunk instead
+                         * of returning after every short basic block. Resident
+                         * calls leave the region before executing natively.
                          */
 #if defined(NDEBUG)
                         if (
-                            b91_blocks != 0u
-                            &&
-                            (b91_blocks & 15u) == 0u
-                            &&
                             (osGetTime() - b16_slice_start_ms) >= g_b105_slice_budget_ms
+                            || fm_host_clock_wait_ns(&g_ps1_host_clock,osGetTime()) == 0u
                         )
                         {
                             ++g_b91_fast_time_yields;
@@ -16761,17 +16757,16 @@ int main(void)
                         }
 
                         interp =
-                            fm_interp_run_block(
-                                cpu,
-                                8192u
+                            fm_interp_run_region(
+                                cpu, 2048u,
+                                0x00100000u, 0x00200000u, 0xFFFFFFFFu
                             );
 
                         g_b91_last_block_ms = 0u;
 #else
                         if (
-                            b91_blocks != 0u
-                            &&
                             (osGetTime() - b16_slice_start_ms) >= g_b105_slice_budget_ms
+                            || fm_host_clock_wait_ns(&g_ps1_host_clock,osGetTime()) == 0u
                         )
                         {
                             ++g_b91_fast_time_yields;
@@ -16782,9 +16777,9 @@ int main(void)
                         uint64_t b91_block_start_ms = osGetTime();
 
                         interp =
-                            fm_interp_run_block(
-                                cpu,
-                                8192u
+                            fm_interp_run_region(
+                                cpu, 2048u,
+                                0x00100000u, 0x00200000u, 0xFFFFFFFFu
                             );
 
                         uint32_t b91_block_ms =
@@ -20965,7 +20960,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.59\nvideo_mode=%08lX\n"
+                            "video_probe=B136.60\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -21033,7 +21028,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.59\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.60\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"
