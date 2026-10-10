@@ -66,6 +66,29 @@ int main(void){
  assert(large.fraction==760);
  return 0;
 }''')
+ def test_deadline_after_guest_work_is_read_only(self):
+  self.compile_run('''#include <assert.h>
+#include "fm_host_clock.h"
+int main(void){
+ FMHostClock c={0};fm_host_clock_due(&c,1000);
+ assert(fm_host_clock_wait_ns(&c,1000)==16666667u);
+ assert(fm_host_clock_wait_ns(&c,1016)==666667u);
+ assert(!fm_host_clock_wait_ns(&c,1017));
+ // Deadline inspection must not consume the IRQ owed by guest CPU work.
+ assert(c.last_ms==1000 && c.fraction==0 && c.pending==0);
+ assert(fm_host_clock_due(&c,1021)==1 && c.fraction==260);
+ assert(fm_host_clock_wait_ns(&c,1021)==12333334u);
+ assert(!fm_host_clock_wait_ns(&c,1034));
+ assert(fm_host_clock_due(&c,1034)==1);
+ // Long raster block: all debt is still delivered, without a host sleep.
+ assert(fm_host_clock_due(&c,1434)==8 && c.pending==16);
+ assert(!fm_host_clock_wait_ns(&c,1434));
+ assert(fm_host_clock_due(&c,1434)==8);
+ assert(fm_host_clock_due(&c,1434)==8);
+ assert(fm_host_clock_wait_ns(&c,1434)>0);
+ fm_host_clock_reset(&c);assert(fm_host_clock_wait_ns(&c,1434)>0);
+ return 0;
+}''')
  def test_apt_hook_marks_explicit_resume(self):
   s=(ROOT/'3ds/source/main.c').read_text()
   hook=function(s,'fm_clock_apt_hook')

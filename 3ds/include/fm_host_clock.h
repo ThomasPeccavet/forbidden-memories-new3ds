@@ -36,4 +36,16 @@ static inline unsigned fm_host_clock_update(FMHostClock *clock, uint64_t now,
 static inline int fm_host_clock_pending(const FMHostClock *clock) {
     return clock->pending!=0;
 }
+/* Read-only deadline: execution and presentation may have consumed a tick
+ * since the last clock update. Never advance/drop ticks from this query. */
+static inline uint64_t fm_host_clock_wait_ns(const FMHostClock *clock,
+    uint64_t now) {
+    if (!clock->valid || now < clock->last_ms) return 16666667u;
+    if (clock->pending) return 0u;
+    uint64_t elapsed=now-clock->last_ms;
+    if (elapsed >= 17u) return 0u;
+    uint32_t phase=clock->fraction+(uint32_t)elapsed*60u;
+    if (phase >= 1000u) return 0u;
+    return ((uint64_t)(1000u-phase)*1000000u+59u)/60u;
+}
 #endif
