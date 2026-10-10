@@ -67,7 +67,7 @@ jobs:
             echo "Missing Unai assembly implementation"; exit 1
           fi
 
-      - name: Compile transformed native RAM accesses on ARM
+      - name: Compile transformed native RAM and COP2 accesses on ARM
         run: |
           export PATH="$DEVKITARM/bin:$PATH"
           mkdir -p /tmp/fm-native-original
@@ -79,4 +79,7 @@ jobs:
               -Werror=implicit-function-declaration $cycles \
               -Iwork/upstream-psxrecomp/runtime/include -I3ds/include \
               -c /tmp/fm-native-transformed/SLES_039.48_full_00.c -o /tmp/fm-native.o
+            if "$DEVKITARM/bin/arm-none-eabi-nm" -u /tmp/fm-native.o | grep -E 'gte_(read|write)_(data|ctrl)'; then
+              echo "Constant native COP2 transfers were not specialized"; exit 1
+            fi
           done

@@ -35,6 +35,15 @@ cpu->write_half(a, 3); cpu->read_byte(a); cpu->write_byte(a, 4);
         self.assertIn('fm_native_cyc_load_word(cpu,f(a),31,0x20)', result)
         self.assertEqual(transform(result)[1],0)
 
+    def test_gte_calls_only_not_declarations_or_text(self):
+        source = '// gte_read_data(cpu, 1)\nuint32_t gte_read_data(CPUState *, uint8_t);\n'
+        source += 'gte_read_data(cpu, 15); gte_read_ctrl(cpu, 26); gte_write_data(cpu, 30, f()); gte_write_ctrl(cpu, 31, 1);'
+        result, count = transform(source)
+        self.assertEqual(count, 4)
+        self.assertIn('uint32_t gte_read_data(CPUState *, uint8_t);', result)
+        self.assertIn('fm_native_gte_write_data(cpu, 30, f())', result)
+        self.assertEqual(transform(result)[1], 0)
+
     def test_build_copies_originals_unchanged(self):
         with tempfile.TemporaryDirectory() as temp:
             source, out = Path(temp)/'original', Path(temp)/'copies'

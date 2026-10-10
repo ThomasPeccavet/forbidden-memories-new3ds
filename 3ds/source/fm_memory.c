@@ -138,6 +138,7 @@ static uint8_t *g_ram = NULL;
 static size_t g_ram_size = 0;
 
 static uint8_t g_scratch[PSX_SCRATCH_SIZE];
+uint8_t *const g_fm_native_scratch = g_scratch;
 
 
 /*

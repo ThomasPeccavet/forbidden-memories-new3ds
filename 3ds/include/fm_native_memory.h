@@ -6,12 +6,14 @@
 
 /* B136.51: bound by fm_memory_init; never an independent RAM copy.
  * Only ordinary RAM accesses with the standard callback can be inlined.
- * Scratchpad, MMIO, BIOS and incomplete spans keep the original callback. */
+ * MMIO, BIOS and incomplete spans keep the original callback.
+ * B136.62 also admits the same 1 KB scratchpad used by fm_memory. */
 typedef struct FMNativeRam {
     uint8_t *base;
     size_t size;
 } FMNativeRam;
 extern FMNativeRam g_fm_native_ram;
+extern uint8_t *const g_fm_native_scratch;
 
 static inline uint8_t *fm_native_ram_ptr(uint32_t address, unsigned width)
 {
@@ -21,6 +23,8 @@ static inline uint8_t *fm_native_ram_ptr(uint32_t address, unsigned width)
         && g_fm_native_ram.size >= width
         && offset <= g_fm_native_ram.size - width)
         return g_fm_native_ram.base + offset;
+    if (width <= 0x400u && phys - 0x1f800000u <= 0x400u - width)
+        return g_fm_native_scratch + phys - 0x1f800000u;
     return NULL;
 }
 
@@ -28,6 +32,7 @@ static inline uint8_t *fm_native_ram_ptr(uint32_t address, unsigned width)
  * between CLEAN and PROFILE builds. Check the mirrored RAM offset. */
 static inline int fm_native_watched(uint32_t address, unsigned width)
 {
+    if ((address & 0x1fffffffu) >= 0x00800000u) return 0;
     uint32_t offset = address & 0x001fffffu;
     uint32_t end = offset + width;
     return (offset <= 0x0009c4b8u && end > 0x0009c4b8u)

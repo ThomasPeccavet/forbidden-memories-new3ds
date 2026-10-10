@@ -215,6 +215,33 @@ static void scratch_fast(void)
             assert(fm_memory_read_word(address) == 0x5678CDAB);
         }
     }
+    CPUState cpu={0};
+    cpu.read_word=fm_memory_read_word; cpu.read_half=fm_memory_read_half;
+    cpu.read_byte=fm_memory_read_byte; cpu.write_word=fm_memory_write_word;
+    cpu.write_half=fm_memory_write_half; cpu.write_byte=fm_memory_write_byte;
+    cpu.gpr[1]=0xABCDEF12u; cpu.gpr[2]=0x6789u; cpu.gpr[3]=0x34;
+    for(unsigned b=0;b<3;++b) for(unsigned o=0;o<1014;++o) {
+        uint32_t a=bases[b]+o;
+        memset(g_fm_native_scratch+o,0,10);
+        uint32_t ref=native_fixture_reference(&cpu,a);
+        unsigned char expected[16];
+        memcpy(expected,g_fm_native_scratch+o,10);
+        memset(g_fm_native_scratch+o,0,10); native_cycle_calls=0;
+        assert(native_fixture(&cpu,a)==ref);
+        assert(!memcmp(expected,g_fm_native_scratch+o,10));
+#ifndef PSX_ENABLE_BLOCK_CYCLES
+        assert(native_cycle_calls==0);
+#endif
+    }
+    assert(fm_native_ram_ptr(0x1f8003fcu,4));
+    assert(!fm_native_ram_ptr(0x1f8003fdu,4));
+    assert(!fm_native_ram_ptr(0x1f801000u,1));
+    assert(!fm_native_ram_ptr(0x1f7fffffu,1));
+    cpu.read_word=native_custom_read;cpu.write_word=native_custom_write;
+    native_callback_reads=native_callback_writes=0;
+    fm_native_write_word(&cpu,0xbf800001u,0x12345678u);
+    assert(fm_native_read_word(&cpu,0x9f800001u)==0x12345678u);
+    assert(native_callback_reads==1 && native_callback_writes==1);
     fm_memory_write_half(0xBF8003FE, 0x9876);
     assert(fm_memory_read_byte(0x9F8003FF) == 0x98);
     assert(fm_memory_unmapped_count() == 0);

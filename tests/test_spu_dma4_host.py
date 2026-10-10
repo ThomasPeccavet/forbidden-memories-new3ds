@@ -19,9 +19,9 @@ class SpuDma4HostTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             fixture = (ROOT / "tests/host/native_memory_generated.c").read_text()
             native, count = transform(fixture)
-            self.assertEqual(count, 6)
+            self.assertEqual(count, 10)
             generated = Path(temp) / "native-memory.c"
-            generated.write_text(fixture.replace("native_fixture(", "native_fixture_reference(") + "\n" + native)
+            generated.write_text(fixture.replace("native_fixture(", "native_fixture_reference(").replace("native_gte_fixture(", "native_gte_fixture_reference(") + "\n" + native)
             for profile, cycles in ((0,0), (1,0), (0,1), (1,1)):
                 binary = Path(temp) / f"spu-dma4-{profile}-{cycles}"
                 cmd = cc + [

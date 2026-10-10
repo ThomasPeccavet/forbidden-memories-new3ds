@@ -11,3 +11,15 @@ uint32_t native_fixture(CPUState *cpu, uint32_t a)
     return psx_cyc_load_word(cpu,a,1,2) ^ psx_cyc_load_half(cpu,a + 5u,2,4)
         ^ psx_cyc_load_byte(cpu,a + 9u,3,8);
 }
+
+/* Constant COP2 operands representative of the model callback path. */
+uint32_t gte_read_data(CPUState *, uint8_t);
+uint32_t gte_read_ctrl(CPUState *, uint8_t);
+void gte_write_data(CPUState *, uint8_t, uint32_t);
+void gte_write_ctrl(CPUState *, uint8_t, uint32_t);
+uint32_t native_gte_fixture(CPUState *cpu, uint32_t v)
+{
+    gte_write_data(cpu, 0, v);
+    gte_write_ctrl(cpu, 0, v);
+    return gte_read_data(cpu, 0) ^ gte_read_ctrl(cpu, 0);
+}
