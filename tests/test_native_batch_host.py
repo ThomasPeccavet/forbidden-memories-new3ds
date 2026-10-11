@@ -20,7 +20,6 @@ static int g_probe_reason,g_probe_armed;
 static jmp_buf g_probe_jmp;
 static uint64_t now;
 static unsigned calls,scenario;
-static int fm_sprite_packet_try(CPUState *cpu,uint32_t address) {(void)cpu;(void)address;return 0;}
 static int fm_model_walk_try(CPUState *cpu,uint32_t address) {
  if(scenario==6 && address==0x8008a0d8u){cpu->pc=0x80153070u;return 1;}
  return 0;

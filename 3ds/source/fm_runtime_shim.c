@@ -4,7 +4,6 @@
 #include "fm_sort_swap.h"
 #include "fm_geometry_cache.h"
 #include "fm_model_walk.h"
-#include "fm_sprite_packet.h"
 #include <3ds.h>
 #include "fm_runtime_shim.h"
 #include "fm_memory.h"
@@ -775,7 +774,7 @@ FMRuntimeProbeResult fm_runtime_probe(
 
     if (jumped == 0)
     {
-        int dispatched = (fm_sprite_packet_try(cpu, addr) || fm_model_walk_try(cpu, addr)) ? 1 :
+        int dispatched = fm_model_walk_try(cpu, addr) ? 1 :
             psx_dispatch_game_compiled(
                 cpu,
                 addr
@@ -955,7 +954,7 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
             if (dispatched_count && (dispatched_count & 3u)==0u
                 && osGetTime()-batch_start_ms>=2u) break;
 
-            last_dispatch = (fm_sprite_packet_try(cpu, current) || fm_model_walk_try(cpu, current)) ? 1 :
+            last_dispatch = fm_model_walk_try(cpu, current) ? 1 :
                 psx_dispatch_game_compiled(
                     cpu,
                     current
@@ -1457,7 +1456,7 @@ void psx_check_interrupts_dispatch_entry(
 
     /* A generated direct call must leave its host stack before handing the
      * primitive callback to the dispatcher. The guest stack is already valid. */
-    if (g_probe_armed && (fm_sprite_packet_try(cpu, resume_pc) || fm_model_walk_try(cpu, resume_pc))) {
+    if (g_probe_armed && fm_model_walk_try(cpu, resume_pc)) {
         fm_probe_stop(FM_STOP_BUDGET, cpu->pc);
         return;
     }

@@ -22,7 +22,6 @@ class VlcHostTests(unittest.TestCase):
         c_source = r'''
 #include "cpu_state.h"
 #include <assert.h>
-static int fm_sprite_packet_try(CPUState *cpu,uint32_t address) {(void)cpu;(void)address;return 0;}
 static int fm_model_walk_try(CPUState *cpu,uint32_t address) {(void)cpu;(void)address;return 0;}
 static int g_probe_armed, enabled, tries, stops, observed;
 enum { FM_STOP_BUDGET = 2 };
