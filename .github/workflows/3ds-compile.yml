@@ -49,6 +49,7 @@ jobs:
             build-profile/fm_runtime_shim.o \
             build-profile/fm_sort_swap.o \
             build-profile/fm_model_walk.o \
+            build-profile/fm_sprite_packet.o \
             build-profile/fm_interp.o \
             build-profile/fm_gpu.o \
             build-profile/gpu_sw_renderer.o \
