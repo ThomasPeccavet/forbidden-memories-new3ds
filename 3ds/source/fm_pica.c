@@ -20,10 +20,12 @@ static shaderProgram_s program;
 static uint32_t *seed,*readback;
 static int initialized,attempted,active,target_valid;
 static unsigned commands;
+static int selftest;
 static int dx0,dy0,dx1,dy1;
 static uint64_t draws,flushes,uploads,downloads,fallbacks,texture_uploads,feedback;
 typedef struct Texture {C3D_Tex tex;uint16_t page,clut;int valid,allocated;} Texture;
 static Texture cache[CACHE_COUNT];
+static int run_selftest(void);
 static void invalidate_cache(void){for(unsigned i=0;i<CACHE_COUNT;i++)cache[i].valid=0;}
 void fm_pica_sync(void)
 {
@@ -72,6 +74,8 @@ int fm_pica_init(uint16_t *vram)
   cache[i].allocated=1;C3D_TexSetFilter(&cache[i].tex,GPU_NEAREST,GPU_NEAREST);
   C3D_TexSetWrap(&cache[i].tex,GPU_REPEAT,GPU_REPEAT);
  }
+ if(!run_selftest()){fm_pica_exit();attempted=1;return 0;}
+ selftest=1;draws=flushes=uploads=downloads=fallbacks=texture_uploads=feedback=0;
  return 1;
 }
 static int begin(void)
@@ -129,6 +133,7 @@ int fm_pica_draw(const uint32_t *p,unsigned words,uint16_t page,uint32_t window,
  int mask_set,int mask_check,int left,int top,int right,int bottom,int ox,int oy)
 {
  if(!initialized)return 0;
+ unsigned op=p[0]>>24;if(op<0x20u||op>0x7fu)return 0;
  FMPicaPlan q;
  if(!fm_pica_plan(&q,p,words,page,window,mask_set,mask_check,left,top,right,bottom,ox,oy)){
   ++fallbacks;return 0;
@@ -157,12 +162,26 @@ int fm_pica_draw(const uint32_t *p,unsigned words,uint16_t page,uint32_t window,
  if(q.bottom>dy1)dy1=q.bottom;
  ++commands;++draws;return 1;
 }
+/* Validate shader, transfer orientation, RGBA order and alpha-bit packing on
+ * the actual GPU. Restore the only CPU rectangle touched, even on failure. */
+static int run_selftest(void)
+{
+ uint16_t saved[64];
+ for(unsigned y=0;y<8;y++)memcpy(saved+y*8,ram+(16+y)*WIDTH+16,16);
+ uint32_t p[]={0x600000ffu,16u|(16u<<16),8u|(8u<<16)};
+ int ok=fm_pica_draw(p,3,0,0,0,0,16,16,23,23,0,0);
+ fm_pica_sync();
+ for(unsigned y=0;y<8;y++)for(unsigned x=0;x<8;x++)
+  if(ram[(16+y)*WIDTH+16+x]!=31u)ok=0;
+ for(unsigned y=0;y<8;y++)memcpy(ram+(16+y)*WIDTH+16,saved+y*8,16);
+ target_valid=0;invalidate_cache();return ok;
+}
 void fm_pica_status_dump(void)
 {
  FILE *f=fopen("sdmc:/3ds/fm-new3ds/pica-status.txt","w");if(!f)return;
- fprintf(f,"probe=B136.66 renderer=pica200-experiment initialized=%d\n"
+ fprintf(f,"probe=B136.66 renderer=pica200-experiment initialized=%d selftest=%d\n"
   "draws=%llu fallback=%llu batches=%llu texture_uploads=%llu feedback_barriers=%llu\n"
-  "seed_bytes=%llu readback_bytes=%llu\n",initialized,
+  "seed_bytes=%llu readback_bytes=%llu\n",initialized,selftest,
   (unsigned long long)draws,(unsigned long long)fallbacks,(unsigned long long)flushes,
   (unsigned long long)texture_uploads,(unsigned long long)feedback,
   (unsigned long long)uploads,(unsigned long long)downloads);fclose(f);
