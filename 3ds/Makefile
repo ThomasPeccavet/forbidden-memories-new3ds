@@ -38,6 +38,7 @@ GENERATED_COMBINED := \
 
 PROFILE ?= 0
 UNAI ?= 0
+PICA ?= 0
 
 ifeq ($(PROFILE),1)
 TARGET := fm-new3ds-profile
@@ -53,6 +54,12 @@ endif
 ifeq ($(UNAI),1)
 TARGET := $(TARGET)-unai
 BUILD := $(BUILD)-unai
+endif
+
+# PICA is opt-in. Keep existing binaries/object directories independent.
+ifeq ($(PICA),1)
+TARGET := $(TARGET)-pica
+BUILD := $(BUILD)-pica
 endif
 
 # ============================================================
@@ -89,6 +96,7 @@ CFLAGS := \
 	-DPSX_NO_DEBUG_TOOLS \
 	$(PERF_MODE_DEFS) \
 	-DFM_GPU_UNAI=$(UNAI) \
+	-DFM_GPU_PICA=$(PICA) \
 	-fomit-frame-pointer \
 	-Wall \
 	-Wextra \
@@ -99,6 +107,7 @@ CFLAGS := \
 	-MMD \
 	-MP \
 	-Iinclude \
+	-I$(BUILD) \
 	-I$(CTRULIB)/include \
 	-I$(RUNTIME)/include
 
@@ -142,6 +151,11 @@ else
 LINK_DRIVER := $(CC)
 endif
 
+ifeq ($(PICA),1)
+OBJECTS += $(BUILD)/fm_pica.o $(BUILD)/fm_pica_plan.o $(BUILD)/fm_pica_shbin.o
+PICA_LIBS := -lcitro3d
+endif
+
 
 .PHONY: all clean generated-release profile
 
@@ -163,6 +177,17 @@ $(BUILD):
 
 $(BUILD)/%.o: source/%.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# Compile a real PICA vertex shader and embed it in the optional target.
+$(BUILD)/fm_pica.shbin: shaders/fm_pica.v.pica | $(BUILD)
+	picasso -o $@ $<
+$(BUILD)/fm_pica_shbin.s: $(BUILD)/fm_pica.shbin
+	bin2s -a 4 -H $(BUILD)/fm_pica_shbin.h $< > $(BUILD)/fm_pica_shbin.s
+$(BUILD)/fm_pica_shbin.h: $(BUILD)/fm_pica_shbin.s
+	@test -s $@
+$(BUILD)/fm_pica_shbin.o: $(BUILD)/fm_pica_shbin.s
+	$(CC) $(ARCH) -c $< -o $@
+$(BUILD)/fm_pica.o: $(BUILD)/fm_pica_shbin.h
 
 $(BUILD)/fm_unai.o: source/fm_unai.cpp $(wildcard source/unai/*.h) | $(BUILD)
 	$(CXX) $(filter-out -std=gnu11,$(CFLAGS)) -std=gnu++11 -marm -mfpu=vfp \
@@ -207,6 +232,7 @@ $(TARGET).elf: $(OBJECTS) $(GENERATED_COMBINED)
 		$(OBJECTS) \
 		$(GENERATED_COMBINED) \
 		-L$(CTRULIB)/lib \
+		$(PICA_LIBS) \
 		-lctru \
 		-lm \
 		-o $@
@@ -223,12 +249,14 @@ clean:
 		build-profile \
 		build-clean-unai \
 		build-profile-unai \
+		build-clean-pica build-profile-pica build-clean-unai-pica build-profile-unai-pica \
 		fm-new3ds.elf \
 		fm-new3ds.3dsx \
 		fm-new3ds-profile.elf \
 		fm-new3ds-profile.3dsx \
 		fm-new3ds-unai.elf fm-new3ds-unai.3dsx \
-		fm-new3ds-profile-unai.elf fm-new3ds-profile-unai.3dsx
+		fm-new3ds-profile-unai.elf fm-new3ds-profile-unai.3dsx \
+		fm-new3ds*-pica.elf fm-new3ds*-pica.3dsx
 
 
 -include $(OBJECTS:.o=.d)

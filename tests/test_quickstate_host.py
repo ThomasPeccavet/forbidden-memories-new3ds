@@ -20,6 +20,7 @@ class QuickStateTests(unittest.TestCase):
         fixture=str(ROOT/"tests/host/test_media.c")
         harness=r'''
 #include "fm_snapshot.h"
+#include "fm_pica.h"
 #include "fm_spu.h"
 #include "fm_gpu.h"
 #include "fm_runtime_shim.h"

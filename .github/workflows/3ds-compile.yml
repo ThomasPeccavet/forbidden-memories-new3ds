@@ -81,3 +81,22 @@ jobs:
               -Iwork/upstream-psxrecomp/runtime/include -I3ds/include \
               -c /tmp/fm-native-transformed/SLES_039.48_full_00.c -o /tmp/fm-native.o
           done
+
+      - name: Compile and link PICA200 backend and shader
+        run: |
+          export PATH="$DEVKITARM/bin:$DEVKITPRO/tools/bin:$PATH"
+          make -C 3ds PROFILE=1 UNAI=1 PICA=1 -j2 \
+            build-profile-unai-pica/main.o \
+            build-profile-unai-pica/fm_gpu.o \
+            build-profile-unai-pica/fm_pica.o \
+            build-profile-unai-pica/fm_pica_plan.o \
+            build-profile-unai-pica/fm_pica_shbin.o
+          "$DEVKITARM/bin/arm-none-eabi-gcc" -r \
+            3ds/build-profile-unai-pica/fm_pica.o \
+            3ds/build-profile-unai-pica/fm_pica_plan.o \
+            3ds/build-profile-unai-pica/fm_pica_shbin.o \
+            -L"$DEVKITPRO/libctru/lib" -lcitro3d -lctru \
+            -o /tmp/fm-pica-linked.o
+          if "$DEVKITARM/bin/arm-none-eabi-nm" -u /tmp/fm-pica-linked.o | grep -E " C3D_| fm_pica_shbin"; then
+            echo "Unresolved PICA API or shader"; exit 1
+          fi

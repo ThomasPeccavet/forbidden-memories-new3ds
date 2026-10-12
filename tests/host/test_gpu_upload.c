@@ -1,3 +1,4 @@
+static void fm_pica_cpu_write(void) {}
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
