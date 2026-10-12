@@ -24,7 +24,7 @@ class B13574ProfileCleanTests(unittest.TestCase):
 
     def test_hot_gpu_diagnostics_are_profile_only(self) -> None:
         self.assertIn("#if FM_PERF_PROFILE", GPU)
-        self.assertIn("B135.30/34/35: sampled opcode/raster timing is PROFILE-only", GPU)
+        self.assertIn("B136.38: complete opcode timing is PROFILE-only", GPU)
         self.assertIn("++g_b13543_rect_nonzero_texels;", GPU)
         self.assertIn("++g_b13543_rect_writes;", GPU)
 

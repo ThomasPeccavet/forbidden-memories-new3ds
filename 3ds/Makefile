@@ -37,6 +37,8 @@ GENERATED_COMBINED := \
 #
 
 PROFILE ?= 0
+UNAI ?= 0
+PICA ?= 0
 
 ifeq ($(PROFILE),1)
 TARGET := fm-new3ds-profile
@@ -48,6 +50,17 @@ BUILD := build-clean
 PERF_MODE_DEFS := -DFM_PERF_PROFILE=0
 endif
 
+# B136.44: opt-in backend and isolated outputs allow an honest A/B comparison.
+ifeq ($(UNAI),1)
+TARGET := $(TARGET)-unai
+BUILD := $(BUILD)-unai
+endif
+
+# PICA is opt-in. Keep existing binaries/object directories independent.
+ifeq ($(PICA),1)
+TARGET := $(TARGET)-pica
+BUILD := $(BUILD)-pica
+endif
 
 # ============================================================
 # ARM11
@@ -82,6 +95,8 @@ CFLAGS := \
 	-DNDEBUG \
 	-DPSX_NO_DEBUG_TOOLS \
 	$(PERF_MODE_DEFS) \
+	-DFM_GPU_UNAI=$(UNAI) \
+	-DFM_GPU_PICA=$(PICA) \
 	-fomit-frame-pointer \
 	-Wall \
 	-Wextra \
@@ -92,6 +107,7 @@ CFLAGS := \
 	-MMD \
 	-MP \
 	-Iinclude \
+	-I$(BUILD) \
 	-I$(CTRULIB)/include \
 	-I$(RUNTIME)/include
 
@@ -111,13 +127,34 @@ OBJECTS := \
 	$(BUILD)/main.o \
 	$(BUILD)/platform.o \
 	$(BUILD)/disc.o \
+	$(BUILD)/fm_audio.o \
+	$(BUILD)/fm_xa.o \
+	$(BUILD)/fm_media.o \
+	$(BUILD)/fm_snapshot.o \
+	$(BUILD)/fm_vlc.o \
+	$(BUILD)/fm_mdec.o \
 	$(BUILD)/fm_cpu.o \
 	$(BUILD)/fm_memory.o \
+	$(BUILD)/fm_spu.o \
 	$(BUILD)/fm_runtime_shim.o \
+	$(BUILD)/fm_sort_swap.o \
+	$(BUILD)/fm_model_walk.o \
 	$(BUILD)/fm_interp.o \
 	$(BUILD)/fm_gpu.o \
 	$(BUILD)/gpu_sw_renderer.o \
 	$(BUILD)/gpu_vram_dirty.o
+
+ifeq ($(UNAI),1)
+OBJECTS += $(BUILD)/fm_unai.o $(BUILD)/gpu_unai_arm.o
+LINK_DRIVER := $(CXX)
+else
+LINK_DRIVER := $(CC)
+endif
+
+ifeq ($(PICA),1)
+OBJECTS += $(BUILD)/fm_pica.o $(BUILD)/fm_pica_plan.o $(BUILD)/fm_pica_shbin.o
+PICA_LIBS := -lcitro3d
+endif
 
 
 .PHONY: all clean generated-release profile
@@ -140,6 +177,24 @@ $(BUILD):
 
 $(BUILD)/%.o: source/%.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# Compile a real PICA vertex shader and embed it in the optional target.
+$(BUILD)/fm_pica.shbin: shaders/fm_pica.v.pica | $(BUILD)
+	picasso -o $@ $<
+$(BUILD)/fm_pica_shbin.s: $(BUILD)/fm_pica.shbin
+	bin2s -a 4 -H $(BUILD)/fm_pica_shbin.h $< > $(BUILD)/fm_pica_shbin.s
+$(BUILD)/fm_pica_shbin.h: $(BUILD)/fm_pica_shbin.s
+	@test -s $@
+$(BUILD)/fm_pica_shbin.o: $(BUILD)/fm_pica_shbin.s
+	$(CC) $(ARCH) -x assembler-with-cpp -c $< -o $@
+$(BUILD)/fm_pica.o: $(BUILD)/fm_pica_shbin.h
+
+$(BUILD)/fm_unai.o: source/fm_unai.cpp $(wildcard source/unai/*.h) | $(BUILD)
+	$(CXX) $(filter-out -std=gnu11,$(CFLAGS)) -std=gnu++11 -marm -mfpu=vfp \
+		-fno-exceptions -fno-rtti -fno-strict-aliasing -Isource/unai -c $< -o $@
+
+$(BUILD)/gpu_unai_arm.o: source/unai/gpu_arm.S source/unai/arm_features.h | $(BUILD)
+	$(CC) $(ARCH) -marm -mfpu=vfp -Isource/unai -c $< -o $@
 
 
 # ============================================================
@@ -172,11 +227,12 @@ $(GENERATED_COMBINED): generated-release
 
 
 $(TARGET).elf: $(OBJECTS) $(GENERATED_COMBINED)
-	$(CC) \
+	$(LINK_DRIVER) \
 		$(LDFLAGS) \
 		$(OBJECTS) \
 		$(GENERATED_COMBINED) \
 		-L$(CTRULIB)/lib \
+		$(PICA_LIBS) \
 		-lctru \
 		-lm \
 		-o $@
@@ -191,10 +247,16 @@ clean:
 		build \
 		build-clean \
 		build-profile \
+		build-clean-unai \
+		build-profile-unai \
+		build-clean-pica build-profile-pica build-clean-unai-pica build-profile-unai-pica \
 		fm-new3ds.elf \
 		fm-new3ds.3dsx \
 		fm-new3ds-profile.elf \
-		fm-new3ds-profile.3dsx
+		fm-new3ds-profile.3dsx \
+		fm-new3ds-unai.elf fm-new3ds-unai.3dsx \
+		fm-new3ds-profile-unai.elf fm-new3ds-profile-unai.3dsx \
+		fm-new3ds*-pica.elf fm-new3ds*-pica.3dsx
 
 
 -include $(OBJECTS:.o=.d)

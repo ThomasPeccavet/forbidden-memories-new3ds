@@ -1,7 +1,23 @@
 #include "fm_interp.h"
+#include "fm_ram_access.h"
 
 #include <stdint.h>
 #include <string.h>
+
+#ifndef FM_PERF_PROFILE
+#define FM_PERF_PROFILE 0
+#endif
+
+#if FM_PERF_PROFILE
+extern uint32_t g_debug_last_store_pc;
+static inline int interp_watch_render_store(uint32_t addr, uint32_t size)
+{
+    uint32_t phys = (addr & 0x1FFFFFFFu) & 0x001FFFFFu;
+    if ((addr & 0x1FFFFFFFu) >= 0x00800000u) return 0;
+    return (phys <= 0x0009C4B8u && phys + size > 0x0009C4B8u)
+        || (phys < 0x000EB251u && phys + size > 0x000EB248u);
+}
+#endif
 
 /*
  * B135.1 - le GPF de la scene Simon peut etre repris par le fallback
@@ -119,9 +135,7 @@ static inline uint16_t interp_read_half(
 
     if (interp_ram_offset(addr, 2u, &o))
     {
-        uint16_t value;
-        memcpy(&value, g_interp_ram + o, sizeof(value));
-        return value;
+        return fm_ram_load16(g_interp_ram + o);
     }
 
     return cpu->read_half(addr);
@@ -137,9 +151,7 @@ static inline uint32_t interp_read_word(
 
     if (interp_ram_offset(addr, 4u, &o))
     {
-        uint32_t value;
-        memcpy(&value, g_interp_ram + o, sizeof(value));
-        return value;
+        return fm_ram_load32(g_interp_ram + o);
     }
 
     return cpu->read_word(addr);
@@ -152,6 +164,13 @@ static inline void interp_write_byte(
     uint8_t value
 )
 {
+#if FM_PERF_PROFILE
+    if (interp_watch_render_store(addr, 1u))
+    {
+        cpu->write_byte(addr, value);
+        return;
+    }
+#endif
     uint32_t o;
 
     if (interp_ram_offset(addr, 1u, &o))
@@ -170,11 +189,18 @@ static inline void interp_write_half(
     uint16_t value
 )
 {
+#if FM_PERF_PROFILE
+    if (interp_watch_render_store(addr, 2u))
+    {
+        cpu->write_half(addr, value);
+        return;
+    }
+#endif
     uint32_t o;
 
     if (interp_ram_offset(addr, 2u, &o))
     {
-        memcpy(g_interp_ram + o, &value, sizeof(value));
+        fm_ram_store16(g_interp_ram + o, value);
         return;
     }
 
@@ -188,11 +214,18 @@ static inline void interp_write_word(
     uint32_t value
 )
 {
+#if FM_PERF_PROFILE
+    if (interp_watch_render_store(addr, 4u))
+    {
+        cpu->write_word(addr, value);
+        return;
+    }
+#endif
     uint32_t o;
 
     if (interp_ram_offset(addr, 4u, &o))
     {
-        memcpy(g_interp_ram + o, &value, sizeof(value));
+        fm_ram_store32(g_interp_ram + o, value);
         return;
     }
 
@@ -264,6 +297,67 @@ static inline void set_reg(
 }
 
 
+/* B136.60: common instructions execute in the hot ARM loop. Control flow,
+ * delay slots, GTE, multiply/divide and unaligned merges retain exec_normal.
+ * This matches the existing interpreter contracts, including immediate loads. */
+#ifndef FM_INTERP_FAST_COMMON
+#define FM_INTERP_FAST_COMMON 1
+#endif
+#if FM_INTERP_FAST_COMMON
+static inline int interp_fast_common(CPUState *cpu, uint32_t instruction,
+    uint32_t opcode, uint32_t rs_v, uint32_t rt_v, uint32_t rt,
+    uint32_t rd, uint32_t funct, uint32_t simm)
+{
+    uint32_t value, dest=rt;
+    switch (opcode) {
+    case 0x00:
+        dest=rd;
+        switch (funct) {
+        case 0x00: value=rt_v << ((instruction>>6)&31u); break;
+        case 0x02: value=rt_v >> ((instruction>>6)&31u); break;
+        case 0x03: value=(uint32_t)((int32_t)rt_v >> ((instruction>>6)&31u)); break;
+        case 0x04: value=rt_v << (rs_v&31u); break;
+        case 0x06: value=rt_v >> (rs_v&31u); break;
+        case 0x07: value=(uint32_t)((int32_t)rt_v >> (rs_v&31u)); break;
+        case 0x20: case 0x21: value=rs_v+rt_v; break;
+        case 0x22: case 0x23: value=rs_v-rt_v; break;
+        case 0x24: value=rs_v&rt_v; break;
+        case 0x25: value=rs_v|rt_v; break;
+        case 0x26: value=rs_v^rt_v; break;
+        case 0x27: value=~(rs_v|rt_v); break;
+        case 0x2A: value=(int32_t)rs_v<(int32_t)rt_v; break;
+        case 0x2B: value=rs_v<rt_v; break;
+        default: return 0;
+        }
+        break;
+    case 0x08: case 0x09: value=rs_v+simm; break;
+    case 0x0A: value=(int32_t)rs_v<(int32_t)simm; break;
+    case 0x0B: value=rs_v<simm; break;
+    case 0x0C: value=rs_v&(instruction&0xFFFFu); break;
+    case 0x0D: value=rs_v|(instruction&0xFFFFu); break;
+    case 0x0E: value=rs_v^(instruction&0xFFFFu); break;
+    case 0x0F: value=instruction<<16; break;
+    case 0x20: value=(uint32_t)(int32_t)(int8_t)interp_read_byte(cpu,rs_v+simm); break;
+    case 0x21: value=(uint32_t)(int32_t)(int16_t)interp_read_half(cpu,rs_v+simm); break;
+    case 0x23: value=interp_read_word(cpu,rs_v+simm); break;
+    case 0x24: value=interp_read_byte(cpu,rs_v+simm); break;
+    case 0x25: value=interp_read_half(cpu,rs_v+simm); break;
+    case 0x28: case 0x29: case 0x2B:
+#if FM_PERF_PROFILE
+        g_debug_last_store_pc=cpu->pc;
+#endif
+        if(opcode==0x28) interp_write_byte(cpu,rs_v+simm,(uint8_t)rt_v);
+        else if(opcode==0x29) interp_write_half(cpu,rs_v+simm,(uint16_t)rt_v);
+        else interp_write_word(cpu,rs_v+simm,rt_v);
+        return 1;
+    default: return 0;
+    }
+    set_reg(cpu,dest,value);
+    return 1;
+}
+#endif
+
+
 /*
  * ============================================================
  * Résultat helper
@@ -323,6 +417,13 @@ static int exec_normal(
 {
     uint32_t opcode =
         instruction >> 26;
+
+#if FM_PERF_PROFILE
+    /* Use the actual instruction PC, including a branch delay slot.
+     * cpu->pc alone is not the store PC in that case. */
+    if (opcode >= 0x28u && opcode <= 0x2Eu)
+        g_debug_last_store_pc = pc;
+#endif
 
 
     uint32_t rs =
@@ -1845,6 +1946,13 @@ static FMInterpResult fm_interp_run_internal(
 
 
         ++count;
+#if FM_INTERP_FAST_COMMON
+        if (interp_fast_common(cpu,instruction,opcode,rs_v,rt_v,rt,rd,funct,simm)) {
+            cpu->pc=pc+4u;
+            cpu->gpr[0]=0u;
+            continue;
+        }
+#endif
 
 
         /*

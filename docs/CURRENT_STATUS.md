@@ -1,6 +1,495 @@
 # État courant — New Nintendo 3DS
 
-Dernière mise à jour : **29 septembre 2026**.
+Dernière mise à jour : **9 octobre 2026**.
+
+## B136.55 : livrer les échéances Timer2 séparément
+
+Le temps Timer2 de chaque VBlank est découpé aux échéances du compteur.
+Le callback BIOS peut acquitter chaque interruption avant la suivante :
+738 livraisons sur dix secondes pour la configuration SEQ E000, contre
+600 avec la livraison coalescée. VSync, Timer0/1 et VBlank restent inchangés.
+Les interruptions masquées restent coalescées dans I_STAT ; aucune file
+artificielle de callbacks. Au maximum neuf tranches par tick, et le reste
+du temps est consommé même avec une cible anormalement petite.
+Gain attendu sur le rythme du séquenceur, pas une garantie de FPS.
+Essai en jeu nécessaire pour les transitions, la musique et les animations.
+
+## B136.54 : conserver et rattraper les ticks en retard
+
+Les ticks de jeu ne sont plus supprimés après une tranche longue : une
+dette 64 bits conserve les ticks entiers, livrés par lots de huit au maximum.
+Le scheduler ne dort pas sur un VBlank hôte tant qu'une dette reste à traiter.
+Pause, veille/restauration APT et quick-load remettent explicitement l'horloge
+à zéro. Le test de mille tranches de 90 ms retrouve 60 Hz au lieu de 44,44 Hz.
+Timer2, VSync et la cadence nominale restent inchangés pour isoler l'essai.
+La vitesse réelle et les transitions du jeu restent à valider sur le matériel.
+Voir [les tests et les limites](B136_54_CLOCK_DEBT.md).
+
+## Audit temporel après B136.53 — aucune modification des horloges
+
+B136.53 n'a pas changé la fluidité selon l'utilisateur. L'audit reproduit
+une perte de ticks après les tranches longues (plafond de quatre) et relève
+la fusion des échéances Timer2 à une cadence de service 60 Hz. Le mode PAL
+est actif dans la sauvegarde, avec un modèle VBlank/HSync mixte. VSync(0)
+attend également le prochain VBlank dans le code original : ce n'est pas
+en soi une attente incorrecte. Aucun B136.54 n'est publié.
+Voir [preuves, limites et priorités](B136_53_TIMING_AUDIT.md).
+
+## B136.53 : cache compact des sprites neutres Unai
+
+B136.52 n'a apporté aucun gain perceptible dans le menu deck/coffre.
+La capture contient 440 sprites neutres sur 477. Le nouveau cache décode
+les sprites opaques neutres/raw 4/8 bpp et réutilise leurs pixels ; avant
+chaque hit, les octets source et la palette sont comparés exactement.
+Textures modifiées, copies GPU, palettes et quick-load sont donc couverts
+sans dépendre d'un compteur global. Fondu, modulation, aliasing et texture
+window conservent le chemin Unai actuel. Le gain FPS reste à tester.
+Voir [les limites et la validation](B136_53_SPRITE_CACHE.md).
+
+## B136.52 : échange mémoire du tri deck/coffre
+
+La sauvegarde du menu avant combat est arrêtée dans l'échange de deux
+enregistrements de 16 octets, au treizième octet. Le helper reconnu est
+remplacé par un échange RAM borné, avec reprise au milieu de la boucle.
+Le tri et son comparateur restent inchangés. 69 tests passent, et la RAM
+ainsi que les registres de cette sauvegarde correspondent exactement à
+l'exécution MIPS de référence après l'échange. Le gain FPS reste à tester.
+Voir [le périmètre et la validation](B136_52_SORT_SWAP.md).
+
+## B136.51 : RAM directe dans les copies du cœur recompilé
+
+B136.50 n'a pas apporté de gain visible, ou seulement un gain faible selon
+l'utilisateur. La nouvelle expérience cible les lectures et écritures du
+code C résident généré, plutôt que les pixels. Le rebuild crée des copies
+spécialisées, sans modifier les sources originales : RAM ordinaire en ligne,
+callbacks conservés pour MMIO, scratchpad, BIOS, limites, callbacks remplacés
+et écritures surveillées. Les helpers de cycles restent intacts lorsque
+PSX_ENABLE_BLOCK_CYCLES est activé. Le build d'essai reste PROFILE=0 UNAI=1.
+69 tests hôte passent ; les FPS du jeu ne sont pas validés sur l'hôte.
+Voir [le périmètre et la validation](B136_51_NATIVE_RAM_INLINE.md).
+
+## B136.50 : polygones texturés de couleur constante
+
+B136.49 n'a pas apporté de gain perceptible selon l'utilisateur. La suite
+cible Unai : les polygones GT dont tous les sommets ont exactement le même
+RGB passent par le rendu à couleur constante, avec le format de paquet GT.
+La sauvegarde de duel contient 54 polygones constants sur les 88 GT trouvés
+dans les quatre listes OT parcourues ; ce compte n'est pas une mesure de temps.
+Les vrais dégradés conservent le chemin Gouraud. Le build reste PROFILE=0
+UNAI=1 ; le gain FPS doit être confirmé en jeu.
+Voir [l'équivalence et les limites](B136_50_CONSTANT_GOURAUD.md).
+
+## B136.49 : accès alignés des overlays et du scratchpad
+
+Les mêmes helpers mémoire alignés sont utilisés pour le cœur recompilé et
+l'interpréteur des overlays, y compris la lecture des instructions MIPS.
+Le scratchpad passe avant le décodage MMIO ; les accès byte en RAM aussi.
+Le build d'essai reste `PROFILE=0 UNAI=1`. B136.48 a été jugée nettement
+plus fluide par l'utilisateur (environ 20 FPS estimés) ; cette observation
+combine le mode sans instrumentation et l'optimisation mémoire, sans
+mesurer leur contribution séparément. Le gain B136.49 reste à tester.
+Voir [les chemins et les tests](B136_49_OVERLAY_RAM.md).
+
+## B136.48 : accès RAM alignés du cœur recompilé
+
+Les callbacks RAM 16/32 bits utilisent une copie alignée lorsque le pointeur
+hôte le permet ; les adresses non alignées gardent l'assemblage par octets.
+Le chemin RAM précède les tests MMIO, et la surveillance des écritures teste
+deux intervalles au lieu de dix adresses. Pour le prochain essai en combat,
+utiliser `PROFILE=0 UNAI=1` afin de retirer l'instrumentation du build de test.
+Cela vise le coût CPU par accès ; aucun gain de FPS en jeu n'est encore validé.
+Voir [les changements et les limites](B136_48_RAM_ACCESS.md).
+
+## B136.47 : secteurs ignorés lors du chargement des miniatures
+
+Le curseur CD avance désormais à chaque événement DataReady, même lorsque
+le callback du jeu saute un secteur sans appeler CdGetSector. Le transfert
+utilise le LBA réservé pour cet événement et ne l'avance pas une seconde fois.
+Cela corrige la sélection des images dans le cache compact des cartes.
+Une ancienne quickstate conserve les images erronées : tester avec un duel
+rechargé depuis le jeu, ou une nouvelle partie, sans restaurer cet ancien cache.
+Voir [la cause et la validation](B136_47_CARD_THUMBNAILS.md).
+
+## B136.46 : chaînage du moteur d'affichage résident
+
+Les blocs 80040350–80042BE0 sont admis dans les lots natifs, avec 80042538
+exclu pour conserver le suivi de vie des paquets de la main. Les petits
+retours de parcours/animation/rendu passent directement au dispatcher natif
+au lieu de refaire tous les contrôles de la boucle principale. La borne de
+2 ms, les sorties HLE, le watchdog, les overlays et VSync restent identiques.
+Cette modification vise un gain réel ; aucun gain de FPS n'est encore mesuré.
+Voir [les frontières et la validation](B136_46_RENDER_BATCH.md).
+
+## B136.45 : suspendre l'attente de compteur à 80012CD4
+
+La sonde principale rend immédiatement la main lorsque la boucle FR vérifiée
+attend encore le compteur de frame. Le checkpoint sert d'abord le VBlank
+existant ; la reprise reste à 80012CD4, sans changer la condition ni les
+compteurs. Les sondes de callbacks sont exclues. Le rapport compte les
+suspensions/reprises et mesure toutes les sondes 12CB8/12CD4 dans la fenêtre.
+Unai reste activé avec `UNAI=1`. Le gain de FPS reste à mesurer dans Azahar.
+Voir [la condition et les limites](B136_45_FRAME_WAIT.md).
+
+## B136.44 : expérience Unai pour les commandes graphiques coûteuses
+
+`UNAI=1` active les sprites 64h et les polygones texturés Gouraud 34h/3Ch
+du moteur Unai de PCSX ReARMed, avec son assembleur ARMv6. Les sorties
+et objets sont séparés de la référence `UNAI=0`, conservée par défaut.
+Le rapport identifie le backend et ses commandes/fallbacks par fenêtre.
+Horloges, CD, séquenceur et entrées restent identiques. Les tests hôte
+couvrent les sprites et les gardes ; le gain et les différences visuelles
+doivent être mesurés sur la même sauvegarde dans Azahar.
+Voir [l'intégration et les commandes de comparaison](B136_44_UNAI_EXPERIMENT.md).
+
+## B136.43 : chaînage natif des routines d'objets
+
+Le chaînage sous un seul setjmp inclut désormais les routines résidentes
+84018–85D98 et 85D9C–89D60, avec la frontière HLE 85D98 exclue. Les entrées
+objet sont bornées à 64 blocs, avec retour après >=2 ms vérifié tous les
+quatre blocs. Le rapport expose probes/chains/blocks par fenêtre.
+Le coût réel évité et le gain de FPS restent à mesurer dans le duel.
+Voir [les frontières et la validation](B136_43_NATIVE_OBJECT_BATCH.md).
+
+## B136.42 : servir l'horloge avant l'exécution guest
+
+B136.41 tient 60 Hz mais mesure 53 attentes VSync pour 24 images, sans gain.
+B136.42 déplace les ticks/callbacks dus avant l'exécution du jeu, après les
+entrées et le quick-load. Le VSync voit ainsi les ticks écoulés pendant
+l'attente hôte précédente. Cadence, budgets et règles de présentation
+restent identiques ; le gain reste à mesurer dans Azahar.
+Voir [l'ordre d'exécution et ses limites](B136_42_CLOCK_ORDER.md).
+
+## B136.41 : reprise des tranches et horloge VBlank indépendante
+
+B136.40 mesure 285 ms d'attente après épuisement du budget sur 2006 ms.
+B136.41 reprend ces tranches sans attendre si aucun VSync guest n'est actif.
+Le VBlank PS1 et les root timers suivent désormais le temps hôte à 60 Hz,
+avec rattrapage borné et reset à la reprise d'une longue pause/quick-load.
+Les frontières de présentation et l'isolation SEQ sont conservées.
+Le gain de FPS et le rythme visible restent à vérifier dans Azahar.
+Voir [les règles et limites](B136_41_WALL_CLOCK.md).
+
+## B136.40 : attribution des attentes du planificateur
+
+B136.39 divise par deux le coût moyen des sprites au repos, mais le temps
+économisé se retrouve largement dans les attentes. B136.40 distingue les
+attentes après sortie sur budget, avec VSync actif, et les autres attentes.
+Les compteurs VSync et sorties sur budget sont des deltas par fenêtre.
+Le rythme du jeu et du séquenceur reste inchangé.
+Voir [la définition et les limites](B136_40_WAIT_ATTRIBUTION.md).
+
+## B136.39 : boucle spécialisée des sprites opaques
+
+Au repos, B136.38 mesure 469 ms pour les sprites 64h sur 2004 ms,
+contre 26 ms de parcours/autres opérations DMA. B136.39 spécialise les
+formats texture et utilise des tables de modulation constantes par sprite.
+700 cas dans deux modes conservent tous les pixels et compteurs de texels,
+y compris les accès VRAM chevauchants. Le débit du cas modulé est environ
+2–2,45 fois supérieur sur le banc x86 ; le gain ARM/global reste à mesurer.
+Voir [validation et limites](B136_39_SPRITE_SPANS.md).
+
+## B136.38 : diagnostic complet du coût GPU
+
+B136.37 mesure 982 ms DMA2 sur 2049 ms dans une autre fenêtre de duel.
+Une commande 2Ah échantillonnée prend 30,9 ms. B136.38 chronomètre toutes
+les commandes terminées et sépare le traitement des paquets du reste du
+DMA. Ce build PROFILE sert à identifier le prochain hotspot ; aucun gain
+de FPS n'est annoncé. Les mesures comprennent leur coût d'instrumentation.
+Voir [la définition des compteurs](B136_38_COMPLETE_GPU_TIMING.md).
+
+## B136.37 : modulation exacte des couleurs par table
+
+B136.36 reste à 16,50 latches/s dans le duel utilisateur : aucun triangle
+ne prend le chemin neutre. B136.37 cible les couleurs variables des 4488
+triangles rapides mesurés. Une table de 1 Kio remplace les multiplications
+et saturations des composantes, avec spécialisation par format de texture.
+Les tests vérifient toutes les entrées et comparent le rendu complet sur
+640 cas dans deux modes. Le banc x86 montre 1,12–1,25 fois le débit du
+chemin ciblé ; le gain ARM et la cadence globale restent à mesurer.
+Voir [validation et limites](B136_37_COLOR_LOOKUP.md).
+
+## B136.36 : modulation neutre des polygones texturés
+
+La fenêtre utilisateur B136.35 mesure 16,45 latches/s et identifie 3Ch/34h
+comme premiers opcodes GPU échantillonnés. B136.36 spécialise leur cas
+opaque à modulation neutre, avec les mêmes pixels que B136.35 sur 640 cas
+compilés en deux modes. 57 tests passent. Le cas ciblé est environ 2,7 à
+3 fois plus rapide sur le banc local x86 ; aucun gain ARM/global n'est
+annoncé avant mesure. Le rapport ajoute la couverture du cas neutre.
+Voir [les résultats et limites](B136_36_NEUTRAL_TEXTURE.md).
+
+## B136.35 : calcul exact des gradients Gouraud et classement GPU
+
+B136.34 mesure 920 ms de DMA2 sur 2064 ms en duel. B136.35 remplace
+les divisions 64 bits du setup Gouraud non texturé par une estimation
+corrigée et vérifiée en entier, avec fallback exact. Les tests comparent
+250000 quotients et 600 triangles pixel par pixel avec B136.34.
+Le rapport compact classe désormais les opcodes GPU sur toute sa fenêtre.
+56 tests passent ; le gain sur ARM/Azahar reste à mesurer.
+Voir [les changements et leurs limites](B136_35_EXACT_GOURAUD.md).
+
+## B136.34 : suppression des dumps lourds pendant les mesures
+
+La seconde mesure en duel B136.33 indique 12,45 latches/s, sans gain
+observable sur B136.32 (14,6/s). Elle ne prouve pas une régression causale,
+les fenêtres de combat pouvant différer. Les scans sont bien désactivés.
+B136.34 coupe les anciens dumps SD par défaut, conserve le rapport compact,
+et expose les temps DMA2/rendu imbriqués. Le gain reste à mesurer.
+Voir [la validation et les limites](B136_34_COMPACT_PERF.md).
+
+## B136.33 : réduction des scans de diagnostic pendant les combats
+
+La mesure utilisateur en duel B136.32 indique 14,6 latches d'image/s,
+avec 1013 ms avant présentation sur 2122 ms. B136.33 désactive les anciens
+parcours d'OT dédiés aux diagnostics des cartes en main. Le prédicat du
+bridge de récupération reste actif, ainsi que le tri et le rendu.
+Le gain en jeu reste à mesurer sur la même sauvegarde de combat.
+Voir [les changements et leur validation](B136_33_OT_DIAGNOSTICS.md).
+
+## B136.32 : mesure des performances globales
+
+L'essai utilisateur B136.31 valide le début du jeu après environ 15 secondes
+à la fin de l'intro. Le problème prioritaire devient la cadence globale,
+annoncée à 10 FPS ou moins. Le diagnostic intro ne suffit pas à attribuer
+cette lenteur au GPU, au CPU ou au séquenceur.
+
+B136.32 ajoute `perf-latest.txt` en PROFILE, par fenêtres réelles de deux
+secondes, et réactive un échantillonnage limité du code ARM (1 appel sur 64).
+Il distingue la cadence hôte des nouveaux latches d'image, expose les temps
+par phase et le temps audio imbriqué. Aucun gain FPS n'est annoncé avant les
+mesures en jeu. Voir [la procédure](B136_32_GLOBAL_PERF.md).
+
+## B136.31 : livraison du timer découplée des updates graphiques
+
+L'utilisateur a confirmé que B136.30 termine finalement l'intro et atteint
+Simon Muran. La longue attente reste anormale. Le timer avançait à chaque
+intervalle hôte, mais son callback n'était autorisé qu'à l'entrée `80012C50`,
+une fois par update du jeu. Le rendu lent et les tranches de l'interpréteur
+retardaient cette livraison ; plusieurs échéances se regroupaient dans I_STAT.
+
+B136.31 exécute le callback natif complet dans un CPU et une pile séparés,
+à la frontière VBlank hôte et dès la réactivation des IRQs dans le dispatcher,
+en conservant les masques et événements BIOS.
+Le rejeu de la capture B136.30 termine après 374 livraisons supplémentaires,
+avec le contexte principal préservé. Les tests menu antérieurs passent aussi.
+Le parcours et la durée réelle dans Azahar restent à confirmer. Voir
+[la méthode, les preuves et les limites](B136_31_SEQ_DELIVERY.md).
+
+## B136.30 : timer du séquenceur 17 fois trop lent
+
+Le log utilisateur B136.29 confirme les retours des interruptions audio
+(279 appels / 279 retours), mais le script attend encore la fin du SEQ.
+Le compteur 2 avançait de 4096 ticks par VBlank 3DS ; sa source système/8
+demande 70560 ticks à 60 Hz. Cette erreur de cadence pouvait prolonger
+l'attente de plusieurs minutes.
+
+Le rejeu avec le vrai timer termine la même séquence après 13833 intervalles
+avec l'ancien code, contre 989 après correction (230,55 s contre 16,48 s
+simulées à 60 Hz). Le parcours Azahar reste à confirmer. Voir
+[le détail de cadence et les limites du rejeu](B136_30_SEQ_CLOCK.md).
+
+## B136.29 : registre SPU manquant, freeze menu reproduit
+
+Les captures menu B136.24/25 et fin d'intro B136.27 ont été rejouées avec
+`fm_memory.c` et l'interpréteur natif réels. Les stores SH au masque SPU
+`1F801D98/1F801D9A` étaient ignorés ; le séquenceur attendait ensuite un bit
+qui restait nul. Le masque 24 bits est désormais mémorisé et relisible.
+
+Les deux callbacks menu reviennent en 291/302 blocs. Le SEQ de fin d'intro
+termine et le service natif efface son drapeau `0x80`, sans forçage du script.
+Le test antérieur avec MMIO générique ne reproduisait pas le vrai backend.
+Voir [les preuves et limites](B136_29_SPU_REVERB_FREEZE.md).
+
+Le parcours complet Azahar reste à valider. Retester depuis un boot neuf :
+le format quickstate passe en version 3 pour sauvegarder le nouveau registre.
+L'écran inférieur reste sans lignes de debug ; les diagnostics fichiers restent.
+
+## B136.18 : limite VLC native 00FFFFFF
+
+Essai B136.17 : amélioration ressentie (~15 FPS visuels), mais petites pauses.
+Le log mesure 155 décodages sur 26281 ms (5,85 images/s MDEC), codec 7293 ms,
+309 frames STR et surtout `vlc_hle calls=0 fallback=312 limit=00FFFFFF`.
+La HLE n'était donc pas active : le garde-fou limitait arbitrairement le
+nombre de demi-mots à 20000h. Le jeu utilise FFFFFFh comme frontière de
+comparaison pour traiter une frame entière, sans écrire jusqu'à cette adresse.
+
+B136.18 accepte cette frontière sans modifier la limite du jeu. Les accès
+restent bornés au vrai buffer de sortie, au flux et aux tables en RAM ; un
+calcul de frontière qui déborde uint32 reste refusé avec fallback atomique.
+49 tests host passent, dont 525 fixtures différentielles contre la routine
+Ghidra, avec la valeur native FFFFFFh pour les trois versions du format.
+`movie_perf` ajoute max_decode_ms pour observer les pics du codec MDEC.
+Ni cadence CD, saut de frame natif ni décodage audio ne sont modifiés.
+
+Retester au boot, vidéo entière sans START. Vérifier l'activation `vlc_hle`
+et comparer movie_perf ; les petites pauses ne sont pas encore attribuées
+à une cause unique ni annoncées corrigées avant cet essai.
+
+## B136.17 : Huffman/VLC natif en C
+
+L'essai B136.16 confirme une amélioration ressentie, mais une cadence basse
+et une impression d'accélération. Mesure : 153 décodages en 25757 ms, soit
+5,90 FPS ; le codec MDEC consomme 7237 ms (~47 ms par image). 309 frames STR
+sont publiées. Le lecteur natif compare les frames disponibles à la position
+du flux et peut en sauter ; cette différence n'est pas une mesure directe
+du nombre d'images affichées ou une preuve d'un bug d'horloge.
+
+B136.17 traduit la routine FR 800914A8 en C, avec les tables Huffman étendues
+du jeu, DC signés/prédictifs, codes d'échappement, tokens groupés et état
+résident de continuation. Les commandes et coefficients envoyés au MDEC
+sont conservés. Un buffer temporaire permet un fallback natif sans modifier
+la RAM/CPU si les adresses, tables, tailles ou overlaps sont incompatibles.
+Le dispatcher principal et les appels générés imbriqués utilisent cette HLE.
+Ni le timing CD ni la règle de synchronisation du lecteur ne sont changés.
+
+49 tests host passent. Une référence distincte issue du pseudo-C Ghidra
+original est exécutée sur 420 fixtures (versions 1/2/3, coefficients signés,
+AC/escape/table secondaire/tokens groupés, quatre tailles de morceaux).
+Sortie entière, retour, pointeurs et sept mots de continuation sont comparés.
+Le checkpoint généré retourne au RA et conserve le chemin natif en cas de
+refus. `vlc_hle` expose succès, fallback, durée, table et taille de morceau.
+Le gain en FPS et la compatibilité avec le vrai flux restent à valider dans
+Azahar, depuis un boot neuf et sans START pendant la vidéo d'ouverture.
+
+## B136.16 : transferts vidéo par blocs
+
+Essai utilisateur B136.15 : la vidéo entre Konami et le titre fonctionne,
+mais à environ 5–10 FPS. Le XA est décodé (387 secteurs / 780192 frames PCM)
+et ndspInit échoue avec D880A7FA ; sortie audio toujours non validée.
+La scène après le nom n'affiche pas encore la vidéo/animation attendue.
+La priorité utilisateur est maintenant la fluidité de la vidéo d'ouverture.
+
+B136.16 remplace les copies STR octet par octet par des copies RAM bornées,
+active les bursts DMA0/1 et copie le FIFO MDEC de sortie par bloc. Les uploads
+GPU DMA2 et LoadImage passent par un flux GP0 groupé : en phase A0, copie
+par ligne via le renderer, avec conservation du dirty-state et du miroir.
+Le chemin par mot reste disponible pour les DMA inversés, débordements RAM
+et sources LoadImage non alignées. Aucun saut de frame ni changement IDCT.
+
+47 tests host passent. Comparaison bit à bit des chemins GP0, uploads RGB24,
+stripes, transferts partiels, pixels impairs et débordements VRAM ; MDEC
+word/burst, DMA inversés et rebouclage RAM. Un benchmark synthétique sur
+l'hôte mesure environ 24 ms contre 3 ms pour les uploads de 100 images ;
+ce résultat ne prédit pas les FPS dans Azahar ou sur New3DS.
+
+intro-diag conserve `movie_perf=decoded/elapsed_ms/decode_ms/fps_x100` après
+la vidéo. FPS = cadence des décodages MDEC couleur entre le premier et le
+dernier, pas cadence du framebuffer Azahar. `decode_ms` mesure le codec
+seul ; `elapsed_ms` inclut lecture, lecteur/Huffman, uploads et attente.
+Retester depuis un boot neuf, laisser finir la vidéo sans START et collecter
+intro-diag au titre. L'amélioration réelle reste à confirmer sur cet essai.
+
+## B136.15 : décodage XA et lecteur STR/MDEC
+
+L'utilisateur confirme le texte après validation du nom sur B136.14.
+La position XA dépasse la fin demandée, les flags CD retombent à zéro et le
+script continue. Konami/titre/menu et texte sont donc validés sur B136.14.
+
+B136.15 ajoute la lecture complète MODE2/2352, un décodeur XA ADPCM
+4/8 bits mono/stéréo avec historique par canal et le filtrage fichier/canal.
+Les échantillons à 37800/18900 Hz sont envoyés à NDSP via des buffers PCM
+stéréo en mémoire linéaire, sans écraser les buffers en cours. Le CdlMix du
+jeu règle la matrice CD. Le résultat ndspInit est exposé ; si le DSP échoue,
+le décodage et le lecteur vidéo peuvent continuer sans sortie audio.
+
+Les secteurs STR sont réassemblés par frame et publiés dans le ring natif
+uniquement une fois complets, avec marqueur de rebouclage et backpressure.
+Le lecteur/Huffman/LoadImage du jeu est conservé. Le décodeur MDEC de la
+révision PSXRecomp épinglée est raccordé aux registres 1F801820/824, au DMA0
+entrée et DMA1 sortie ; un callback DMA1 séparé reprend le contexte guest.
+Le skip STR automatique est désarmé pour tester la vraie vidéo du boot.
+
+46 tests locaux passent. L'oracle FFmpeg compare exactement le PCM de
+16 secteurs synthétiques utilisant les quatre filtres ; les tests couvrent
+également le ring STR, MDEC RGB16/RGB24, DMA en attente, callback, CdlMix et
+propriété des buffers NDSP. L'essai audiovisuel dans Azahar reste nécessaire.
+Pas encore de mixage des 24 voix SPU ; la conversion de fréquence NDSP
+n'est pas le filtre zigzag matériel PS1. Emphase XA non prise en charge.
+Les savestates du port ne sérialisent pas encore ce nouveau pipeline :
+tester par démarrage neuf, sans quick-load. intro-diag expose media_raw,
+xa_decoded, pcm_frames, dsp, str_sectors/frames et mdec_blocks/in/out.
+
+## B136.14 : position du transport ReadS/XA
+
+L'essai B136.13 atteint la phase XA 06 et le script 0A, mais GetlocL renvoie
+encore 00004D8C alors que la lecture demandée commence à 00031734 et finit
+à 00031834. Le backend confirmait ReadS (1B) sans appliquer le wrapper
+7BA00 : SetMode, Setloc puis ReadS. B136.14 applique ces effets dans le
+backend commun main/IRQ, après acceptation de la commande.
+
+Le transport XA silencieux avance selon le temps hôte (75 secteurs/s,
+150 si mode double vitesse), avec fraction conservée, et s'arrête sur
+Pause/Stop/Init. ReadN garde sa progression par secteurs/DataReady. La pause
+hôte ne rattrape pas le temps passé en pause. Aucune modification des flags
+XA, de la fin de requête ou de l'état script. intro-diag ajoute xa_transport.
+Les 38 tests passent, dont les scénarios C de position, GetlocL BCD,
+Pause, changement de mode, ReadN et rejet sans effets d'une commande.
+Le texte/scène reste à confirmer en jeu. Audio XA et vidéo STR/MDEC ne
+sont pas décodés par cette correction.
+
+## B136.13 : livraison asynchrone des callbacks CD
+
+L'introduction reste avec une requête type 4, flags 00080410, Pause terminée,
+file vide et script état 84. Le bridge livrait le callback avant de retourner
+au demandeur, alors que 80014478 pose son busy après l'enqueue. B136.13
+rend d'abord la main, puis livre la completion à partir de la frame hôte
+suivante. Le contexte interrompu est sauvegardé à la livraison (GPR, PC,
+HI/LO), avec métadonnées pending séparées des callbacks actifs. Une commande
+supplémentaire en attente est refusée sans écraser la précédente.
+
+38 tests host passent, dont un test C du scheduler/delivery réel. L'essai
+jeu reste nécessaire : la correction de timing n'est pas une implémentation
+audio XA ou STR/MDEC et ne prouve pas encore la résolution du texte/scène.
+intro-diag expose maintenant la phase XA et le callback pending/actif.
+
+## Nouvelle partie : titre/menu validés, introduction à diagnostiquer
+
+L'essai utilisateur B136.11 valide Konami, l'attente START, l'animation du menu,
+la nouvelle partie et la saisie du nom. Après validation, la boîte de dialogue
+apparaît sans texte et la zone de scène contient des données graphiques
+corrompues. C460 reste à 00080410 sur plusieurs collectes ; le GPU continue.
+Ce constat ne prouve pas encore une cause unique CD, script ou MDEC.
+
+B136.12 ajoute intro-diag.txt en PROFILE : requête active lue à 8009C2A8,
+états CD et DataReady, état/script/glyphes du traceur existant, tête de liste
+texte et compteurs STR/MDEC. Lecture seule, même cadence 120 frames ; aucun
+skip supplémentaire ou changement de rendu. Reproduire après le nom et
+collecter intro-diag.txt, debug-latest.txt complet et c4b8-diag.txt.
+
+## B136.11 : distinguer le STR du titre interactif
+
+L'essai B136.10 révèle une attente STR avant le titre SU : attendre START
+à cet endroit était une régression. Le premier STR non pris en charge est
+à nouveau terminé automatiquement. Le titre interactif attend ensuite
+START dans 80180390. Le bridge B75 est supprimé : après 24 updates, il
+rendait prématurément visibles les entrées que SU initialise masquées,
+pendant que « Appuyer sur START » reste affiché. Animation et visibilité
+appartiennent au code guest. Les fondus restent sans mutation hôte.
+Le rendu B136.11 et l'attente de START sont validés par l'essai utilisateur.
+
+## Correction B136.9 après essai Azahar
+
+Essai utilisateur du 7 octobre : les écrans s'enchaînent et C4B8 reste à 1.
+Deux défauts restent visibles : passage au menu sans START et fonds superposés.
+B136.10 désarmait le skip STR automatique, réservait la demande à un front START,
+retire le saut hôte vers l'état menu et remplace le bridge de fondu par une
+observation : seul 8001522C applique désormais la progression et le nettoyage.
+Le comportement visuel reste à tester. Le décodage STR/MDEC est incomplet.
+
+Le correctif SPU/DMA4 permet d'atteindre le titre et le menu, puis l'écran
+devient noir. La trace B136.8 et le code identifient une corruption hôte :
+le bridge CD efface 16 octets à 8009C4B4, dont le verrou de rendu C4B8 et
+ses couleurs. B136.9 utilise le tampon LibCD sync 800F7130 sur 8 octets,
+sans toucher au tampon ready adjacent. Test C du writer réel avec sentinelles
+ajouté. La disparition de l'écran noir reste à confirmer sur le jeu.
+
+## Audit hors jeu du 6 octobre
+
+La branche `fix/b136-spu-dma4-mmio-audit` corrige quatre défauts reproduits :
+déclaration C du helper SPU, écritures SPU 16 bits perdues, écritures partielles
+DMA4 ignorées et état SPU/DMA4 non réinitialisé. Les tests host du vrai module
+mémoire passent en CLEAN et PROFILE. **Le démarrage du jeu reste à retester.**
+Voir [preuves et limites de l'audit](B136_MMIO_AUDIT.md).
 
 ## Résumé
 

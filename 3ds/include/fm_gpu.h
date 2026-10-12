@@ -22,6 +22,9 @@ void fm_gpu_gp0_write(
     uint32_t value
 );
 
+/* Same GP0 stream, contiguous little-endian words (including commands). */
+void fm_gpu_gp0_words(const uint32_t *words, uint32_t count);
+
 /*
  * Port GP1 :
  *
@@ -279,3 +282,9 @@ int fm_gpu_bios_call(
     CPUState *cpu,
     uint32_t fn
 );
+
+/* Sampled opcode timings accumulated across a complete host time window. */
+void fm_gpu_perf_window_reset(void);
+void fm_gpu_perf_window_rank(unsigned rank, FMGpuOpcodePerf *out);
+void fm_gpu_perf_texture_window(uint64_t *neutral_pixels, uint64_t *fast_pixels,
+    uint32_t *neutral_triangles, uint32_t *fast_triangles);

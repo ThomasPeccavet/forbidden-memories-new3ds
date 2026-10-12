@@ -21,6 +21,9 @@ void fm_cpu_init(uint32_t entry_pc)
     g_cpu.pc =
         entry_pc;
 
+    /* HLE enters the executable after BIOS startup, with external IRQs enabled. */
+    g_cpu.cop0[12] = 0x401u;
+
 
     /*
      * Stack PS-X EXE.

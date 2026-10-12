@@ -1,6 +1,15 @@
+#include "fm_irq.h"
+#include "fm_frame_wait.h"
+#include "fm_native_batch.h"
+#include "fm_sort_swap.h"
+#include "fm_geometry_cache.h"
+#include "fm_model_walk.h"
+#include <3ds.h>
 #include "fm_runtime_shim.h"
 #include "fm_memory.h"
 #include "fm_gpu.h"
+#include "fm_media.h"
+#include "fm_vlc.h"
 
 #include <setjmp.h>
 #include <stddef.h>
@@ -129,6 +138,26 @@ void fm_runtime_text_trace_outer(CPUState *cpu, uint32_t phys)
 {
 #if FM_PERF_PROFILE
     b13586_text_entry(cpu, phys, 1);
+    /* B136.22: interpreted resident routines return through the outer
+     * dispatcher and do not execute generated entry checkpoints. Include
+     * those entries in the existing category-2 path counters. These are
+     * entry counts (both paths), not unique frame counts. */
+    if (phys == 0x00040B48u)
+    {
+        ++g_dialogue_layer_trace.category2_calls;
+        if (cpu)
+        {
+            int32_t head = (int16_t)cpu->read_half(0x800F11C4u);
+            g_dialogue_layer_trace.last_head = (uint32_t)head;
+            g_dialogue_layer_trace.last_ra = cpu->gpr[31];
+            if (head >= 0 && head < 0x60)
+                ++g_dialogue_layer_trace.category2_with_head;
+        }
+    }
+    else if (phys == 0x000418C0u)
+        ++g_dialogue_layer_trace.object_render_calls;
+    else if (phys == 0x000424B8u)
+        ++g_dialogue_layer_trace.primitive_calls;
 #else
     (void)cpu; (void)phys;
 #endif
@@ -473,6 +502,28 @@ static FM_BiosEvent g_bios_events[
     FM_BIOS_EVENT_COUNT
 ];
 
+/* B136.24: deliver enabled root-counter events at a dispatcher boundary.
+ * The native sound sequencer uses F2000002/spec 2 in callback mode.
+ * Leave disabled/unregistered IRQs pending, and acknowledge only the
+ * selected timer. CPU context is saved by the shared guest IRQ bridge. */
+int fm_runtime_take_timer_callback(uint32_t *callback)
+{
+    uint16_t pending = fm_memory_i_stat() & fm_memory_i_mask();
+    for (unsigned timer = 0; timer < 3; ++timer) {
+        uint16_t bit = (uint16_t)(1u << (timer + 4u));
+        if (!(pending & bit)) continue;
+        for (unsigned i = 0; i < FM_BIOS_EVENT_COUNT; ++i) {
+            FM_BiosEvent *ev = &g_bios_events[i];
+            if (!ev->used || !ev->enabled || ev->class_id != 0xF2000000u + timer
+                || ev->spec != 2u || ev->mode != 0x1000u || !ev->func) continue;
+            fm_memory_write_half(0x1F801070u, (uint16_t)~bit);
+            *callback = ev->func;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* B136.5 - BIOS event diagnostics for the CD readiness gate. */
 static uint32_t g_b136_bios_deliver_hits = 0u;
 static uint32_t g_b136_bios_deliver_class = 0u;
@@ -723,7 +774,7 @@ FMRuntimeProbeResult fm_runtime_probe(
 
     if (jumped == 0)
     {
-        int dispatched =
+        int dispatched = fm_model_walk_try(cpu, addr) ? 1 :
             psx_dispatch_game_compiled(
                 cpu,
                 addr
@@ -785,8 +836,10 @@ FMRuntimeProbeResult fm_runtime_probe(
  * recompiled function return. The Pharaoh map renderer lives in one known
  * resident region and bounces between many tiny compiled helpers there.
  *
+ * B136.43 also admits the resident object/packet helper ranges defined
+ * by fm_native_object_batch(), excluding the 85D98 HLE boundary.
  * Keep one probe armed and immediately re-dispatch while the next PC stays
- * in that safe region. As soon as code exits the range, becomes unknown,
+ * in an admitted region. As soon as code exits the range, becomes unknown,
  * hits the watchdog, GTE stop, syscall, etc., return to main unchanged.
  */
 FMRuntimeProbeResult fm_runtime_probe_chain(
@@ -849,6 +902,7 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
 
     if (jumped == 0)
     {
+        uint64_t batch_start_ms=osGetTime();
         uint32_t current = addr;
         uint32_t dispatched_count = 0u;
         int last_dispatch = -1;
@@ -881,6 +935,8 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
                 phys < phys4_end;
 
             if (
+                !fm_native_batchable(current)
+                &&
                 !in_primary
                 &&
                 !in_secondary
@@ -893,7 +949,12 @@ FMRuntimeProbeResult fm_runtime_probe_chain(
                 break;
             }
 
-            last_dispatch =
+            /* Bound new batches by elapsed time as well as block count.
+             * Existing single compiled calls remain indivisible. */
+            if (dispatched_count && (dispatched_count & 3u)==0u
+                && osGetTime()-batch_start_ms>=2u) break;
+
+            last_dispatch = fm_model_walk_try(cpu, current) ? 1 :
                 psx_dispatch_game_compiled(
                     cpu,
                     current
@@ -956,6 +1017,9 @@ const char *fm_runtime_stop_name(
     {
         case FM_STOP_RETURNED:
             return "RETURN";
+
+        case FM_STOP_FRAME_WAIT:
+            return "FRAME WAIT";
 
         case FM_STOP_BUDGET:
             return "WATCHDOG";
@@ -1206,7 +1270,7 @@ static void fm_runtime_service_vblank_hle(
     CPUState *cpu
 )
 {
-    if (!cpu)
+    if (!fm_irq_cpu_enabled(cpu))
     {
         return;
     }
@@ -1298,6 +1362,12 @@ static void fm_runtime_service_vblank_hle(
  * ============================================================
  */
 
+static CPUState *g_frame_wait_cpu;
+void fm_runtime_frame_wait_scope(CPUState *cpu)
+{
+    g_frame_wait_cpu = cpu;
+}
+
 void psx_check_interrupts_at(
     CPUState *cpu,
     uint32_t resume_pc
@@ -1338,6 +1408,15 @@ void psx_check_interrupts_at(
     }
 
 
+    /* B136.52: handle both nested calls and restored loop checkpoints.
+     * Keep the qsort/comparator and the normal VBlank service above. */
+    uint32_t swap_phys=resume_pc & 0x1fffffffu;
+    if ((swap_phys==0x8f6c8u || swap_phys==0x8f6d8u)
+        && fm_sort_swap_try(cpu,swap_phys)) {
+        fm_probe_stop(FM_STOP_BUDGET,cpu->pc);
+        return;
+    }
+
     ++g_probe_checks;
 
 
@@ -1347,6 +1426,11 @@ void psx_check_interrupts_at(
             resume_pc;
     }
 
+
+    /* VBlank was serviced above. Suspend only the designated main probe. */
+    if (cpu && cpu == g_frame_wait_cpu && cpu == g_probe_cpu
+        && fm_frame_wait_pending(cpu, resume_pc))
+        fm_probe_stop(FM_STOP_FRAME_WAIT, resume_pc);
 
     if (
         g_probe_budget != 0
@@ -1369,6 +1453,20 @@ void psx_check_interrupts_dispatch_entry(
 {
     uint32_t phys =
         resume_pc & 0x1FFFFFFFu;
+
+    /* A generated direct call must leave its host stack before handing the
+     * primitive callback to the dispatcher. The guest stack is already valid. */
+    if (g_probe_armed && fm_model_walk_try(cpu, resume_pc)) {
+        fm_probe_stop(FM_STOP_BUDGET, cpu->pc);
+        return;
+    }
+    /* Escape before the native prologue for a direct generated VLC call.
+     * Failed translations are transactional and continue through native code. */
+    if (g_probe_armed && phys == 0x000914A8u && fm_vlc_try(cpu)) {
+        fm_probe_stop(FM_STOP_BUDGET, cpu->pc);
+        return;
+    }
+    fm_media_guest_entry(cpu, phys);
 
 #if FM_PERF_PROFILE
     b13586_text_entry(cpu, phys, 0);
@@ -2705,7 +2803,9 @@ int fm_bios_try_hle(
                     &&
                     g_bios_events[index].spec == 0x00000020u
                     &&
-                    fm_memory_dma4_take_completion() != 0u
+                    fm_irq_cpu_enabled(cpu)
+                    && (fm_memory_i_mask() & 8u)
+                    && fm_memory_dma4_take_completion() != 0u
                 )
                 {
                     g_bios_events[index].ready = 1u;
@@ -4379,7 +4479,7 @@ static void fm_b135_gte_unpack_vertex(
 }
 
 
-static void fm_b135_gte_rtps_one(
+static void fm_geometry_project_uncached(
     CPUState *cpu,
     const int32_t vertex[3],
     int set_mac0,
@@ -4562,11 +4662,42 @@ static void fm_b135_gte_rtps_one(
 }
 
 
+/* B136.63: transform shared vertices once per unchanged geometry context.
+ * The cache never replaces command delivery or the mutable FIFO state. */
+static FMGeometryCache g_geometry_cache;
+void fm_runtime_geometry_cache_stats(uint64_t out[3])
+{
+    if (!out) return;
+    out[0]=g_geometry_cache.hits;out[1]=g_geometry_cache.misses;
+    out[2]=g_geometry_cache.contexts;
+}
+
+static void fm_b135_gte_rtps_one(CPUState *cpu,const int32_t vertex[3],
+    int set_mac0,uint32_t cmd,uint32_t *flags)
+{
+#if FM_GEOMETRY_CACHE
+    FMGeometryProjection *entry=fm_geometry_cache_slot(&g_geometry_cache,
+        vertex,(unsigned)set_mac0);
+    if (fm_geometry_cache_apply(&g_geometry_cache,entry,cpu,vertex,
+        (unsigned)set_mac0,flags)) return;
+    uint32_t local_flags=0;
+    fm_geometry_project_uncached(cpu,vertex,set_mac0,cmd,&local_flags);
+    fm_geometry_cache_store(&g_geometry_cache,entry,cpu,vertex,
+        (unsigned)set_mac0,local_flags);
+    *flags |= local_flags;
+#else
+    fm_geometry_project_uncached(cpu,vertex,set_mac0,cmd,flags);
+#endif
+}
+
 static void fm_b135_gte_rtps(
     CPUState *cpu,
     uint32_t cmd
 )
 {
+#if FM_GEOMETRY_CACHE
+    fm_geometry_cache_prepare(&g_geometry_cache,cpu,cmd);
+#endif
     uint32_t flags = 0u;
     int32_t v0[3];
 
@@ -4596,6 +4727,9 @@ static void fm_b135_gte_rtpt(
     uint32_t cmd
 )
 {
+#if FM_GEOMETRY_CACHE
+    fm_geometry_cache_prepare(&g_geometry_cache,cpu,cmd);
+#endif
     uint32_t flags = 0u;
     int32_t v[3];
 

@@ -1,0 +1,14 @@
+; Affine PS1 screen-space vertices: constant w, no perspective correction.
+.constf constants(0.0, 1.0, -1.0, 0.0)
+.out outpos position
+.out outuv texcoord0
+.out outcolor color
+.alias inpos v0
+.alias inuv v1
+.alias inclr v2
+.proc main
+ mov outpos, inpos
+ mov outuv, inuv
+ mov outcolor, inclr
+ end
+.end

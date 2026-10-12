@@ -17,6 +17,11 @@ void     fm_memory_write_half(uint32_t addr, uint16_t value);
 uint8_t  fm_memory_read_byte(uint32_t addr);
 void     fm_memory_write_byte(uint32_t addr, uint8_t value);
 
+/* B136.16: bounded RAM-only transfers; return zero on invalid spans. */
+int fm_memory_copy_to_ram(uint32_t address, const void *data, size_t size);
+int fm_memory_gpu_send_words(uint32_t address, uint32_t words);
+const uint8_t *fm_memory_ram_span(uint32_t address, size_t size);
+
 /* B136.0: dump exact writes touching startup state words. */
 void fm_memory_watch_dump(const char *path);
 
@@ -26,6 +31,8 @@ uint32_t fm_memory_last_unmapped(void);
 unsigned fm_memory_unmapped_count(void);
 
 void fm_memory_vblank_tick(void);
+uint32_t fm_memory_vblank_begin_timer2(void);
+uint32_t fm_memory_timer2_slice(uint32_t remaining, int split);
 
 uint16_t fm_memory_i_stat(void);
 uint16_t fm_memory_i_mask(void);
@@ -74,6 +81,7 @@ typedef struct FMMemoryQuickState
     uint16_t spu_xfer_data;
     uint16_t spu_ctrl;
     uint16_t spu_stat;
+    uint32_t spu_reverb_mask;
 } FMMemoryQuickState;
 
 void fm_memory_quick_save(FMMemoryQuickState *out);
@@ -116,6 +124,7 @@ typedef struct FMDmaDebugStats
     uint32_t dma2_linked_last_ms;
     uint32_t dma2_linked_max_ms;
     uint64_t dma2_linked_total_ms;
+    uint64_t dma2_payload_us;
     uint32_t dma2_linked_over20;
     uint32_t dma2_linked_over33;
 
@@ -149,3 +158,15 @@ void fm_memory_dma_debug(
 );
 
 void fm_memory_dma4_write_diag(uint32_t out[6]);
+
+void fm_memory_mdec_set_callback(uint32_t callback, uint32_t gp);
+int fm_memory_mdec_take_callback(uint32_t *callback, uint32_t *gp);
+
+/* Functional DMA state omitted by the legacy quick-state. */
+typedef struct FMMemoryAsyncState {
+    uint32_t mdec_dma[2][3], mdec_remaining[2];
+    uint32_t callback, callback_gp, irq_pending, dma4_pending;
+} FMMemoryAsyncState;
+void fm_memory_async_save(FMMemoryAsyncState *out);
+int fm_memory_async_valid(const FMMemoryAsyncState *in);
+void fm_memory_async_load(const FMMemoryAsyncState *in);
