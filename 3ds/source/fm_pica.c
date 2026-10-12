@@ -119,7 +119,7 @@ static Texture *texture(uint16_t page,uint16_t clut)
  C3D_TexFlush(&slot->tex);slot->page=page;slot->clut=clut;slot->valid=1;++texture_uploads;
  return slot;
 }
-static void send(const FMPicaVertex *v)
+static void pica_send_vertex(const FMPicaVertex *v)
 {
  C3D_ImmSendAttrib(v->x/512.0f-1.0f,1.0f-v->y/256.0f,-0.5f,1.0f);
  C3D_ImmSendAttrib(v->u/256.0f,1.0f-v->v/256.0f,0,1);
@@ -147,8 +147,8 @@ int fm_pica_draw(const uint32_t *p,unsigned words,uint16_t page,uint32_t window,
  }else{
   C3D_TexEnvSrc(e,C3D_Both,GPU_PRIMARY_COLOR,0,0);C3D_TexEnvFunc(e,C3D_Both,GPU_REPLACE);
  }
- C3D_ImmDrawBegin(GPU_TRIANGLES);send(&q.vertex[0]);send(&q.vertex[1]);send(&q.vertex[2]);
- if(q.count==4){send(&q.vertex[1]);send(&q.vertex[3]);send(&q.vertex[2]);}
+ C3D_ImmDrawBegin(GPU_TRIANGLES);pica_send_vertex(&q.vertex[0]);pica_send_vertex(&q.vertex[1]);pica_send_vertex(&q.vertex[2]);
+ if(q.count==4){pica_send_vertex(&q.vertex[1]);pica_send_vertex(&q.vertex[3]);pica_send_vertex(&q.vertex[2]);}
  C3D_ImmDrawEnd();
  /* Conservative dirty/dependency bound. Exact coverage is produced by PICA. */
  if(q.left<dx0)dx0=q.left;

@@ -186,7 +186,7 @@ $(BUILD)/fm_pica_shbin.s: $(BUILD)/fm_pica.shbin
 $(BUILD)/fm_pica_shbin.h: $(BUILD)/fm_pica_shbin.s
 	@test -s $@
 $(BUILD)/fm_pica_shbin.o: $(BUILD)/fm_pica_shbin.s
-	$(CC) $(ARCH) -c $< -o $@
+	$(CC) $(ARCH) -x assembler-with-cpp -c $< -o $@
 $(BUILD)/fm_pica.o: $(BUILD)/fm_pica_shbin.h
 
 $(BUILD)/fm_unai.o: source/fm_unai.cpp $(wildcard source/unai/*.h) | $(BUILD)
