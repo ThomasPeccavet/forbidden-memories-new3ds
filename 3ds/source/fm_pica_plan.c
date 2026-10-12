@@ -5,7 +5,7 @@ static void vertex(FMPicaVertex *v,uint32_t xy,uint32_t uv,uint32_t color,int ox
 {v->x=(float)coordinate(xy&65535,ox);v->y=(float)coordinate(xy>>16,oy);
  v->u=(float)(uv&255);v->v=(float)((uv>>8)&255);
  v->r=(float)(color&255)/255;v->g=(float)((color>>8)&255)/255;
- v->b=(float)((color>>16)&255)/255;v->a=1.0f/255;}
+ v->b=(float)((color>>16)&255)/255;v->a=0.5f;}
 int fm_pica_plan(FMPicaPlan *out,const uint32_t *p,unsigned words,uint16_t page,
  uint32_t window,int mask_set,int mask_check,int left,int top,int right,int bottom,int ox,int oy)
 {

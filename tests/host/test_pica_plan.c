@@ -8,6 +8,7 @@ static uint32_t xy(int x,int y){return (uint16_t)x|((uint32_t)(uint16_t)y<<16);}
 static int plan(FMPicaPlan *q,uint32_t *p,unsigned n,uint16_t pg){return fm_pica_plan(q,p,n,pg,0,0,0,0,0,639,255,0,0);}
 int main(void){
  for(unsigned p=0;p<65536;p++)assert(fm_pica_psx(fm_pica_rgba((uint16_t)p,0))==p);
+ assert((fm_pica_rgba(1,1)&255)==128);assert((fm_pica_rgba(0x8000,1)&255)==255);
  assert(fm_pica_rgba(0,1)==0);assert(fm_pica_rgba(0x8000,1)!=0);
  for(unsigned y=0;y<256;y++)for(unsigned x=0;x<256;x++){unsigned i=fm_pica_morton(x,y,256);assert(i<sizeof seen&&!seen[i]);seen[i]=1;}
  /* All 4/8/15-bit texels match independent packed-address calculation,
@@ -27,7 +28,7 @@ int main(void){
   FMPicaPlan q,before;memset(&q,0x5a,sizeof q);before=q;int ok=plan(&q,p,n,0);
   if(op&2){assert(!ok&&!memcmp(&q,&before,sizeof q));continue;}
   if(!ok)fprintf(stderr,"rejected opcode %02x page %08x n=%u\n",op,tx?p[sh?5:4]:0,n);
-  assert(ok&&q.count==count&&q.textured==(int)tx);assert(q.vertex[0].x==10&&q.vertex[0].y==20);
+  assert(ok&&q.count==count&&q.textured==(int)tx);assert(q.vertex[0].x==10&&q.vertex[0].y==20&&q.vertex[0].a==0.5f);
   if(tx)assert(q.page==10&&q.clut==0x1234);
   before=q;assert(!plan(&q,p,n-1,0)&&!memcmp(&q,&before,sizeof q));
  }

@@ -5,6 +5,8 @@
 #define FM_GPU_PICA 0
 #endif
 #if FM_GPU_PICA
+extern int g_fm_pica_enabled;
+static inline int fm_pica_enabled(void){return g_fm_pica_enabled;}
 int fm_pica_init(uint16_t *vram);
 void fm_pica_exit(void);
 /* Finish all queued rasterization before any CPU VRAM observation. */
@@ -15,6 +17,7 @@ int fm_pica_draw(const uint32_t *p,unsigned words,uint16_t page,uint32_t window,
  int mask_set,int mask_check,int left,int top,int right,int bottom,int ox,int oy);
 void fm_pica_status_dump(void);
 #else
+static inline int fm_pica_enabled(void){return 0;}
 static inline int fm_pica_init(uint16_t *vram){(void)vram;return 0;}
 static inline void fm_pica_exit(void){}
 static inline void fm_pica_sync(void){}

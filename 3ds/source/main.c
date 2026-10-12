@@ -7137,7 +7137,7 @@ static void fm_perf_window(uint64_t now, uint32_t frame, uint32_t pre_ms, CPUSta
         /* A single stdio buffer avoids small writes per formatted line. */
         char report_buffer[8192];
         setvbuf(fp, report_buffer, _IOFBF, sizeof(report_buffer));
-        fprintf(fp, "probe=B136.66 window_ms=%llu pc=%08lX script=%04lX\n",
+        fprintf(fp, "probe=B136.67 window_ms=%llu pc=%08lX script=%04lX\n",
             (unsigned long long)elapsed, (unsigned long)(cpu ? cpu->pc : 0u),
             (unsigned long)fm_memory_read_half(0x8009C610u));
         fprintf(fp, "host_fps_x100=%llu new_images_fps_x100=%llu samples=%lu\n",
@@ -11976,7 +11976,7 @@ static void fm_snapshot_status(const char *action,int result,int legacy)
 {
     FILE *f=fopen("sdmc:/3ds/fm-new3ds/snapshot-status.txt","w");
     if (!f) return;
-    fprintf(f,"probe=B136.66 action=%s result=%d format=%s\n"
+    fprintf(f,"probe=B136.67 action=%s result=%d format=%s\n"
         "0=success 1=deferred -7=unsafe_legacy -8=invalid_state\n",
         action,result,legacy ? "v3-partial" : "v4");
     fclose(f);
@@ -12355,7 +12355,7 @@ static int fm_b135_quick_load(
         }
     }
     /* No fallible operations beyond this point: commit all subsystems. */
-    fm_pica_cpu_write();
+    if (fm_pica_enabled()) fm_pica_cpu_write();
     fm_audio_pause(1); fm_cd_hle_reset();
     if(!spu_blob) fm_spu_reset();
     if (legacy) mdec_init();
@@ -12832,7 +12832,7 @@ int main(void)
     fm_audio_init();
     FILE *audio_status=fopen("sdmc:/3ds/fm-new3ds/audio-status.txt","w");
     if(audio_status) {
-        fprintf(audio_status,"probe=B136.66 dsp=%08lX spu=24-voices rate=44100 xa_channel=0 spu_channel=1\n",(unsigned long)(uint32_t)fm_audio_status());
+        fprintf(audio_status,"probe=B136.67 dsp=%08lX spu=24-voices rate=44100 xa_channel=0 spu_channel=1\n",(unsigned long)(uint32_t)fm_audio_status());
         if((uint32_t)fm_audio_status()==0xD880A7FAu) fprintf(audio_status,"missing DSP component: sdmc:/3ds/dspfirm.cdc (or hb:ndsp)\n");
         fclose(audio_status);
     }
@@ -12857,7 +12857,12 @@ int main(void)
         fm_audio_spu_clock(osGetTime(),game_running);
 #if FM_GPU_PICA
         static uint64_t pica_report_ms;
-        if(osGetTime()-pica_report_ms>=2000u){fm_pica_status_dump();pica_report_ms=osGetTime();}
+        static int pica_disabled_reported;
+        if ((fm_pica_enabled() || !pica_disabled_reported)
+            && osGetTime()-pica_report_ms>=2000u) {
+            fm_pica_status_dump();pica_report_ms=osGetTime();
+            pica_disabled_reported=!fm_pica_enabled();
+        }
 #endif
         static uint64_t audio_report_ms;
         if(b105_loop_start_ms-audio_report_ms>=2000u) {
@@ -17524,7 +17529,7 @@ int main(void)
         }
 
 
-        fm_pica_sync(); /* CPU composite/presentation consumes complete VRAM. */
+        if (fm_pica_enabled()) fm_pica_sync(); /* CPU composite/presentation consumes complete VRAM. */
 
         /*
          * ====================================================
@@ -20972,7 +20977,7 @@ int main(void)
                                 }
                         }
                         fprintf(dbg,
-                            "video_probe=B136.66\nvideo_mode=%08lX\n"
+                            "video_probe=B136.67\nvideo_mode=%08lX\n"
                             "video_disabled=%ld\nvideo_has_frame=%lu\n"
                             "video_parser=%lu\nvideo_cmd_have=%lu\nvideo_cmd_need=%lu\n"
                             "video_draw=%ld,%ld,%ld,%ld\nvideo_offset=%ld,%ld\n"
@@ -21040,7 +21045,7 @@ int main(void)
                             int intro_req_valid = intro_req >= 0x80000000u
                                 && intro_req <= 0x801FFFB8u;
                             fprintf(intro_file,
-                                "probe=B136.66\nframe=%lu pc=%08lX ra=%08lX\n"
+                                "probe=B136.67\nframe=%lu pc=%08lX ra=%08lX\n"
                                 "state=%02lX/%02lX/%02lX/%02lX\n"
                                 "cd_flags=%08lX pending=%08lX sync=%02lX cmd=%02lX\n"
                                 "request=%08lX valid=%d\n"

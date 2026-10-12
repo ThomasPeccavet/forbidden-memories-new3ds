@@ -3546,7 +3546,7 @@ static void execute_command(void)
 
 
 #if FM_GPU_PICA
-    if (sw_renderer_scale()==1 && sw_wide_width()==0 && sw_texture_filter()==0
+    if (fm_pica_enabled() && sw_renderer_scale()==1 && sw_wide_width()==0 && sw_texture_filter()==0
         && fm_pica_draw(g_cmd,g_cmd_have,g_texpage,g_texture_window,
             g_mask_set,g_mask_check,g_draw_x1,g_draw_y1,g_draw_x2,g_draw_y2,
             g_offset_x,g_offset_y)) {
@@ -3557,7 +3557,7 @@ static void execute_command(void)
     }
     /* Environment/NOP commands do not touch VRAM. All software drawing,
      * copies, fills and transfers finish the queued GPU work first. */
-    if (opcode>=0x02u && opcode<0xe0u) fm_pica_cpu_write();
+    if (fm_pica_enabled() && opcode>=0x02u && opcode<0xe0u) fm_pica_cpu_write();
 #endif
 
     /* B136.44: independent rendering backend; parser and environment remain
@@ -5452,7 +5452,7 @@ void fm_gpu_init(
  * keeps those coherent without two writes and a dirty call per pixel. */
 void fm_gpu_gp0_words(const uint32_t *words, uint32_t count)
 {
-    if (g_state == FM_GPU_VRAM_WRITE) fm_pica_cpu_write();
+    if (g_state == FM_GPU_VRAM_WRITE) if (fm_pica_enabled()) fm_pica_cpu_write();
     while (count) {
         if (g_state != FM_GPU_VRAM_WRITE || !g_upload_pixels) {
             uint32_t value;
@@ -5498,7 +5498,7 @@ void fm_gpu_gp0_write(
 
     if (g_state == FM_GPU_VRAM_WRITE)
     {
-        fm_pica_cpu_write();
+        if (fm_pica_enabled()) fm_pica_cpu_write();
         ++g_upload_data_words;
 
 
@@ -5738,7 +5738,7 @@ void fm_gpu_gp1_write(
     uint32_t value
 )
 {
-    fm_pica_sync();
+    if (fm_pica_enabled()) fm_pica_sync();
     uint8_t command =
         (
             value
@@ -5942,7 +5942,7 @@ unsigned fm_gpu_display_width(void)
 
 uint32_t fm_gpu_status(void)
 {
-    fm_pica_sync();
+    if (fm_pica_enabled()) fm_pica_sync();
     /*
      * GPU prêt à recevoir commandes et DMA.
      *
@@ -6703,7 +6703,7 @@ void fm_gpu_debug_stats(
     FMGpuDebugStats *out
 )
 {
-    fm_pica_sync();
+    if (fm_pica_enabled()) fm_pica_sync();
     if (!out)
     {
         return;
@@ -7505,7 +7505,7 @@ void fm_gpu_quick_save(
     FMGpuQuickState *out
 )
 {
-    fm_pica_sync();
+    if (fm_pica_enabled()) fm_pica_sync();
     if (!out)
     {
         return;
@@ -7557,7 +7557,7 @@ void fm_gpu_quick_load(
     const FMGpuQuickState *in
 )
 {
-    fm_pica_cpu_write();
+    if (fm_pica_enabled()) fm_pica_cpu_write();
     if (!in)
     {
         return;

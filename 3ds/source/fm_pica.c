@@ -19,6 +19,9 @@ static DVLB_s *dvlb;
 static shaderProgram_s program;
 static uint32_t *seed,*readback;
 static int initialized,attempted,active,target_valid;
+int g_fm_pica_enabled;
+static uint32_t selftest_center,selftest_mirror;
+static unsigned selftest_red_pixels;
 static unsigned commands;
 static int selftest;
 static int dx0,dy0,dx1,dy1;
@@ -44,7 +47,7 @@ void fm_pica_sync(void)
  }
 }
 void fm_pica_cpu_write(void)
-{fm_pica_sync();target_valid=0;invalidate_cache();}
+{if(!initialized)return;fm_pica_sync();target_valid=0;invalidate_cache();}
 void fm_pica_exit(void)
 {
  fm_pica_sync();
@@ -55,7 +58,7 @@ void fm_pica_exit(void)
   linearFree(seed);linearFree(readback);C3D_Fini();
  }
  memset(cache,0,sizeof cache);target=NULL;seed=readback=NULL;dvlb=NULL;
- initialized=attempted=active=target_valid=0;ram=NULL;
+ initialized=attempted=active=target_valid=g_fm_pica_enabled=0;ram=NULL;
 }
 int fm_pica_init(uint16_t *vram)
 {
@@ -75,7 +78,7 @@ int fm_pica_init(uint16_t *vram)
   C3D_TexSetWrap(&cache[i].tex,GPU_REPEAT,GPU_REPEAT);
  }
  if(!run_selftest()){fm_pica_exit();attempted=1;return 0;}
- selftest=1;draws=flushes=uploads=downloads=fallbacks=texture_uploads=feedback=0;
+ selftest=1;g_fm_pica_enabled=1;draws=flushes=uploads=downloads=fallbacks=texture_uploads=feedback=0;
  return 1;
 }
 static int begin(void)
@@ -95,7 +98,7 @@ static int begin(void)
  AttrInfo_AddLoader(a,0,GPU_FLOAT,4);AttrInfo_AddLoader(a,1,GPU_FLOAT,4);AttrInfo_AddLoader(a,2,GPU_FLOAT,4);
  C3D_CullFace(GPU_CULL_NONE);C3D_DepthTest(false,GPU_ALWAYS,GPU_WRITE_COLOR);
  C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_ONE,GPU_ZERO,GPU_ONE,GPU_ZERO);
- C3D_AlphaTest(true,GPU_GREATER,0);
+ C3D_AlphaTest(false,GPU_ALWAYS,0);
  for(unsigned i=0;i<6;i++)C3D_TexEnvInit(C3D_GetTexEnv(i));
  dx0=WIDTH;dy0=HEIGHT;dx1=dy1=-1;commands=0;active=1;return 1;
 }
@@ -143,6 +146,7 @@ int fm_pica_draw(const uint32_t *p,unsigned words,uint16_t page,uint32_t window,
  if(!begin()){++fallbacks;return 0;}
  C3D_SetScissor(GPU_SCISSOR_NORMAL,q.left,HEIGHT-1-q.bottom,q.right+1,HEIGHT-q.top);
  C3D_TexEnv *e=C3D_GetTexEnv(0);C3D_TexEnvInit(e);
+ C3D_AlphaTest(q.textured!=0,GPU_GREATER,0);
  if(q.textured){
   C3D_TexBind(0,&tex->tex);
   C3D_TexEnvSrc(e,C3D_RGB,GPU_TEXTURE0,GPU_PRIMARY_COLOR,0);
@@ -171,6 +175,9 @@ static int run_selftest(void)
  uint32_t p[]={0x600000ffu,16u|(16u<<16),8u|(8u<<16)};
  int ok=fm_pica_draw(p,3,0,0,0,0,16,16,23,23,0,0);
  fm_pica_sync();
+ selftest_center=readback[20*WIDTH+20];
+ selftest_mirror=readback[(HEIGHT-1-20)*WIDTH+20];
+ for(unsigned i=0;i<WIDTH*HEIGHT;i++)if((readback[i]&0xffffff00u)==0xff000000u)++selftest_red_pixels;
  for(unsigned y=0;y<8;y++)for(unsigned x=0;x<8;x++)
   if(ram[(16+y)*WIDTH+16+x]!=31u)ok=0;
  for(unsigned y=0;y<8;y++)memcpy(ram+(16+y)*WIDTH+16,saved+y*8,16);
@@ -179,10 +186,11 @@ static int run_selftest(void)
 void fm_pica_status_dump(void)
 {
  FILE *f=fopen("sdmc:/3ds/fm-new3ds/pica-status.txt","w");if(!f)return;
- fprintf(f,"probe=B136.66 renderer=pica200-experiment initialized=%d selftest=%d\n"
+ fprintf(f,"probe=B136.67 renderer=pica200-experiment initialized=%d selftest=%d\n"
   "draws=%llu fallback=%llu batches=%llu texture_uploads=%llu feedback_barriers=%llu\n"
-  "seed_bytes=%llu readback_bytes=%llu\n",initialized,selftest,
+  "seed_bytes=%llu readback_bytes=%llu\nselftest_center=%08lX mirror=%08lX red_pixels=%u\n",initialized,selftest,
   (unsigned long long)draws,(unsigned long long)fallbacks,(unsigned long long)flushes,
   (unsigned long long)texture_uploads,(unsigned long long)feedback,
-  (unsigned long long)uploads,(unsigned long long)downloads);fclose(f);
+  (unsigned long long)uploads,(unsigned long long)downloads,
+  (unsigned long)selftest_center,(unsigned long)selftest_mirror,selftest_red_pixels);fclose(f);
 }

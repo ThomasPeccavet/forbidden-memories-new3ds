@@ -1,3 +1,4 @@
+static int fm_pica_enabled(void) { return 0; }
 static void fm_pica_cpu_write(void) {}
 #include <assert.h>
 #include <stdint.h>
