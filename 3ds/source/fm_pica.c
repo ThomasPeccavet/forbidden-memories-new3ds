@@ -22,6 +22,8 @@ static int initialized,attempted,active,target_valid;
 int g_fm_pica_enabled;
 static uint32_t selftest_center,selftest_mirror;
 static unsigned selftest_red_pixels;
+static uint32_t selftest_seed_top,selftest_seed_bottom;
+static int selftest_seed_ok;
 static unsigned commands;
 static int selftest;
 static int dx0,dy0,dx1,dy1;
@@ -34,10 +36,10 @@ void fm_pica_sync(void)
 {
  if(!active)return;
  C3D_FrameEnd(GX_CMDLIST_FLUSH);C3D_FrameSync();active=0;commands=0;++flushes;invalidate_cache();
- /* Untile into linear RGBA8, flip framebuffer's bottom-up origin. GPU finish
+ /* Untile into top-down CPU RGBA8 without a second vertical flip. GPU finish
   * and cache invalidate precede every CPU read; no texture/vertex reuse race. */
  C3D_SyncDisplayTransfer((u32*)target->frameBuf.colorBuf,GX_BUFFER_DIM(WIDTH,HEIGHT),
-  readback,GX_BUFFER_DIM(WIDTH,HEIGHT),GX_TRANSFER_FLIP_VERT(1)|GX_TRANSFER_OUT_TILED(0)
+  readback,GX_BUFFER_DIM(WIDTH,HEIGHT),GX_TRANSFER_FLIP_VERT(0)|GX_TRANSFER_OUT_TILED(0)
   |GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8)|GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8)
   |GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
  GSPGPU_InvalidateDataCache(readback,IMAGE_BYTES);downloads+=IMAGE_BYTES;
@@ -86,7 +88,7 @@ static int begin(void)
  if(active)return 1;
  if(!target_valid){
   for(unsigned y=0;y<HEIGHT;y++)for(unsigned x=0;x<WIDTH;x++)
-   seed[fm_pica_morton(x,HEIGHT-1-y,WIDTH)]=fm_pica_rgba(ram[y*WIDTH+x],0);
+   seed[fm_pica_morton(x,y,WIDTH)]=fm_pica_rgba(ram[y*WIDTH+x],0);
   GSPGPU_FlushDataCache(seed,IMAGE_BYTES);
   C3D_SyncTextureCopy(seed,0,(u32*)target->frameBuf.colorBuf,0,IMAGE_BYTES,8);
   uploads+=IMAGE_BYTES;target_valid=1;
@@ -172,25 +174,36 @@ static int run_selftest(void)
 {
  uint16_t saved[64];
  for(unsigned y=0;y<8;y++)memcpy(saved+y*8,ram+(16+y)*WIDTH+16,16);
+ /* Asymmetric seed markers verify upload/untile row order independently of
+  * the shader draw, including RGB555 bit15. Both CPU words are restored. */
+ const unsigned upper=91u*WIDTH+7u,lower=433u*WIDTH+1001u;
+ uint16_t old_upper=ram[upper],old_lower=ram[lower];
+ ram[upper]=0x8352u;ram[lower]=0x24adu;
  uint32_t p[]={0x600000ffu,16u|(16u<<16),8u|(8u<<16)};
  int ok=fm_pica_draw(p,3,0,0,0,0,16,16,23,23,0,0);
  fm_pica_sync();
  selftest_center=readback[20*WIDTH+20];
  selftest_mirror=readback[(HEIGHT-1-20)*WIDTH+20];
+ selftest_seed_top=readback[upper];selftest_seed_bottom=readback[lower];
+ selftest_seed_ok=fm_pica_psx(selftest_seed_top)==0x8352u
+     && fm_pica_psx(selftest_seed_bottom)==0x24adu;
+ if(!selftest_seed_ok)ok=0;
  for(unsigned i=0;i<WIDTH*HEIGHT;i++)if((readback[i]&0xffffff00u)==0xff000000u)++selftest_red_pixels;
  for(unsigned y=0;y<8;y++)for(unsigned x=0;x<8;x++)
   if(ram[(16+y)*WIDTH+16+x]!=31u)ok=0;
  for(unsigned y=0;y<8;y++)memcpy(ram+(16+y)*WIDTH+16,saved+y*8,16);
+ ram[upper]=old_upper;ram[lower]=old_lower;
  target_valid=0;invalidate_cache();return ok;
 }
 void fm_pica_status_dump(void)
 {
  FILE *f=fopen("sdmc:/3ds/fm-new3ds/pica-status.txt","w");if(!f)return;
- fprintf(f,"probe=B136.67 renderer=pica200-experiment initialized=%d selftest=%d\n"
+ fprintf(f,"probe=B136.68 renderer=pica200-experiment initialized=%d selftest=%d\n"
   "draws=%llu fallback=%llu batches=%llu texture_uploads=%llu feedback_barriers=%llu\n"
-  "seed_bytes=%llu readback_bytes=%llu\nselftest_center=%08lX mirror=%08lX red_pixels=%u\n",initialized,selftest,
+  "seed_bytes=%llu readback_bytes=%llu\nselftest_center=%08lX mirror=%08lX red_pixels=%u\nseed_top=%08lX seed_bottom=%08lX seed_ok=%d\n",initialized,selftest,
   (unsigned long long)draws,(unsigned long long)fallbacks,(unsigned long long)flushes,
   (unsigned long long)texture_uploads,(unsigned long long)feedback,
   (unsigned long long)uploads,(unsigned long long)downloads,
-  (unsigned long)selftest_center,(unsigned long)selftest_mirror,selftest_red_pixels);fclose(f);
+  (unsigned long)selftest_center,(unsigned long)selftest_mirror,selftest_red_pixels,
+  (unsigned long)selftest_seed_top,(unsigned long)selftest_seed_bottom,selftest_seed_ok);fclose(f);
 }
